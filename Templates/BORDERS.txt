@@ -1,0 +1,19 @@
+\\This is a list of all the borders that can be used 
+\\These all require the image to be resized
+border_BackToSchool
+border_Beach
+border_Circles
+border_Filmstrip
+border_FunGrunge
+border_Geometric
+border_Monsters
+border_PhotoCorners
+border_SmileBeautiful
+border_SmileGood
+border_SmileGroovy
+border_SmileJourney
+border_TexturedFrame
+\\These images do not need to be resized
+border_Vignette
+border_NameAll
+border_Grad

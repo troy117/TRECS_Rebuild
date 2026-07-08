@@ -1,0 +1,13 @@
+//These are the settings for the button, if you do not want to use the field	set the values to 0
+//Button template must be 1200x1800 saved as	QRcode.png
+//To center the font,	set start X as the middle position of text, text color must be lower case
+Top Image X:	200
+Top Image Y:	160
+Image Width:	780
+Name Center (Y/N):	Y
+Name Start X:	600
+Name Bottom Y:	1200
+Name Max Width:	800
+Name Size:	50
+Name Color:	black
+Name Font:	Myriad Pro

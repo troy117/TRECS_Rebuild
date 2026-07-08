@@ -1,0 +1,22 @@
+\\This is a list of all the items that require an order prep.  
+\\Anything on this list will be pulled out into a folder with a text file.
+\\The text file will list all the actions on the image that need to be done.
+\\MemoryMate and Retouching are automatically pulled out into their own folder.
+\\Borders
+border_BackToSchool
+border_Beach
+border_Circles
+border_Filmstrip
+border_FunGrunge
+border_Geometric
+border_Grad
+border_Monsters
+border_PhotoCorners
+border_SmileBeautiful
+border_SmileGood
+border_SmileGroovy
+border_SmileJourney
+border_TexturedFrame
+border_Vignette
+border_NameAll
+

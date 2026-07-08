@@ -1,0 +1,38 @@
+# Dependencies and generated app output
+node_modules/
+trecs-js/node_modules/
+dist/
+build/
+out/
+
+# Java/Eclipse build output
+bin/
+*.class
+
+# Local databases and production data
+*.accdb
+*.mdb
+*.sqlite
+*.sqlite3
+*.db
+ProgramData.accdb
+Student_Export.csv
+LoginExempt.txt
+JOBS/
+TrecsHotFolder/
+
+# Generated/imported prototype data
+database/*prototype*.db
+database/*prototype*.sqlite
+database/*_import.sql
+
+# Render/generated exports
+exports/
+AdminItems/
+
+# Local machine files
+.env
+.env.*
+*.log
+Thumbs.db
+Desktop.ini

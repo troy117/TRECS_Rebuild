@@ -1,0 +1,49 @@
+\\This is a list of all the addons that need to be rendered 
+\\Anything on this list will be pulled out into a folder with a text file.
+\\The text file will list all the actions on the image that need to be done.
+SpringArtPrint
+10x13TouchofBlue
+FunpackSports
+FunpackSpring
+FunpackBeach
+FunpackBackToSchool
+FunpackTieDye
+FunpackMoments
+FunpackMarble
+FunpackCalifornia
+FunpackRockStar
+FunpackDinosaur
+SportsMagnets
+MagnetsGrad2
+MagnetsSpring
+Magnets4Spring
+MagnetsBeach
+MagnetsMarble
+MagnetsCalifornia
+MagnetsGrad4
+MagnetsDinosaur
+MagnetsBackToSchool
+MagnetsTieDye
+MagnetsMoments
+MagnetsRockStar
+MagnetsSenior
+KeychainSports
+KeychainSpring
+KeychainBeach
+KeychainTieDye
+KeychainMarble
+KeychainGrad
+KeychainsGrad
+KeychainDinosaur
+KeychainCalifornia
+KeychainMoments
+KeychainRockStar
+KeychainBackToSchool
+KeychainSenior
+TradingCards
+MiniPoster
+Notecards
+SpringColorMe
+Announcements12
+5X7 MAGNETS
+Magnets2

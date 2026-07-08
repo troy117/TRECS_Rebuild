@@ -1,0 +1,25 @@
+//These are the settings for the CDs, if you do not want to use the field	set the values to 0
+//CD Envelope template must be 1470,1920 saved as	CDEnvelope.jpg
+//To center the font,	set start X as the middle position of text, text color must be lower case
+Name Center (Y/N):	Y
+Name Proper (Y/N):	N
+Name Start X:	735
+Name Bottom Y:	840
+Name Max Width:	1060
+Name Size:	70
+Name Color:	black
+Name Font:	Myriad Pro
+School Center (Y/N):	Y
+School Start X:	735
+School Bottom Y:	920
+School Max Width:	1000
+School Size:	50
+School Color:	black
+School Font:	Myriad Pro
+Homeroom Center (Y/N):	Y
+Homeroom Start X:	735
+Homeroom Bottom Y:	970
+Homeroom Max Width:	1000
+Homeroom Size:	40
+Homeroom Color:	black
+Homeroom Font:	Myriad Pro

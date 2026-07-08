@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER">
+		<attributes>
+			<attribute name="module" value="true"/>
+		</attributes>
+	</classpathentry>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="lib" path="JARS/barcode.jar"/>
+	<classpathentry kind="lib" path="JARS/commons-io-2.4.jar"/>
+	<classpathentry kind="lib" path="JARS/commons-io-2.8.0.jar"/>
+	<classpathentry kind="lib" path="JARS/commons-lang-2.6.jar"/>
+	<classpathentry kind="lib" path="JARS/commons-lang3-3.11.jar"/>
+	<classpathentry kind="lib" path="JARS/commons-logging-1.2.jar"/>
+	<classpathentry kind="lib" path="JARS/jackcess-2.1.1.jar"/>
+	<classpathentry kind="lib" path="JARS/jackcess-4.0.0.jar"/>
+	<classpathentry kind="lib" path="JARS/poi-3.12-20150511.jar"/>
+	<classpathentry kind="lib" path="JARS/poi-ooxml-3.12-20150511.jar"/>
+	<classpathentry kind="lib" path="JARS/poi-ooxml-schemas-3.12-20150511.jar"/>
+	<classpathentry kind="lib" path="JARS/qrgen-1.0.jar"/>
+	<classpathentry kind="lib" path="JARS/xbean.jar"/>
+	<classpathentry kind="lib" path="JARS/zxing-core-1.7.jar"/>
+	<classpathentry kind="lib" path="JARS/zxing-j2se-1.7.jar"/>
+	<classpathentry kind="lib" path="com.miglayout.swing_11.3.0.jar"/>
+	<classpathentry kind="lib" path="com.miglayout.core_11.3.0.jar"/>
+	<classpathentry kind="lib" path="C:/Users/troy1/workspace/TRECS_V7/JARS/json-20210307.jar"/>
+	<classpathentry kind="output" path="bin"/>
+</classpath>

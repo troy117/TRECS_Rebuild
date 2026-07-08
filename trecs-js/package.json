@@ -1,0 +1,19 @@
+{
+  "name": "trecs-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TRECS JavaScript rebuild prototype",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
+    "check": "node scripts/check-files.js",
+    "check:db": "node scripts/check-db.js",
+    "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.1"
+  }
+}

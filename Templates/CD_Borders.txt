@@ -1,0 +1,6 @@
+\\This is a list of all the borders that will be pulled for CD and Zip
+border_PhotoCorners
+border_TexturedFrame
+border_Vignette
+border_NameAll
+border_FunGrunge

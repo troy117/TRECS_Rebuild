@@ -1,0 +1,17 @@
+\\This is the default package plan
+\\It is tab delimited
+\\First number is the code number
+\\Second is the name of the package displayed on the label
+\\Third is optional, it is the one item that is associated with the code
+1	PkgA	
+2	PkgB	
+3	PkgC	
+4	PkgD	
+5	PkgE	
+6	PkgF	
+7	PkgG	
+8	PkgH	
+9	PkgI	
+10	PkgJ	
+11	PkgK	
+12	PkgM	

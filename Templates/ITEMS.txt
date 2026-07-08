@@ -1,0 +1,113 @@
+\\This is the list of items available to purchase
+\\Do not remove any of the unit items!
+8x10
+2-8x10
+3-8x10
+2-5x7
+4-5x7
+6-5x7
+4-3x5
+8-3x5
+4 Wallets
+8 Wallets
+16 Wallets
+24 Wallets
+32 Wallets
+16 Mini
+2-3x5
+2-3x5 & 5x7
+4 Wall & 5x7
+4 Wall & 2-4x5
+4 Wall & 2-3x5
+8 Mini & 2-4x5
+8 Mini & 2-3x5
+6-3x5 & 12 Wallets
+3-5x7 & 12 Wallets
+10x13 MiniPoster
+\\These are all the possible borders
+border_LightVignette
+border_PhotoCorners
+border_FunGrunge
+border_TexturedFrame
+border_Vignette
+border_NameAll
+border_Grad
+\\All the addon Items are listed below, add or remove at your discression
+\\The block under here is for AddonPrep------------------------
+Announcements12
+FunpackSports
+FunpackSpring
+FunpackFilmstrip
+FunpackBackToSchool
+FunpackBeach
+FunpackCircles
+FunpackGeometric
+FunpackMonsters
+MagnetsSports
+MagnetsSpring
+MagnetsGrad2
+MagnetsGrad4
+MagnetsFilmstrip
+MagnetsGeometric
+MagnetsMonsters
+MagnetsBackToSchool
+MagnetsBeach
+MagnetsCircles
+KeychainSports
+KeychainSpring
+KeychainFilmstrip
+KeychainGeometric
+KeychainMonsters
+KeychainBeach
+KeychainCircles
+KeychainsGrad
+KeychainBackToSchool
+TradingCards
+10x13 MiniPoster
+\\End AddonPrep--------------------------------------------------
+Bonus
+Zip
+CD
+\\Anything Below this has not been tested...
+Announcements12
+Announcements24
+Art Print
+BagTag
+Buddy
+BuildYourOwn
+Button
+Calendar
+ClassPhoto
+ComboSpecial
+ColorPage
+Dad's Package
+DigitalDownload
+ExtraID
+Funpack
+Keychain
+Magnet
+Magnets
+Magnets2
+Magazine
+Mom's Package
+Group5x7
+Group8x10
+MemoryMate
+MetalPrint
+Mousepad
+Mug
+NameAll
+NameWallet
+Name&YearWallet
+Notecards
+Notecards2
+Plaque
+Retouching
+Second Look
+Smile Collection
+Smile Magnets
+StarClassPhoto
+TCOE Pkg
+ToteBag
+TradingCards
+Waterbottle

@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TRECS</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">T</div>
+          <div>
+            <strong>TRECS</strong>
+            <span>Production</span>
+          </div>
+        </div>
+        <nav>
+          <button class="active" data-view-button="dashboard">Dashboard</button>
+          <button data-view-button="jobs">Jobs</button>
+          <button data-view-target="jobs" data-job-tab-target="orders">Orders</button>
+          <button data-view-target="jobs" data-job-tab-target="capture">Capture</button>
+          <button data-view-target="jobs" data-job-tab-target="products">Products</button>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h1>Dashboard</h1>
+            <p id="databasePath"></p>
+          </div>
+          <button class="primary" data-view-target="jobs">Open Job</button>
+        </header>
+
+        <section id="dashboardView" class="view active-view">
+          <section class="metric-grid" id="metricGrid" aria-label="Prototype counts">
+            <article>
+              <span>Status</span>
+              <strong>Loading</strong>
+            </article>
+          </section>
+
+          <section class="work-area">
+            <div class="panel">
+              <div class="panel-heading">
+                <h2>Active Jobs</h2>
+                <button data-view-target="jobs">View Jobs</button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Location</th>
+                    <th>Job</th>
+                    <th>Type</th>
+                    <th>Package Plan</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="jobsTableBody"></tbody>
+              </table>
+            </div>
+
+            <div class="panel narrow">
+              <div class="panel-heading">
+                <h2>Migration</h2>
+              </div>
+              <dl id="migrationList"></dl>
+            </div>
+          </section>
+        </section>
+
+        <section id="jobsView" class="view">
+          <section class="jobs-toolbar">
+            <div class="segmented" id="jobTypeFilters"></div>
+            <div class="toolbar-actions">
+              <label class="search-box">
+                <span>Search</span>
+                <input id="jobSearchInput" type="search" placeholder="Location or job">
+              </label>
+              <button id="newSchoolButton">New School</button>
+              <button class="primary" id="newJobButton">New Job</button>
+            </div>
+          </section>
+
+          <section class="panel setup-panel" id="newSchoolPanel" hidden>
+            <div class="panel-heading">
+              <h2>Add School</h2>
+              <button id="cancelNewSchoolButton">Cancel</button>
+            </div>
+            <form id="newSchoolForm" class="setup-form">
+              <label>
+                <span>School Name</span>
+                <input name="displayName" required placeholder="Sierra Charter School">
+              </label>
+              <label>
+                <span>Folder Name</span>
+                <input name="trecsName" placeholder="Leave blank to use school name">
+              </label>
+              <label>
+                <span>Reference</span>
+                <input name="referenceNumber">
+              </label>
+              <label>
+                <span>Phone</span>
+                <input name="phone">
+              </label>
+              <label>
+                <span>Address</span>
+                <input name="address">
+              </label>
+              <label>
+                <span>City</span>
+                <input name="city">
+              </label>
+              <label>
+                <span>State</span>
+                <input name="state">
+              </label>
+              <label>
+                <span>Zip</span>
+                <input name="zip">
+              </label>
+              <label class="wide-field">
+                <span>Notes</span>
+                <textarea name="notes" rows="3"></textarea>
+              </label>
+              <div class="form-actions wide-field">
+                <span id="newSchoolStatus"></span>
+                <button class="primary" type="submit">Add School</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel new-job-panel" id="newJobPanel" hidden>
+            <div class="panel-heading">
+              <h2>Create Job</h2>
+              <button id="cancelNewJobButton">Cancel</button>
+            </div>
+            <form id="newJobForm" class="new-job-form">
+              <label>
+                <span>School / Client</span>
+                <select name="clientId" required></select>
+              </label>
+              <label>
+                <span>Job Name</span>
+                <input name="name" required placeholder="Fall 2026">
+              </label>
+              <label>
+                <span>Type</span>
+                <select name="type">
+                  <option value="fall">Fall</option>
+                  <option value="spring">Spring</option>
+                  <option value="sports">Sports</option>
+                  <option value="seniors">Seniors</option>
+                  <option value="event">Event</option>
+                  <option value="qr_event">QR Event</option>
+                  <option value="league">League</option>
+                </select>
+              </label>
+              <label>
+                <span>Package Plan</span>
+                <select name="packagePlanId"></select>
+              </label>
+              <label>
+                <span>Shoot Date</span>
+                <input name="shootDate" type="date">
+              </label>
+              <label>
+                <span>Retake Date</span>
+                <input name="retakeDate" type="date">
+              </label>
+              <label class="wide-field">
+                <span>Root Path</span>
+                <input name="rootPath" placeholder="Leave blank for JOBS\\SCHOOL\\JOB">
+              </label>
+              <label class="wide-field">
+                <span>Notes</span>
+                <textarea name="notes" rows="3"></textarea>
+              </label>
+              <div class="form-actions wide-field">
+                <span id="newJobStatus"></span>
+                <button class="primary" type="submit">Create Job</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="jobs-layout">
+            <div class="panel">
+              <div class="panel-heading">
+                <h2>Jobs</h2>
+                <span id="jobsCountLabel"></span>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th><button class="table-sort" data-job-sort="location" type="button">Location</button></th>
+                    <th><button class="table-sort" data-job-sort="job" type="button">Job</button></th>
+                    <th><button class="table-sort" data-job-sort="type" type="button">Type</button></th>
+                    <th>Subjects</th>
+                    <th>Orders</th>
+                    <th>Images</th>
+                  </tr>
+                </thead>
+                <tbody id="jobsScreenTableBody"></tbody>
+              </table>
+            </div>
+
+            <aside class="panel job-detail" id="jobDetailPanel">
+              <div class="panel-heading">
+                <h2>Job Detail</h2>
+              </div>
+              <div class="empty-state">Select a job</div>
+            </aside>
+          </section>
+
+          <section class="panel job-workflow" id="jobWorkflowPanel" hidden>
+            <div class="panel-heading">
+              <h2>Workflow</h2>
+              <div class="tabs" id="jobWorkflowTabs">
+                <button class="active" data-job-tab="subjects">Subjects</button>
+                <button data-job-tab="orders">Orders</button>
+                <button data-job-tab="capture">Capture</button>
+                <button data-job-tab="images">Images</button>
+                <button data-job-tab="products">Products</button>
+              </div>
+            </div>
+            <div id="jobWorkflowContent" class="workflow-content">
+              <div class="empty-state">Select a job to view workflow data.</div>
+            </div>
+          </section>
+
+          <section class="job-student-workspace" id="jobStudentWorkspace" hidden>
+            <div class="workspace-header">
+              <div>
+                <button id="backToJobsButton" type="button">Back to Jobs</button>
+                <h2 id="workspaceJobTitle">Job</h2>
+                <p id="workspaceJobMeta"></p>
+              </div>
+              <div class="workspace-actions">
+                <button class="active" id="workspaceStudentsButton" type="button">Students</button>
+                <button id="workspaceAdminItemsButton" type="button">Admin Items</button>
+                <button id="workspaceAddBlankButton" type="button">Add Records</button>
+                <button id="workspaceEditStudentButton" type="button">Edit Student</button>
+                <button id="workspacePreviousButton" type="button">Previous</button>
+                <button id="workspaceNextButton" type="button">Next</button>
+              </div>
+            </div>
+
+            <div class="student-workspace-grid">
+              <aside class="panel student-list-panel">
+                <div class="panel-heading">
+                  <h2>Students</h2>
+                  <span id="workspaceStudentCount"></span>
+                </div>
+                <label class="workspace-search">
+                  <span>Search</span>
+                  <input id="workspaceStudentSearch" type="search" placeholder="Ref, name, ID, grade, homeroom">
+                </label>
+                <div id="workspaceStudentList" class="workspace-student-list"></div>
+              </aside>
+
+              <section class="panel current-student-panel">
+                <div id="workspaceStudentDetail"></div>
+              </section>
+
+              <aside class="panel student-orders-panel">
+                <div id="workspaceOrderDetail"></div>
+              </aside>
+            </div>
+
+            <section class="admin-items-workspace" id="adminItemsWorkspace" hidden>
+              <section class="panel admin-items-main">
+                <div class="panel-heading">
+                  <h2>Admin Items</h2>
+                  <span id="adminItemsStatus"></span>
+                </div>
+                <form class="admin-options" id="adminOptionsForm">
+                  <label>
+                    <span>Shoot Stage</span>
+                    <select name="stage">
+                      <option value="original_picture_day">Original Picture Day</option>
+                      <option value="makeup_day">Makeup Day</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Directory Sort</span>
+                    <select name="sortBy">
+                      <option value="grade">Grade</option>
+                      <option value="homeroom">Homeroom</option>
+                      <option value="track">Track</option>
+                      <option value="name">Name</option>
+                      <option value="ref">Reference</option>
+                    </select>
+                  </label>
+                </form>
+                <div id="adminItemsList" class="admin-items-list"></div>
+              </section>
+
+              <aside class="panel admin-items-history">
+                <div class="panel-heading">
+                  <h2>Output History</h2>
+                  <span id="adminItemsHistoryCount"></span>
+                </div>
+                <div id="adminItemsHistory"></div>
+              </aside>
+            </section>
+
+            <div class="modal-backdrop" id="addRecordsModal" hidden>
+              <form class="modal-card" id="addRecordsForm">
+                <div class="modal-heading">
+                  <h2>Add Blank Records</h2>
+                  <button id="cancelAddRecordsButton" type="button">Cancel</button>
+                </div>
+                <label>
+                  <span>How many records?</span>
+                  <input name="recordCount" type="number" min="1" max="500" value="1" required>
+                </label>
+                <p id="addRecordsStatus"></p>
+                <div class="form-actions">
+                  <span>Reference numbers will continue from the largest current ref.</span>
+                  <button class="primary" type="submit">Add Records</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
