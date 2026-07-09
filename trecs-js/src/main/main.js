@@ -5055,16 +5055,44 @@ function fileIsStable(filePath, minAgeMs = 900) {
   return stats.isFile() && stats.size > 0 && Date.now() - stats.mtimeMs >= minAgeMs;
 }
 
-function latestCapturePairInFolder(folderPath) {
+function normalizeCaptureFileMode(value) {
+  return value === 'jpg_only' ? 'jpg_only' : 'jpg_raw';
+}
+
+function latestCapturePairInFolder(folderPath, options = {}) {
+  const fileMode = normalizeCaptureFileMode(options.fileMode);
   const imagePath = latestImageInFolder(folderPath);
-  const rawPath = rawPairPathForImage(imagePath);
+  const rawPath = fileMode === 'jpg_only' ? null : rawPairPathForImage(imagePath);
   const filename = path.basename(imagePath);
+
+  if (fileMode === 'jpg_only') {
+    if (!fileIsStable(imagePath)) {
+      return {
+        imagePath,
+        rawPath: null,
+        filename,
+        fileMode,
+        ready: false,
+        reason: `Waiting for ${filename} to finish transferring`
+      };
+    }
+
+    return {
+      imagePath,
+      rawPath: null,
+      filename,
+      fileMode,
+      ready: true,
+      reason: 'Ready'
+    };
+  }
 
   if (!rawPath) {
     return {
       imagePath,
       rawPath: null,
       filename,
+      fileMode,
       ready: false,
       reason: `Waiting for CR3 pair for ${filename}`
     };
@@ -5075,6 +5103,7 @@ function latestCapturePairInFolder(folderPath) {
       imagePath,
       rawPath,
       filename,
+      fileMode,
       ready: false,
       reason: `Waiting for ${filename} and ${path.basename(rawPath)} to finish transferring`
     };
@@ -5084,6 +5113,7 @@ function latestCapturePairInFolder(folderPath) {
     imagePath,
     rawPath,
     filename,
+    fileMode,
     ready: true,
     reason: 'Ready'
   };
@@ -5756,10 +5786,10 @@ function closeCaptureWatcher(webContentsId) {
   captureWatchers.delete(webContentsId);
 }
 
-async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourcePath = null, explicitRawPath = null) {
+async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourcePath = null, explicitRawPath = null, options = {}) {
   const pair = explicitSourcePath
     ? { imagePath: explicitSourcePath, rawPath: explicitRawPath, ready: true }
-    : latestCapturePairInFolder(hotFolder);
+    : latestCapturePairInFolder(hotFolder, options);
   if (!pair.ready) {
     throw new Error(pair.reason || 'Waiting for complete capture pair');
   }
@@ -5934,9 +5964,10 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
   return result;
 }
 
-async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
+async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = {}) {
   const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
+  const fileMode = normalizeCaptureFileMode(options.fileMode);
   const hotFolder = resolveWorkspacePath('CaptureHotFolder');
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
@@ -5953,6 +5984,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
     importing: false,
     lastImportAt: 0,
     lastSourcePath: null,
+    fileMode,
     watcher: null
   };
 
@@ -5967,14 +5999,15 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
       }
       watcherState.importing = true;
       try {
-        const pair = latestCapturePairInFolder(hotFolder);
+        const pair = latestCapturePairInFolder(hotFolder, { fileMode: watcherState.fileMode });
         if (!pair.ready) {
           if (!event.sender.isDestroyed()) {
             event.sender.send('capture:image-imported', {
               status: {
                 ready: false,
                 message: pair.reason || 'Waiting for capture pair',
-                filename: pair.filename || ''
+                filename: pair.filename || '',
+                fileMode: watcherState.fileMode
               }
             });
           }
@@ -5985,7 +6018,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
         if (watcherState.lastSourcePath === sourcePath) {
           return;
         }
-        const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath);
+        const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
+          fileMode: watcherState.fileMode
+        });
         watcherState.lastSourcePath = sourcePath;
         watcherState.lastImportAt = Date.now();
         if (!event.sender.isDestroyed()) {
@@ -5994,7 +6029,8 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
             status: {
               ready: true,
               message: 'Ready',
-              filename: result.image.filename
+              filename: result.image.filename,
+              fileMode: watcherState.fileMode
             }
           });
         }
@@ -6035,7 +6071,8 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue) {
   return {
     jobId,
     subjectId,
-    hotFolder
+    hotFolder,
+    fileMode
   };
 }
 

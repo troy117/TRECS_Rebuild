@@ -1028,6 +1028,25 @@ dd {
   position: relative;
 }
 
+.capture-mode-control {
+  display: grid;
+  gap: 6px;
+}
+
+.capture-mode-control > span {
+  color: #617488;
+  display: block;
+  font-size: 12px;
+}
+
+.capture-mode-control .segmented {
+  flex-wrap: nowrap;
+}
+
+.capture-mode-control .segmented button {
+  flex: 1;
+}
+
 .student-search-results {
   background: #fff;
   border: 1px solid #cbd5df;

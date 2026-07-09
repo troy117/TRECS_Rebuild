@@ -43,6 +43,7 @@ const captureSubjectDetail = document.getElementById('captureSubjectDetail');
 const captureCompareGrid = document.getElementById('captureCompareGrid');
 const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
+const captureFileModeToggle = document.getElementById('captureFileModeToggle');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -131,6 +132,7 @@ let jobsState = {
   captureSearchResults: [],
   captureSearchActiveIndex: -1,
   captureSearchTimer: null,
+  captureFileMode: 'jpg_raw',
   envelopeSubject: null,
   envelopeScan: null,
   envelopePending: null,
@@ -1363,6 +1365,7 @@ function renderCaptureWorkspace() {
   title.textContent = `${job.job} Image Capture`;
   workspaceJobTitle.textContent = `${job.location} / ${job.job}`;
   workspaceJobMeta.textContent = `${formatType(job.type)} / Image capture`;
+  renderCaptureFileModeToggle();
   renderCaptureSubject();
   loadCaptureImages();
 
@@ -1370,6 +1373,40 @@ function renderCaptureWorkspace() {
     captureEntryForm.elements.barcode.focus();
     captureEntryForm.elements.barcode.select();
   }, 0);
+}
+
+function captureFileModeLabel(mode = jobsState.captureFileMode) {
+  return mode === 'jpg_only' ? 'JPG Only' : 'JPG + CR3';
+}
+
+function renderCaptureFileModeToggle() {
+  if (!captureFileModeToggle) {
+    return;
+  }
+
+  captureFileModeToggle.querySelectorAll('[data-capture-file-mode]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.captureFileMode === jobsState.captureFileMode);
+  });
+}
+
+async function setCaptureFileMode(fileMode) {
+  const nextMode = fileMode === 'jpg_only' ? 'jpg_only' : 'jpg_raw';
+  if (jobsState.captureFileMode === nextMode) {
+    return;
+  }
+
+  jobsState.captureFileMode = nextMode;
+  renderCaptureFileModeToggle();
+  setCapturePairStatus({ ready: true, message: `Ready (${captureFileModeLabel()})` });
+
+  if (jobsState.captureSubject) {
+    try {
+      await startCaptureWatcherForCurrentSubject();
+    } catch (error) {
+      captureEntryStatus.textContent = error.message || 'Could not restart capture watcher';
+      console.error(error);
+    }
+  }
 }
 
 function renderCaptureSubject() {
@@ -1697,10 +1734,11 @@ async function startCaptureWatcherForCurrentSubject() {
     return;
   }
 
-  setCapturePairStatus({ ready: true, message: 'Ready' });
+  setCapturePairStatus({ ready: true, message: `Ready (${captureFileModeLabel()})` });
   return trecsApi('startCaptureWatcher').startCaptureWatcher(
     jobsState.selectedJobId,
-    jobsState.captureSubject.id
+    jobsState.captureSubject.id,
+    { fileMode: jobsState.captureFileMode }
   );
 }
 
@@ -4218,6 +4256,15 @@ captureEntryForm.elements.studentSearch.addEventListener('keydown', (event) => {
 captureEntryForm.elements.studentSearch.addEventListener('blur', () => {
   setTimeout(hideCaptureStudentSearch, 120);
 });
+if (captureFileModeToggle) {
+  captureFileModeToggle.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-capture-file-mode]');
+    if (!button) {
+      return;
+    }
+    setCaptureFileMode(button.dataset.captureFileMode);
+  });
+}
 
 workspaceEditStudentButton.addEventListener('click', () => {
   jobsState.showStudentEditForm = !jobsState.showStudentEditForm;

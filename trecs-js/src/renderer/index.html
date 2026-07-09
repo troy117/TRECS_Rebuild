@@ -425,6 +425,13 @@
                     <input name="studentSearch" autocomplete="off" placeholder="Type student name">
                     <div id="captureStudentSearchResults" class="student-search-results" hidden></div>
                   </label>
+                  <div class="capture-mode-control">
+                    <span>Capture Files</span>
+                    <div class="segmented compact" id="captureFileModeToggle">
+                      <button data-capture-file-mode="jpg_raw" type="button">JPG + CR3</button>
+                      <button data-capture-file-mode="jpg_only" type="button">JPG Only</button>
+                    </div>
+                  </div>
                   <p id="captureEntryStatus" class="capture-entry-status"></p>
                 </form>
                 <div id="captureSubjectDetail" class="capture-subject-detail">

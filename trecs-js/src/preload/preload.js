@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld('trecs', {
   startEnvelopeWatcher: (jobId, subjectId, hotFolder) => ipcRenderer.invoke('envelope:start-watcher', jobId, subjectId, hotFolder),
   stopEnvelopeWatcher: () => ipcRenderer.invoke('envelope:stop-watcher'),
   confirmEnvelopeScan: (accept) => ipcRenderer.invoke('envelope:confirm-scan', accept),
-  startCaptureWatcher: (jobId, subjectId) => ipcRenderer.invoke('capture:start-watcher', jobId, subjectId),
+  startCaptureWatcher: (jobId, subjectId, options) => ipcRenderer.invoke('capture:start-watcher', jobId, subjectId, options),
   stopCaptureWatcher: () => ipcRenderer.invoke('capture:stop-watcher'),
   getCaptureSubjectImages: (subjectId) => ipcRenderer.invoke('capture:subject-images', subjectId),
   selectCaptureImage: (subjectId, imageId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId),
