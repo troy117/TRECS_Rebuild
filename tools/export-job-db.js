@@ -185,13 +185,16 @@ function createJobDatabaseSchema(database) {
       id INTEGER PRIMARY KEY,
       order_id INTEGER NOT NULL,
       subject_id INTEGER,
-      product_id INTEGER,
       image_asset_id INTEGER,
+      package_plan_id INTEGER,
       package_code TEXT,
-      raw_code TEXT,
+      product_id INTEGER,
       quantity INTEGER NOT NULL DEFAULT 1,
+      raw_code TEXT,
       status TEXT NOT NULL DEFAULT 'open',
-      notes TEXT
+      notes TEXT,
+      created_at TEXT,
+      updated_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS payments (

@@ -1,15 +1,42 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
 
-const projectRoot = path.resolve(__dirname, '../../..');
+const appFolderCandidate = path.resolve(__dirname, '../..');
+const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
+  && path.basename(path.dirname(appFolderCandidate)).toLowerCase() === 'resources';
+const portableMode = app.isPackaged || runningFromPortableFolder;
+const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
+const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
+const projectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
+const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : projectRoot;
 const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
-const sqlWasmPath = path.join(projectRoot, 'trecs-js', 'node_modules', 'sql.js', 'dist');
+const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
+const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 
 let sqlModulePromise;
+
+function logStartup(message, error = null) {
+  if (!portableMode) {
+    return;
+  }
+
+  const detail = error ? ` ${error.stack || error.message || error}` : '';
+  fs.appendFileSync(startupLogPath, `[${new Date().toISOString()}] ${message}${detail}\n`);
+}
+
+process.on('uncaughtException', (error) => {
+  logStartup('uncaughtException', error);
+  throw error;
+});
+
+process.on('unhandledRejection', (error) => {
+  logStartup('unhandledRejection', error);
+});
 
 function getSqlModule() {
   if (!sqlModulePromise) {
@@ -285,13 +312,16 @@ function createJobDatabaseSchema(database) {
       id INTEGER PRIMARY KEY,
       order_id INTEGER NOT NULL,
       subject_id INTEGER,
-      product_id INTEGER,
       image_asset_id INTEGER,
+      package_plan_id INTEGER,
       package_code TEXT,
-      raw_code TEXT,
+      product_id INTEGER,
       quantity INTEGER NOT NULL DEFAULT 1,
+      raw_code TEXT,
       status TEXT NOT NULL DEFAULT 'open',
-      notes TEXT
+      notes TEXT,
+      created_at TEXT,
+      updated_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS payments (
@@ -590,14 +620,30 @@ async function writeProgramDatabaseSnapshot() {
 
 async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const database = new SQL.Database(databaseBytes);
+  fs.mkdirSync(path.join(projectRoot, 'database'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'CaptureHotFolder'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
+
+  const database = fs.existsSync(prototypeDatabasePath)
+    ? new SQL.Database(fs.readFileSync(prototypeDatabasePath))
+    : new SQL.Database();
 
   try {
+    let changed = false;
+    if (!fs.existsSync(prototypeDatabasePath)) {
+      const schemaPath = path.join(bundledResourceRoot, 'database', 'schema.sql');
+      if (!fs.existsSync(schemaPath)) {
+        throw new Error(`Bundled schema was not found at ${schemaPath}`);
+      }
+      database.run(fs.readFileSync(schemaPath, 'utf8'));
+      changed = true;
+    }
+
     const jobColumns = rowsFromDatabase(database, 'PRAGMA table_info(jobs);')
       .map((column) => column.name);
 
-    let changed = false;
     if (!jobColumns.includes('retake_date')) {
       database.run('ALTER TABLE jobs ADD COLUMN retake_date TEXT;');
       changed = true;
@@ -847,272 +893,131 @@ function createCapturePackageSchema(database) {
 
 async function prepareLaptopPackage(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const sourceDatabase = new SQL.Database(databaseBytes);
+  const jobRows = await querySql(`
+    WITH
+      subject_counts AS (
+        SELECT job_id, COUNT(*) AS subjects
+        FROM subjects
+        WHERE job_id = ${jobId}
+        GROUP BY job_id
+      ),
+      order_counts AS (
+        SELECT job_id, COUNT(*) AS orders
+        FROM orders
+        WHERE job_id = ${jobId}
+        GROUP BY job_id
+      ),
+      image_counts AS (
+        SELECT job_id, COUNT(*) AS images
+        FROM image_assets
+        WHERE job_id = ${jobId}
+        GROUP BY job_id
+      )
+    SELECT
+      j.id,
+      j.reference_number AS referenceNumber,
+      j.name,
+      j.type,
+      j.status,
+      j.root_path AS rootPath,
+      j.shoot_date AS shootDate,
+      j.retake_date AS retakeDate,
+      j.package_plan_id AS packagePlanId,
+      p.name AS packagePlanName,
+      c.display_name AS clientName,
+      c.trecs_name AS trecsName,
+      c.reference_number AS clientReferenceNumber,
+      COALESCE(sc.subjects, 0) AS subjects,
+      COALESCE(oc.orders, 0) AS orders,
+      COALESCE(ic.images, 0) AS images
+    FROM jobs j
+    JOIN clients c ON c.id = j.client_id
+    LEFT JOIN package_plans p ON p.id = j.package_plan_id
+    LEFT JOIN subject_counts sc ON sc.job_id = j.id
+    LEFT JOIN order_counts oc ON oc.job_id = j.id
+    LEFT JOIN image_counts ic ON ic.job_id = j.id
+    WHERE j.id = ${jobId}
+    LIMIT 1;
+  `);
 
-  try {
-    const jobs = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        j.id,
-        j.legacy_id AS legacyId,
-        j.reference_number AS referenceNumber,
-        j.name,
-        j.type,
-        j.status,
-        j.package_plan_id AS packagePlanId,
-        p.name AS packagePlanName,
-        c.display_name AS clientName,
-        c.trecs_name AS trecsName,
-        j.root_path AS rootPath,
-        j.shoot_date AS shootDate,
-        j.retake_date AS retakeDate,
-        j.notes
-      FROM jobs j
-      JOIN clients c ON c.id = j.client_id
-      LEFT JOIN package_plans p ON p.id = j.package_plan_id
-      WHERE j.id = ${jobId};
-    `);
-
-    if (!jobs.length) {
-      throw new Error('Job not found');
-    }
-
-    const job = jobs[0];
-    const subjects = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        id,
-        job_id AS jobId,
-        legacy_ref_num AS legacyRefNum,
-        subject_type AS subjectType,
-        first_name AS firstName,
-        last_name AS lastName,
-        display_name AS displayName,
-        external_id AS externalId,
-        grade,
-        homeroom,
-        track,
-        team,
-        photographed_status AS photographedStatus,
-        notes
-      FROM subjects
-      WHERE job_id = ${jobId}
-      ORDER BY legacy_ref_num;
-    `);
-    const subjectCodes = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        sc.id,
-        sc.subject_id AS subjectId,
-        sc.code_type AS codeType,
-        sc.code
-      FROM subject_codes sc
-      JOIN subjects s ON s.id = sc.subject_id
-      WHERE s.job_id = ${jobId}
-      ORDER BY sc.code_type, sc.code;
-    `);
-    const subjectGroups = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        id,
-        job_id AS jobId,
-        name,
-        group_type AS groupType
-      FROM subject_groups
-      WHERE job_id = ${jobId}
-      ORDER BY group_type, name;
-    `);
-    const subjectGroupMembers = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        sgm.id,
-        sgm.group_id AS groupId,
-        sgm.subject_id AS subjectId,
-        sgm.sort_order AS sortOrder
-      FROM subject_group_members sgm
-      JOIN subject_groups sg ON sg.id = sgm.group_id
-      WHERE sg.job_id = ${jobId}
-      ORDER BY sgm.group_id, sgm.sort_order;
-    `);
-    const orders = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        id,
-        job_id AS jobId,
-        subject_id AS subjectId,
-        family_key AS familyKey,
-        source,
-        source_reference AS sourceReference,
-        entry_timing AS entryTiming,
-        status,
-        paid_status AS paidStatus,
-        render_status AS renderStatus,
-        notes
-      FROM orders
-      WHERE job_id = ${jobId}
-      ORDER BY id;
-    `);
-    const orderItems = rowsFromDatabase(sourceDatabase, `
-      SELECT
-        oi.id,
-        oi.order_id AS orderId,
-        oi.subject_id AS subjectId,
-        oi.package_plan_id AS packagePlanId,
-        oi.package_code AS packageCode,
-        oi.product_id AS productId,
-        oi.quantity,
-        oi.raw_code AS rawCode,
-        oi.status,
-        oi.notes
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
-      WHERE o.job_id = ${jobId}
-      ORDER BY oi.order_id, oi.id;
-    `);
-
-    const createdAt = new Date();
-    const sessionUuid = crypto.randomUUID();
-    const workstation = process.env.COMPUTERNAME || os.hostname();
-    const packageName = `${safeFolderName(`${job.trecsName}-${job.name}`)}-${timestampForFolder(createdAt)}`;
-    const packagePath = path.join(projectRoot, 'exports', 'laptop-packages', packageName);
-    const hotFolderPath = path.join(packagePath, 'HotFolder');
-    const imagesPath = path.join(packagePath, 'Images');
-    const exportsPath = path.join(packagePath, 'Exports');
-    const databasePath = path.join(packagePath, 'capture.db');
-    const manifestPath = path.join(packagePath, 'session-manifest.json');
-
-    fs.mkdirSync(hotFolderPath, { recursive: true });
-    fs.mkdirSync(imagesPath, { recursive: true });
-    fs.mkdirSync(exportsPath, { recursive: true });
-
-    const captureDatabase = new SQL.Database();
-    try {
-      createCapturePackageSchema(captureDatabase);
-      captureDatabase.run('BEGIN TRANSACTION');
-      insertRows(captureDatabase, 'package_manifest', ['key', 'value'], [
-        { key: 'session_uuid', value: sessionUuid },
-        { key: 'source_job_id', value: String(job.id) },
-        { key: 'created_at', value: createdAt.toISOString() },
-        { key: 'workstation', value: workstation },
-        { key: 'package_type', value: 'capture_laptop' }
-      ]);
-      insertRows(captureDatabase, 'jobs', [
-        'id',
-        'legacy_id',
-        'reference_number',
-        'name',
-        'type',
-        'status',
-        'package_plan_id',
-        'package_plan_name',
-        'client_name',
-        'trecs_name',
-        'root_path',
-        'shoot_date',
-        'retake_date',
-        'notes'
-      ], jobs);
-      insertRows(captureDatabase, 'subjects', [
-        'id',
-        'job_id',
-        'legacy_ref_num',
-        'subject_type',
-        'first_name',
-        'last_name',
-        'display_name',
-        'external_id',
-        'grade',
-        'homeroom',
-        'track',
-        'team',
-        'photographed_status',
-        'notes'
-      ], subjects);
-      insertRows(captureDatabase, 'subject_codes', ['id', 'subject_id', 'code_type', 'code'], subjectCodes);
-      insertRows(captureDatabase, 'subject_groups', ['id', 'job_id', 'name', 'group_type'], subjectGroups);
-      insertRows(captureDatabase, 'subject_group_members', ['id', 'group_id', 'subject_id', 'sort_order'], subjectGroupMembers);
-      insertRows(captureDatabase, 'orders', [
-        'id',
-        'job_id',
-        'subject_id',
-        'family_key',
-        'source',
-        'source_reference',
-        'entry_timing',
-        'status',
-        'paid_status',
-        'render_status',
-        'notes'
-      ], orders);
-      insertRows(captureDatabase, 'order_items', [
-        'id',
-        'order_id',
-        'subject_id',
-        'package_plan_id',
-        'package_code',
-        'product_id',
-        'quantity',
-        'raw_code',
-        'status',
-        'notes'
-      ], orderItems);
-      captureDatabase.run('COMMIT');
-      fs.writeFileSync(databasePath, Buffer.from(captureDatabase.export()));
-    } catch (error) {
-      try {
-        captureDatabase.run('ROLLBACK');
-      } catch (_rollbackError) {
-        // Keep the original export error.
-      }
-      throw error;
-    } finally {
-      captureDatabase.close();
-    }
-
-    const manifest = {
-      packageType: 'capture_laptop',
-      app: 'TRECS JS prototype',
-      sessionUuid,
-      createdAt: createdAt.toISOString(),
-      workstation,
-      sourceDatabasePath: prototypeDatabasePath,
-      job: {
-        id: job.id,
-        name: job.name,
-        type: job.type,
-        status: job.status,
-        location: job.trecsName,
-        clientName: job.clientName,
-        rootPath: job.rootPath,
-        shootDate: job.shootDate,
-        retakeDate: job.retakeDate,
-        packagePlanId: job.packagePlanId,
-        packagePlanName: job.packagePlanName
-      },
-      counts: {
-        subjects: subjects.length,
-        subjectCodes: subjectCodes.length,
-        subjectGroups: subjectGroups.length,
-        subjectGroupMembers: subjectGroupMembers.length,
-        orders: orders.length,
-        orderItems: orderItems.length
-      },
-      paths: {
-        database: 'capture.db',
-        hotFolder: 'HotFolder',
-        images: 'Images',
-        exports: 'Exports'
-      }
-    };
-
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-
-    return {
-      packagePath,
-      manifestPath,
-      databasePath,
-      sessionUuid,
-      counts: manifest.counts
-    };
-  } finally {
-    sourceDatabase.close();
+  if (!jobRows.length) {
+    throw new Error('Job not found');
   }
+
+  const job = jobRows[0];
+  const createdAt = new Date();
+  const setupName = `${safeFolderName(`${job.trecsName || job.clientName}-${job.name}`)}-onsite-${timestampForFolder(createdAt)}`;
+  const setupPath = path.join(projectRoot, 'exports', 'onsite-setups', setupName);
+  const setupDatabaseFolder = path.join(setupPath, 'Database');
+  const setupCroppedMedFolder = path.join(setupPath, 'CroppedMed');
+  const setupExportsFolder = path.join(setupPath, 'Exports');
+  fs.mkdirSync(setupDatabaseFolder, { recursive: true });
+  fs.mkdirSync(setupCroppedMedFolder, { recursive: true });
+  fs.mkdirSync(setupExportsFolder, { recursive: true });
+
+  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const setupDatabasePath = path.join(setupDatabaseFolder, 'job.db');
+  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
+    fs.copyFileSync(jobDatabasePath, setupDatabasePath);
+  }
+
+  const jobRoot = resolveProjectPath(job.rootPath);
+  const croppedMedSource = path.join(jobRoot, 'CroppedMed');
+  let copiedCroppedMed = 0;
+  if (fs.existsSync(croppedMedSource)) {
+    fs.readdirSync(croppedMedSource).forEach((name) => {
+      const sourcePath = path.join(croppedMedSource, name);
+      if (!fs.statSync(sourcePath).isFile() || !isImportableImage(sourcePath)) {
+        return;
+      }
+      fs.copyFileSync(sourcePath, path.join(setupCroppedMedFolder, name));
+      copiedCroppedMed += 1;
+    });
+  }
+
+  const manifest = {
+    packageType: 'onsite_setup',
+    app: 'TRECS',
+    createdAt: createdAt.toISOString(),
+    workstation: process.env.COMPUTERNAME || os.hostname(),
+    sourceDatabasePath: prototypeDatabasePath,
+    school: {
+      name: job.clientName,
+      folderName: job.trecsName,
+      referenceNumber: job.clientReferenceNumber
+    },
+    job: {
+      id: job.id,
+      name: job.name,
+      type: job.type,
+      status: job.status,
+      rootPath: job.rootPath,
+      shootDate: job.shootDate,
+      retakeDate: job.retakeDate,
+      packagePlanId: job.packagePlanId,
+      packagePlanName: job.packagePlanName
+    },
+    counts: {
+      subjects: job.subjects,
+      orders: job.orders,
+      images: job.images,
+      croppedMediumImages: copiedCroppedMed
+    },
+    paths: {
+      database: 'Database/job.db',
+      croppedMedium: 'CroppedMed',
+      exports: 'Exports'
+    }
+  };
+  const manifestPath = path.join(setupPath, 'onsite-setup.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  return {
+    packagePath: setupPath,
+    manifestPath,
+    databasePath: setupDatabasePath,
+    counts: manifest.counts
+  };
 }
 
 ipcMain.handle('laptop-package:prepare', prepareLaptopPackage);
@@ -2589,6 +2494,413 @@ function ensureJobFolders(rootPathValue) {
   });
 }
 
+function processOutput(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: projectRoot,
+      windowsHide: true,
+      ...options
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+      }
+    });
+  });
+}
+
+async function ensureAccessJobImportReader() {
+  const sourcePath = path.join(projectRoot, 'tools', 'AccessJobImportJson.java');
+  const classPath = path.join(projectRoot, 'tools', 'AccessJobImportJson.class');
+  const sourceTime = fs.statSync(sourcePath).mtimeMs;
+  const classTime = fs.existsSync(classPath) ? fs.statSync(classPath).mtimeMs : 0;
+  if (classTime >= sourceTime) {
+    return;
+  }
+
+  await processOutput('javac', [
+    '-cp',
+    [
+      path.join('JARS', 'jackcess-4.0.0.jar'),
+      path.join('JARS', 'commons-lang3-3.11.jar'),
+      path.join('JARS', 'commons-logging-1.2.jar')
+    ].join(path.delimiter),
+    path.join('tools', 'AccessJobImportJson.java')
+  ]);
+}
+
+async function readPreviousTrecsAccessData(studentsDatabasePath) {
+  await ensureAccessJobImportReader();
+  const output = await processOutput('java', [
+    '-cp',
+    [
+      'tools',
+      path.join('JARS', 'jackcess-4.0.0.jar'),
+      path.join('JARS', 'commons-lang3-3.11.jar'),
+      path.join('JARS', 'commons-logging-1.2.jar')
+    ].join(path.delimiter),
+    'AccessJobImportJson',
+    studentsDatabasePath
+  ]);
+  return JSON.parse(output);
+}
+
+function oldTrecsText(row, column) {
+  const value = row ? row[column] : null;
+  return value === null || value === undefined ? '' : String(value).trim();
+}
+
+function oldTrecsBool(row, column) {
+  const value = row ? row[column] : null;
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return ['true', 'yes', '1'].includes(String(value || '').trim().toLowerCase());
+}
+
+function mergedOldTrecsNotes(row) {
+  const notes = [];
+  const base = oldTrecsText(row, 'Notes');
+  const field1 = oldTrecsText(row, 'Field1');
+  const field2 = oldTrecsText(row, 'Field2');
+  if (base) {
+    notes.push(base);
+  }
+  if (field1) {
+    notes.push(`Field1: ${field1}`);
+  }
+  if (field2) {
+    notes.push(`Field2: ${field2}`);
+  }
+  return notes.join('\n');
+}
+
+function oldTrecsOnlineOrderReference(notes) {
+  const match = String(notes || '').match(/ONLINE ORDER\s*:?\s*(\d+)/i);
+  return match ? match[1] : '';
+}
+
+function isImportableImage(filePath) {
+  return ['.jpg', '.jpeg', '.png'].includes(path.extname(filePath).toLowerCase());
+}
+
+function copyPreviousTrecsImages(sourceRoot, jobRoot) {
+  const copied = [];
+  [
+    { candidates: ['CroppedLarge'], destination: 'CroppedLarge', versionType: 'cropped_large' },
+    { candidates: ['CroppedMedium', 'CroppedMed'], destination: 'CroppedMed', versionType: 'cropped_med' }
+  ].forEach((folder) => {
+    const sourceFolder = folder.candidates
+      .map((candidate) => path.join(sourceRoot, candidate))
+      .find((candidatePath) => fs.existsSync(candidatePath) && fs.statSync(candidatePath).isDirectory());
+    if (!sourceFolder) {
+      return;
+    }
+
+    const destinationFolder = path.join(jobRoot, folder.destination);
+    fs.mkdirSync(destinationFolder, { recursive: true });
+    fs.readdirSync(sourceFolder).forEach((name) => {
+      const sourcePath = path.join(sourceFolder, name);
+      if (!fs.statSync(sourcePath).isFile() || !isImportableImage(sourcePath)) {
+        return;
+      }
+
+      const destinationPath = uniquePath(destinationFolder, name);
+      fs.copyFileSync(sourcePath, destinationPath);
+      copied.push({
+        filename: path.basename(destinationPath),
+        path: path.relative(projectRoot, destinationPath),
+        versionType: folder.versionType
+      });
+    });
+  });
+  return copied;
+}
+
+function referenceFromPreviousTrecsImage(filename) {
+  const base = path.basename(filename, path.extname(filename));
+  const match = base.match(/^\d+/);
+  return match ? match[0] : base;
+}
+
+async function choosePreviousTrecsJobFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose Previous TRECS Job Folder',
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const folderPath = result.filePaths[0];
+  const studentsDatabasePath = path.join(folderPath, 'Database', 'Students.accdb');
+  return {
+    canceled: false,
+    folderPath,
+    studentsDatabasePath,
+    hasStudentsDatabase: fs.existsSync(studentsDatabasePath)
+  };
+}
+
+async function chooseOnsiteSetupFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose Onsite Setup Folder',
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const folderPath = result.filePaths[0];
+  const manifestPath = path.join(folderPath, 'onsite-setup.json');
+  const databasePath = path.join(folderPath, 'Database', 'job.db');
+  return {
+    canceled: false,
+    folderPath,
+    manifestPath,
+    databasePath,
+    hasManifest: fs.existsSync(manifestPath),
+    hasDatabase: fs.existsSync(databasePath)
+  };
+}
+
+function rowsFromOptionalTable(database, tableName) {
+  const tableRows = rowsFromDatabase(database, `
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = ${sqlLiteral(tableName)}
+    LIMIT 1;
+  `);
+  if (!tableRows.length) {
+    return [];
+  }
+  return rowsFromDatabase(database, `SELECT * FROM ${tableName};`);
+}
+
+function tableColumnNames(database, tableName) {
+  return rowsFromDatabase(database, `PRAGMA table_info(${tableName});`).map((row) => row.name);
+}
+
+function insertImportedRows(database, tableName, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const targetColumns = tableColumnNames(database, tableName);
+  const rowColumns = Object.keys(rows[0] || {});
+  const columns = targetColumns.filter((column) => rowColumns.includes(column));
+  if (!columns.length) {
+    return;
+  }
+  insertRows(database, tableName, columns, rows);
+}
+
+function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
+  const sourceFolder = path.join(setupFolder, 'CroppedMed');
+  const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'CroppedMed');
+  let copied = 0;
+
+  if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) {
+    return copied;
+  }
+
+  fs.mkdirSync(destinationFolder, { recursive: true });
+  fs.readdirSync(sourceFolder).forEach((name) => {
+    const sourcePath = path.join(sourceFolder, name);
+    if (!fs.statSync(sourcePath).isFile() || !isImportableImage(sourcePath)) {
+      return;
+    }
+    fs.copyFileSync(sourcePath, path.join(destinationFolder, name));
+    copied += 1;
+  });
+
+  return copied;
+}
+
+async function loadOnsiteSetup(_event, input = {}) {
+  const setupFolder = normalizeText(input.setupFolder, 'Onsite setup folder', 1000);
+  const manifestPath = path.join(setupFolder, 'onsite-setup.json');
+  const databasePath = path.join(setupFolder, 'Database', 'job.db');
+
+  if (!fs.existsSync(setupFolder) || !fs.statSync(setupFolder).isDirectory()) {
+    throw new Error('Onsite setup folder was not found');
+  }
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error('onsite-setup.json was not found in that folder');
+  }
+  if (!fs.existsSync(databasePath)) {
+    throw new Error('Database\\job.db was not found in that folder');
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  if (manifest.packageType !== 'onsite_setup') {
+    throw new Error('That folder is not a TRECS onsite setup');
+  }
+
+  const SQL = await getSqlModule();
+  const setupDatabase = new SQL.Database(fs.readFileSync(databasePath));
+  let result;
+
+  try {
+    const jobRows = rowsFromOptionalTable(setupDatabase, 'jobs');
+    if (!jobRows.length) {
+      throw new Error('The onsite setup job database does not contain a job record');
+    }
+
+    const sourceJob = jobRows[0];
+    const schoolName = optionalText(manifest.school && manifest.school.name, 255) || 'Onsite School';
+    const schoolFolderName = optionalText(manifest.school && manifest.school.folderName, 255) || safeFolderName(schoolName);
+    const schoolReferenceNumber = optionalText(manifest.school && manifest.school.referenceNumber, 100);
+    const jobName = optionalText(manifest.job && manifest.job.name, 255) || sourceJob.name || 'Onsite Job';
+    const rootPath = optionalText(sourceJob.root_path, 1000)
+      || optionalText(manifest.job && manifest.job.rootPath, 1000)
+      || path.join('JOBS', safeFolderName(schoolFolderName), safeFolderName(jobName));
+
+    const importedTables = {
+      subjects: rowsFromOptionalTable(setupDatabase, 'subjects'),
+      subject_codes: rowsFromOptionalTable(setupDatabase, 'subject_codes'),
+      subject_groups: rowsFromOptionalTable(setupDatabase, 'subject_groups'),
+      subject_group_members: rowsFromOptionalTable(setupDatabase, 'subject_group_members'),
+      image_assets: rowsFromOptionalTable(setupDatabase, 'image_assets'),
+      image_versions: rowsFromOptionalTable(setupDatabase, 'image_versions'),
+      subject_images: rowsFromOptionalTable(setupDatabase, 'subject_images'),
+      orders: rowsFromOptionalTable(setupDatabase, 'orders'),
+      order_items: rowsFromOptionalTable(setupDatabase, 'order_items').map((row) => ({
+        ...row,
+        package_plan_id: null,
+        product_id: null
+      })),
+      payments: rowsFromOptionalTable(setupDatabase, 'payments'),
+      envelope_scans: rowsFromOptionalTable(setupDatabase, 'envelope_scans').map((row) => ({
+        ...row,
+        capture_session_id: null,
+        image_import_event_id: null
+      })),
+      admin_item_batches: rowsFromOptionalTable(setupDatabase, 'admin_item_batches')
+    };
+
+    result = await writeSql((database) => {
+      const existingJobRows = rowsFromDatabase(database, `
+        SELECT id
+        FROM jobs
+        WHERE id = ${numericId(sourceJob.id)}
+        LIMIT 1;
+      `);
+      if (existingJobRows.length) {
+        throw new Error('This onsite setup is already loaded on this computer');
+      }
+
+      let clientRows = rowsFromDatabase(database, `
+        SELECT id, display_name AS displayName, trecs_name AS trecsName
+        FROM clients
+        WHERE trecs_name = ${sqlLiteral(schoolFolderName)}
+        LIMIT 1;
+      `);
+
+      if (!clientRows.length) {
+        database.run(`
+          INSERT INTO clients (
+            reference_number,
+            display_name,
+            trecs_name,
+            notes
+          )
+          VALUES (?, ?, ?, ?);
+        `, [
+          schoolReferenceNumber,
+          schoolName,
+          schoolFolderName,
+          `Loaded from onsite setup: ${setupFolder}`
+        ]);
+        clientRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
+      }
+
+      const clientId = clientRows[0].id;
+      const packagePlanId = normalizeNullableId(sourceJob.package_plan_id || (manifest.job && manifest.job.packagePlanId), 'package plan');
+      if (packagePlanId) {
+        database.run(`
+          INSERT OR IGNORE INTO package_plans (
+            id,
+            name,
+            version,
+            active,
+            legacy_name
+          )
+          VALUES (?, ?, 1, 1, ?);
+        `, [
+          packagePlanId,
+          optionalText(manifest.job && manifest.job.packagePlanName, 255) || `Imported Package Plan ${packagePlanId}`,
+          optionalText(manifest.job && manifest.job.packagePlanName, 255)
+        ]);
+      }
+
+      ensureJobFolders(rootPath);
+      const setupCopyPath = path.join(resolveProjectPath(rootPath), 'Database', 'job.db');
+      fs.copyFileSync(databasePath, setupCopyPath);
+      const copiedCroppedMed = copyOnsiteCroppedMediumImages(setupFolder, rootPath);
+
+      const jobRow = {
+        ...sourceJob,
+        client_id: clientId,
+        package_plan_id: packagePlanId || null,
+        root_path: rootPath,
+        notes: optionalText(sourceJob.notes, 5000) || `Loaded from onsite setup: ${setupFolder}`
+      };
+      insertImportedRows(database, 'jobs', [jobRow]);
+
+      [
+        'subjects',
+        'subject_codes',
+        'subject_groups',
+        'subject_group_members',
+        'image_assets',
+        'image_versions',
+        'subject_images',
+        'orders',
+        'order_items',
+        'payments',
+        'envelope_scans',
+        'admin_item_batches'
+      ].forEach((tableName) => {
+        insertImportedRows(database, tableName, importedTables[tableName]);
+      });
+
+      return {
+        id: sourceJob.id,
+        rootPath,
+        setupFolder,
+        databasePath: setupCopyPath,
+        counts: {
+          subjects: importedTables.subjects.length,
+          orders: importedTables.orders.length,
+          images: importedTables.image_assets.length,
+          croppedMediumImages: copiedCroppedMed
+        }
+      };
+    });
+  } finally {
+    setupDatabase.close();
+  }
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
 async function createJob(_event, input = {}) {
   const clientId = numericId(input.clientId);
   const name = normalizeText(input.name, 'Job name');
@@ -2665,6 +2977,303 @@ async function createJob(_event, input = {}) {
 }
 
 ipcMain.handle('job:create', createJob);
+
+async function importPreviousTrecsJob(_event, input = {}) {
+  const clientId = numericId(input.clientId);
+  const name = normalizeText(input.name, 'Job name');
+  const type = normalizeJobType(input.type || 'fall');
+  const packagePlanId = normalizeNullableId(input.packagePlanId, 'package plan');
+  const sourceFolder = normalizeText(input.sourceFolder, 'Previous job folder', 1000);
+  const notes = optionalText(input.notes, 5000);
+  const studentsDatabasePath = path.join(sourceFolder, 'Database', 'Students.accdb');
+
+  if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) {
+    throw new Error('Previous job folder was not found');
+  }
+  if (!fs.existsSync(studentsDatabasePath)) {
+    throw new Error('Database\\Students.accdb was not found in the previous job folder');
+  }
+
+  const accessData = await readPreviousTrecsAccessData(studentsDatabasePath);
+  const result = await writeSql((database) => {
+    const clientRows = rowsFromDatabase(database, `
+      SELECT id, display_name AS displayName, trecs_name AS trecsName
+      FROM clients
+      WHERE id = ${clientId};
+    `);
+
+    if (!clientRows.length) {
+      throw new Error('Client not found');
+    }
+
+    if (packagePlanId) {
+      const packageRows = rowsFromDatabase(database, `
+        SELECT id
+        FROM package_plans
+        WHERE id = ${packagePlanId}
+          AND active = 1;
+      `);
+      if (!packageRows.length) {
+        throw new Error('Package plan not found');
+      }
+    }
+
+    const rootPath = optionalText(input.rootPath, 1000) || defaultJobRootPath(clientRows[0], name);
+    const jobRoot = resolveProjectPath(rootPath);
+    ensureJobFolders(rootPath);
+    const copiedImages = copyPreviousTrecsImages(sourceFolder, jobRoot);
+    fs.copyFileSync(studentsDatabasePath, path.join(jobRoot, 'Database', 'LegacyStudents.accdb'));
+
+    database.run(`
+      INSERT INTO jobs (
+        client_id,
+        name,
+        type,
+        status,
+        package_plan_id,
+        root_path,
+        legacy_folder_layout,
+        notes
+      )
+      VALUES (?, ?, ?, 'active', ?, ?, 'trecs_v7', ?);
+    `, [
+      clientId,
+      name,
+      type,
+      packagePlanId,
+      rootPath,
+      notes || `Imported from previous TRECS job: ${sourceFolder}`
+    ]);
+    const jobId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+
+    const subjectIdsByRef = new Map();
+    const subjectStatement = database.prepare(`
+      INSERT INTO subjects (
+        job_id,
+        legacy_ref_num,
+        subject_type,
+        first_name,
+        last_name,
+        display_name,
+        external_id,
+        grade,
+        homeroom,
+        track,
+        photographed_status,
+        notes
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    const subjectCodeStatement = database.prepare(`
+      INSERT OR IGNORE INTO subject_codes (
+        subject_id,
+        code_type,
+        code
+      )
+      VALUES (?, 'legacy_ref', ?);
+    `);
+    const orderStatement = database.prepare(`
+      INSERT INTO orders (
+        job_id,
+        subject_id,
+        source,
+        source_reference,
+        entry_timing,
+        status,
+        paid_status,
+        render_status,
+        notes
+      )
+      VALUES (?, ?, ?, ?, 'unknown', 'open', ?, ?, ?);
+    `);
+    const orderItemStatement = database.prepare(`
+      INSERT INTO order_items (
+        order_id,
+        subject_id,
+        package_code,
+        quantity,
+        raw_code,
+        status,
+        notes
+      )
+      VALUES (?, ?, ?, 1, ?, 'open', ?);
+    `);
+
+    const importOrder = (subjectId, row, orderColumn, payColumn, source, photoTaken) => {
+      const rawCode = oldTrecsText(row, orderColumn);
+      if (!rawCode) {
+        return;
+      }
+
+      const notesValue = oldTrecsText(row, 'Notes');
+      const sourceReference = source === 'online' ? oldTrecsOnlineOrderReference(notesValue) : '';
+      orderStatement.run([
+        jobId,
+        subjectId,
+        source,
+        sourceReference,
+        oldTrecsBool(row, payColumn) ? 'paid' : 'unpaid',
+        photoTaken ? 'ready' : 'not_ready',
+        notesValue
+      ]);
+      const orderId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+      rawCode.split('.').map((code) => code.trim()).filter(Boolean).forEach((code) => {
+        orderItemStatement.run([orderId, subjectId, code, rawCode, `Imported from ${orderColumn}`]);
+      });
+    };
+
+    try {
+      (accessData.students || []).forEach((row) => {
+        const ref = oldTrecsText(row, 'RefNum');
+        if (!ref) {
+          return;
+        }
+
+        const firstName = oldTrecsText(row, 'First');
+        const lastName = oldTrecsText(row, 'Last');
+        const displayName = [firstName, lastName].filter(Boolean).join(' ');
+        const grade = oldTrecsText(row, 'Grade');
+        const photoTaken = oldTrecsBool(row, 'Photo');
+        subjectStatement.run([
+          jobId,
+          ref,
+          grade.toLowerCase() === 'fac' ? 'faculty' : 'student',
+          firstName,
+          lastName,
+          displayName,
+          oldTrecsText(row, 'StuID'),
+          grade,
+          oldTrecsText(row, 'Homeroom'),
+          oldTrecsText(row, 'Track'),
+          photoTaken ? 'photographed' : 'not_photographed',
+          mergedOldTrecsNotes(row)
+        ]);
+        const subjectId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+        subjectIdsByRef.set(ref, subjectId);
+        subjectCodeStatement.run([subjectId, ref]);
+        importOrder(subjectId, row, 'Order1', 'Order1Pay', 'paper', photoTaken);
+        importOrder(subjectId, row, 'Order2', 'Order2Pay', 'online', photoTaken);
+      });
+    } finally {
+      subjectStatement.free();
+      subjectCodeStatement.free();
+      orderStatement.free();
+      orderItemStatement.free();
+    }
+
+    const groupIdsByName = new Map();
+    (accessData.lists || []).forEach((row) => {
+      const listName = oldTrecsText(row, 'List');
+      const ref = oldTrecsText(row, 'ReferenceNumber');
+      const subjectId = subjectIdsByRef.get(ref);
+      if (!listName || !subjectId) {
+        return;
+      }
+
+      let groupId = groupIdsByName.get(listName);
+      if (!groupId) {
+        database.run(`
+          INSERT OR IGNORE INTO subject_groups (
+            job_id,
+            name,
+            group_type
+          )
+          VALUES (?, ?, 'list');
+        `, [jobId, listName]);
+        groupId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+        groupIdsByName.set(listName, groupId);
+      }
+
+      database.run(`
+        INSERT OR IGNORE INTO subject_group_members (
+          group_id,
+          subject_id,
+          sort_order
+        )
+        VALUES (?, ?, ?);
+      `, [groupId, subjectId, subjectId]);
+    });
+
+    const imageAssetIdsByFilename = new Map();
+    copiedImages.forEach((image) => {
+      const key = image.filename.toLowerCase();
+      let imageAssetId = imageAssetIdsByFilename.get(key);
+      if (!imageAssetId) {
+        database.run(`
+          INSERT INTO image_assets (
+            job_id,
+            original_path,
+            current_path,
+            filename,
+            source,
+            status,
+            metadata_json
+          )
+          VALUES (?, ?, ?, ?, 'previous_trecs_import', 'imported', ?);
+        `, [
+          jobId,
+          image.path,
+          image.path,
+          image.filename,
+          JSON.stringify({ sourceFolder })
+        ]);
+        imageAssetId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+        imageAssetIdsByFilename.set(key, imageAssetId);
+      }
+
+      database.run(`
+        INSERT OR IGNORE INTO image_versions (
+          image_asset_id,
+          version_type,
+          path
+        )
+        VALUES (?, ?, ?);
+      `, [imageAssetId, image.versionType, image.path]);
+
+      const subjectId = subjectIdsByRef.get(referenceFromPreviousTrecsImage(image.filename));
+      if (subjectId) {
+        database.run(`
+          INSERT OR IGNORE INTO subject_images (
+            subject_id,
+            image_asset_id,
+            role,
+            selected,
+            sort_order
+          )
+          VALUES (?, ?, 'primary', 1, 0);
+        `, [subjectId, imageAssetId]);
+        database.run(`
+          UPDATE subjects
+          SET primary_image_asset_id = COALESCE(primary_image_asset_id, ?),
+              photographed_status = 'photographed',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?;
+        `, [imageAssetId, subjectId]);
+      }
+    });
+
+    return {
+      id: jobId,
+      rootPath,
+      sourceFolder,
+      counts: {
+        students: subjectIdsByRef.size,
+        lists: groupIdsByName.size,
+        images: imageAssetIdsByFilename.size,
+        copiedImages: copiedImages.length
+      }
+    };
+  });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+ipcMain.handle('job:choose-previous-trecs-folder', choosePreviousTrecsJobFolder);
+ipcMain.handle('job:import-previous-trecs', importPreviousTrecsJob);
+ipcMain.handle('job:choose-onsite-setup-folder', chooseOnsiteSetupFolder);
+ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
 
 async function getJobDetail(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
@@ -4475,8 +5084,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         relativeDestination,
         path.basename(destinationPath),
         JSON.stringify({
-          rawPath: relativeRawDestination,
-          rotationDegrees: -90
+          rawPath: relativeRawDestination
         })
       ]);
       imageId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
@@ -4569,7 +5177,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         rawPath: relativeRawDestination,
         path: relativeDestination,
         dataUrl: imageDataUrl(destinationPath),
-        rotationDegrees: -90,
+        rotationDegrees: 0,
         selected: true
       }
     };
@@ -4931,6 +5539,7 @@ async function getImagePreview(_event, imageIdValue) {
 ipcMain.handle('image:preview', getImagePreview);
 
 function createWindow() {
+  logStartup('createWindow');
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -4945,11 +5554,16 @@ function createWindow() {
     }
   });
 
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    logStartup(`did-fail-load ${errorCode} ${errorDescription}`);
+  });
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
 app.whenReady().then(async () => {
+  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot}`);
   await ensurePrototypeDatabaseShape();
+  logStartup('database ready');
   createWindow();
 
   app.on('activate', () => {
@@ -4957,6 +5571,9 @@ app.whenReady().then(async () => {
       createWindow();
     }
   });
+}).catch((error) => {
+  logStartup('whenReady failed', error);
+  app.quit();
 });
 
 app.on('window-all-closed', () => {

@@ -86,6 +86,13 @@ const newJobPanel = document.getElementById('newJobPanel');
 const newJobForm = document.getElementById('newJobForm');
 const cancelNewJobButton = document.getElementById('cancelNewJobButton');
 const newJobStatus = document.getElementById('newJobStatus');
+const importPreviousJobButton = document.getElementById('importPreviousJobButton');
+const loadOnsiteSetupButton = document.getElementById('loadOnsiteSetupButton');
+const importPreviousJobPanel = document.getElementById('importPreviousJobPanel');
+const importPreviousJobForm = document.getElementById('importPreviousJobForm');
+const cancelImportPreviousJobButton = document.getElementById('cancelImportPreviousJobButton');
+const browsePreviousJobFolderButton = document.getElementById('browsePreviousJobFolderButton');
+const importPreviousJobStatus = document.getElementById('importPreviousJobStatus');
 
 let jobsState = {
   jobs: [],
@@ -155,7 +162,8 @@ let jobsState = {
   lastLaptopPackage: null,
   showNewSchoolForm: false,
   selectedNewClientId: null,
-  showNewJobForm: false
+  showNewJobForm: false,
+  showImportPreviousJobForm: false
 };
 
 if (window.trecs && databasePath) {
@@ -1115,11 +1123,17 @@ function renderCaptureCompare() {
     return `
       <button class="capture-image-slot ${image.selected ? 'selected' : ''}" data-capture-select-image="${image.id}" type="button">
         <span>${slot.label}</span>
-        ${image.dataUrl ? `<div class="capture-image-stage"><img class="rotate-ccw" src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}"></div>` : '<strong>Preview unavailable</strong>'}
+        ${image.dataUrl ? `<div class="capture-image-stage"><img data-capture-orient src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}"></div>` : '<strong>Preview unavailable</strong>'}
         <em>${escapeHtml(image.filename || '')}</em>
       </button>
     `;
   }).join('');
+
+  captureCompareGrid.querySelectorAll('[data-capture-orient]').forEach((image) => {
+    image.addEventListener('load', () => {
+      image.classList.toggle('rotate-ccw', image.naturalWidth > image.naturalHeight);
+    }, { once: true });
+  });
 
   captureCompareGrid.querySelectorAll('[data-capture-select-image]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -2326,24 +2340,25 @@ function renderNewSchoolForm() {
 
 function setNewSchoolFormVisible(visible) {
   jobsState.showNewSchoolForm = visible;
+  if (visible) {
+    jobsState.showNewJobForm = false;
+    jobsState.showImportPreviousJobForm = false;
+  }
   if (newSchoolStatus) {
     newSchoolStatus.textContent = '';
   }
   renderNewSchoolForm();
+  renderNewJobForm();
+  renderImportPreviousJobForm();
 }
 
-function renderNewJobForm() {
-  if (!newJobPanel || !newJobForm) {
+function populateJobSetupOptions(form) {
+  if (!form) {
     return;
   }
 
-  newJobPanel.hidden = jobsState.jobWorkspaceOpen || !jobsState.showNewJobForm;
-  if (!jobsState.showNewJobForm) {
-    return;
-  }
-
-  const clientSelect = newJobForm.elements.clientId;
-  const packageSelect = newJobForm.elements.packagePlanId;
+  const clientSelect = form.elements.clientId;
+  const packageSelect = form.elements.packagePlanId;
   const currentClientId = clientSelect.value;
   const currentPackagePlanId = packageSelect.value;
 
@@ -2379,12 +2394,58 @@ function renderNewJobForm() {
   }
 }
 
+function renderNewJobForm() {
+  if (!newJobPanel || !newJobForm) {
+    return;
+  }
+
+  newJobPanel.hidden = jobsState.jobWorkspaceOpen || !jobsState.showNewJobForm;
+  if (!jobsState.showNewJobForm) {
+    return;
+  }
+
+  populateJobSetupOptions(newJobForm);
+}
+
 function setNewJobFormVisible(visible) {
   jobsState.showNewJobForm = visible;
+  if (visible) {
+    jobsState.showNewSchoolForm = false;
+    jobsState.showImportPreviousJobForm = false;
+  }
   if (newJobStatus) {
     newJobStatus.textContent = '';
   }
+  renderNewSchoolForm();
   renderNewJobForm();
+  renderImportPreviousJobForm();
+}
+
+function renderImportPreviousJobForm() {
+  if (!importPreviousJobPanel || !importPreviousJobForm) {
+    return;
+  }
+
+  importPreviousJobPanel.hidden = jobsState.jobWorkspaceOpen || !jobsState.showImportPreviousJobForm;
+  if (!jobsState.showImportPreviousJobForm) {
+    return;
+  }
+
+  populateJobSetupOptions(importPreviousJobForm);
+}
+
+function setImportPreviousJobFormVisible(visible) {
+  jobsState.showImportPreviousJobForm = visible;
+  if (visible) {
+    jobsState.showNewSchoolForm = false;
+    jobsState.showNewJobForm = false;
+  }
+  if (importPreviousJobStatus) {
+    importPreviousJobStatus.textContent = '';
+  }
+  renderNewSchoolForm();
+  renderNewJobForm();
+  renderImportPreviousJobForm();
 }
 
 function resetNewJobForm() {
@@ -2395,6 +2456,17 @@ function resetNewJobForm() {
   const fallPlan = jobsState.packagePlans.find((plan) => /fall/i.test(plan.name));
   if (fallPlan) {
     newJobForm.elements.packagePlanId.value = String(fallPlan.id);
+  }
+}
+
+function resetImportPreviousJobForm() {
+  importPreviousJobForm.reset();
+  if (jobsState.selectedNewClientId) {
+    importPreviousJobForm.elements.clientId.value = String(jobsState.selectedNewClientId);
+  }
+  const fallPlan = jobsState.packagePlans.find((plan) => /fall/i.test(plan.name));
+  if (fallPlan) {
+    importPreviousJobForm.elements.packagePlanId.value = String(fallPlan.id);
   }
 }
 
@@ -2455,7 +2527,7 @@ function renderJobDetail(job) {
       </dl>
       <div class="path-box">${job.rootPath}</div>
       <div class="package-actions">
-        <button class="primary" data-prepare-laptop-package="${job.id}">Prepare Laptop Package</button>
+        <button class="primary" data-prepare-laptop-package="${job.id}">Prepare Onsite Setup</button>
         <span data-laptop-package-status>
           ${renderLaptopPackageStatus(job.id)}
         </span>
@@ -2473,14 +2545,14 @@ function renderLaptopPackageStatus(jobId) {
   }
 
   if (laptopPackage.status === 'working') {
-    return 'Creating package...';
+    return 'Creating onsite setup...';
   }
 
   if (laptopPackage.status === 'error') {
     return laptopPackage.message || 'Package failed';
   }
 
-  return `Created ${laptopPackage.subjects} subjects at ${laptopPackage.packagePath}`;
+  return `Created onsite setup with ${laptopPackage.subjects} subjects at ${laptopPackage.packagePath}`;
 }
 
 function bindJobDetailActions() {
@@ -3458,6 +3530,7 @@ async function loadJobs() {
   jobsState.packagePlans = data.packagePlans || [];
   renderNewSchoolForm();
   renderNewJobForm();
+  renderImportPreviousJobForm();
   renderJobsScreen();
 }
 
@@ -3532,6 +3605,106 @@ async function submitNewJob(event) {
   } finally {
     button.disabled = false;
     button.textContent = 'Create Job';
+  }
+}
+
+async function browsePreviousJobFolder() {
+  importPreviousJobStatus.textContent = '';
+  try {
+    const result = await trecsApi('choosePreviousTrecsJobFolder').choosePreviousTrecsJobFolder();
+    if (!result || result.canceled) {
+      return;
+    }
+
+    importPreviousJobForm.elements.sourceFolder.value = result.folderPath;
+    const folderName = result.folderPath.split(/[\\/]/).filter(Boolean).pop();
+    if (!importPreviousJobForm.elements.name.value && folderName) {
+      importPreviousJobForm.elements.name.value = folderName;
+    }
+    if (!result.hasStudentsDatabase) {
+      importPreviousJobStatus.textContent = 'Database\\Students.accdb was not found in that folder.';
+    }
+  } catch (error) {
+    importPreviousJobStatus.textContent = error.message || 'Folder browse failed';
+    console.error(error);
+  }
+}
+
+async function submitImportPreviousJob(event) {
+  event.preventDefault();
+  const button = importPreviousJobForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = 'Importing...';
+  importPreviousJobStatus.textContent = 'Reading old TRECS job...';
+
+  try {
+    const result = await trecsApi('importPreviousTrecsJob').importPreviousTrecsJob({
+      clientId: importPreviousJobForm.elements.clientId.value,
+      name: importPreviousJobForm.elements.name.value,
+      type: importPreviousJobForm.elements.type.value,
+      packagePlanId: importPreviousJobForm.elements.packagePlanId.value,
+      sourceFolder: importPreviousJobForm.elements.sourceFolder.value,
+      rootPath: importPreviousJobForm.elements.rootPath.value,
+      notes: importPreviousJobForm.elements.notes.value
+    });
+
+    resetImportPreviousJobForm();
+    jobsState.selectedJobId = result.id;
+    jobsState.selectedType = 'all';
+    jobsState.search = '';
+    jobsState.detail = null;
+    jobsState.lastLaptopPackage = null;
+    jobSearchInput.value = '';
+    setImportPreviousJobFormVisible(false);
+    await loadDashboard();
+    await loadJobs();
+    await loadJobDetail(result.id);
+  } catch (error) {
+    importPreviousJobStatus.textContent = error.message || 'Import failed';
+    console.error(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Import Job';
+  }
+}
+
+async function loadOnsiteSetup() {
+  loadOnsiteSetupButton.disabled = true;
+  loadOnsiteSetupButton.textContent = 'Choosing...';
+
+  try {
+    const choice = await trecsApi('chooseOnsiteSetupFolder').chooseOnsiteSetupFolder();
+    if (!choice || choice.canceled) {
+      return;
+    }
+    if (!choice.hasManifest) {
+      throw new Error('onsite-setup.json was not found in that folder.');
+    }
+    if (!choice.hasDatabase) {
+      throw new Error('Database\\job.db was not found in that folder.');
+    }
+
+    loadOnsiteSetupButton.textContent = 'Loading...';
+    const result = await trecsApi('loadOnsiteSetup').loadOnsiteSetup({
+      setupFolder: choice.folderPath
+    });
+
+    jobsState.selectedJobId = result.id;
+    jobsState.selectedType = 'all';
+    jobsState.search = '';
+    jobsState.detail = null;
+    jobsState.lastLaptopPackage = null;
+    jobSearchInput.value = '';
+    setImportPreviousJobFormVisible(false);
+    await loadDashboard();
+    await loadJobs();
+    await loadJobDetail(result.id);
+  } catch (error) {
+    window.alert(error.message || 'Load onsite setup failed');
+    console.error(error);
+  } finally {
+    loadOnsiteSetupButton.disabled = false;
+    loadOnsiteSetupButton.textContent = 'Load Onsite Setup';
   }
 }
 
@@ -3751,3 +3924,16 @@ cancelNewJobButton.addEventListener('click', () => {
 });
 
 newJobForm.addEventListener('submit', submitNewJob);
+
+importPreviousJobButton.addEventListener('click', () => {
+  setImportPreviousJobFormVisible(!jobsState.showImportPreviousJobForm);
+});
+
+loadOnsiteSetupButton.addEventListener('click', loadOnsiteSetup);
+
+cancelImportPreviousJobButton.addEventListener('click', () => {
+  setImportPreviousJobFormVisible(false);
+});
+
+browsePreviousJobFolderButton.addEventListener('click', browsePreviousJobFolder);
+importPreviousJobForm.addEventListener('submit', submitImportPreviousJob);

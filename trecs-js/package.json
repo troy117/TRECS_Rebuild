@@ -4,14 +4,65 @@
   "private": true,
   "description": "TRECS JavaScript rebuild prototype",
   "main": "src/main/main.js",
+  "build": {
+    "appId": "com.islandphotography.trecs",
+    "productName": "TRECS",
+    "asar": false,
+    "directories": {
+      "output": "../build/single"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "node_modules/sql.js/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../database",
+        "to": "database",
+        "filter": [
+          "schema.sql",
+          "product_seed.sql",
+          "apply_product_aliases.sql"
+        ]
+      },
+      {
+        "from": "../JARS",
+        "to": "JARS"
+      },
+      {
+        "from": "../tools",
+        "to": "tools",
+        "filter": [
+          "**/*.java",
+          "**/*.class",
+          "**/*.js"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "TRECS-Portable.exe"
+    }
+  },
   "scripts": {
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
+    "build:portable": "node scripts/build-portable.js",
     "check": "node scripts/check-files.js",
     "check:db": "node scripts/check-db.js",
     "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1"
   },
   "devDependencies": {
-    "electron": "^31.0.0"
+    "@electron/packager": "^20.0.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "sql.js": "^1.14.1"

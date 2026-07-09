@@ -81,6 +81,8 @@
               </label>
               <button id="newSchoolButton">New School</button>
               <button class="primary" id="newJobButton">New Job</button>
+              <button id="importPreviousJobButton">Import Previous Job</button>
+              <button id="loadOnsiteSetupButton">Load Onsite Setup</button>
             </div>
           </section>
 
@@ -182,6 +184,58 @@
               <div class="form-actions wide-field">
                 <span id="newJobStatus"></span>
                 <button class="primary" type="submit">Create Job</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel import-job-panel" id="importPreviousJobPanel" hidden>
+            <div class="panel-heading">
+              <h2>Import Previous TRECS Job</h2>
+              <button id="cancelImportPreviousJobButton">Cancel</button>
+            </div>
+            <form id="importPreviousJobForm" class="new-job-form">
+              <label>
+                <span>School / Client</span>
+                <select name="clientId" required></select>
+              </label>
+              <label>
+                <span>Job Name</span>
+                <input name="name" required placeholder="Fall 2025">
+              </label>
+              <label>
+                <span>Type</span>
+                <select name="type">
+                  <option value="fall">Fall</option>
+                  <option value="spring">Spring</option>
+                  <option value="sports">Sports</option>
+                  <option value="seniors">Seniors</option>
+                  <option value="event">Event</option>
+                  <option value="qr_event">QR Event</option>
+                  <option value="league">League</option>
+                </select>
+              </label>
+              <label>
+                <span>Package Plan</span>
+                <select name="packagePlanId"></select>
+              </label>
+              <label class="wide-field">
+                <span>Previous Job Folder</span>
+                <div class="folder-picker">
+                  <input name="sourceFolder" readonly required placeholder="Choose the old TRECS job folder">
+                  <button id="browsePreviousJobFolderButton" type="button">Browse</button>
+                </div>
+              </label>
+              <label class="wide-field">
+                <span>New Root Path</span>
+                <input name="rootPath" placeholder="Leave blank for JOBS\\SCHOOL\\JOB">
+              </label>
+              <label class="wide-field">
+                <span>Notes</span>
+                <textarea name="notes" rows="3"></textarea>
+              </label>
+              <div class="form-actions wide-field">
+                <span id="importPreviousJobStatus"></span>
+                <button class="primary" type="submit">Import Job</button>
               </div>
             </form>
           </section>

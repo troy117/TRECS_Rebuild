@@ -122,6 +122,7 @@ main {
 .app-shell.workspace-mode .jobs-toolbar,
 .app-shell.workspace-mode .setup-panel,
 .app-shell.workspace-mode .new-job-panel,
+.app-shell.workspace-mode .import-job-panel,
 .app-shell.workspace-mode .jobs-layout,
 .app-shell.workspace-mode .job-workflow {
   display: none !important;
@@ -287,7 +288,8 @@ h2 {
 }
 
 .setup-panel,
-.new-job-panel {
+.new-job-panel,
+.import-job-panel {
   margin-bottom: 16px;
 }
 
@@ -335,6 +337,16 @@ h2 {
 
 .wide-field {
   grid-column: 1 / -1;
+}
+
+.folder-picker {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.folder-picker input {
+  min-width: 0;
 }
 
 .panel {
