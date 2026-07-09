@@ -2589,12 +2589,29 @@ function normalizeRecordCount(value) {
   return count;
 }
 
+function numericReferenceStart(value) {
+  const text = String(value || '').trim();
+  if (!text || /[^0-9]/.test(text)) {
+    return 1;
+  }
+
+  const ref = Number(text);
+  return Number.isSafeInteger(ref) && ref > 0 ? ref : 1;
+}
+
 async function createBlankSubjects(_event, jobIdValue, countValue) {
   const jobId = numericId(jobIdValue);
   const count = normalizeRecordCount(countValue);
 
   return writeSql((database) => {
-    const jobRows = rowsFromDatabase(database, `SELECT id FROM jobs WHERE id = ${jobId};`);
+    const jobRows = rowsFromDatabase(database, `
+      SELECT
+        j.id,
+        c.reference_number AS clientReferenceNumber
+      FROM jobs j
+      JOIN clients c ON c.id = j.client_id
+      WHERE j.id = ${jobId};
+    `);
     if (!jobRows.length) {
       throw new Error('Job not found');
     }
@@ -2608,7 +2625,9 @@ async function createBlankSubjects(_event, jobIdValue, countValue) {
         AND legacy_ref_num NOT GLOB '*[^0-9]*'
         AND CAST(legacy_ref_num AS INTEGER) > 0;
     `);
-    const startRef = Number(maxRows[0].maxRef || 0) + 1;
+    const nextExistingRef = Number(maxRows[0].maxRef || 0) + 1;
+    const schoolStartRef = numericReferenceStart(jobRows[0].clientReferenceNumber);
+    const startRef = Math.max(nextExistingRef, schoolStartRef);
     const statement = database.prepare(`
       INSERT INTO subjects (
         job_id,
