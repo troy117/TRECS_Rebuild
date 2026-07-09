@@ -68,6 +68,19 @@ const editOrderStatus = document.getElementById('editOrderStatus');
 const editOrderEnvelopePreview = document.getElementById('editOrderEnvelopePreview');
 const cancelEditOrderButton = document.getElementById('cancelEditOrderButton');
 const deleteOrderButton = document.getElementById('deleteOrderButton');
+const endOfDayModal = document.getElementById('endOfDayModal');
+const endOfDayReview = document.getElementById('endOfDayReview');
+const endOfDayStatus = document.getElementById('endOfDayStatus');
+const cancelEndOfDayButton = document.getElementById('cancelEndOfDayButton');
+const confirmEndOfDayButton = document.getElementById('confirmEndOfDayButton');
+const schoolDataModal = document.getElementById('schoolDataModal');
+const schoolDataFilePath = document.getElementById('schoolDataFilePath');
+const schoolDataMapping = document.getElementById('schoolDataMapping');
+const schoolDataPreview = document.getElementById('schoolDataPreview');
+const schoolDataStatus = document.getElementById('schoolDataStatus');
+const cancelSchoolDataButton = document.getElementById('cancelSchoolDataButton');
+const browseSchoolDataButton = document.getElementById('browseSchoolDataButton');
+const confirmSchoolDataButton = document.getElementById('confirmSchoolDataButton');
 const refreshUnlinkedEnvelopesButton = document.getElementById('refreshUnlinkedEnvelopesButton');
 const unlinkedEnvelopeList = document.getElementById('unlinkedEnvelopeList');
 const adminItemsWorkspace = document.getElementById('adminItemsWorkspace');
@@ -160,6 +173,9 @@ let jobsState = {
   imageSearch: '',
   imageLinkSubjectSearch: '',
   lastLaptopPackage: null,
+  lastEndOfDayPackage: null,
+  endOfDayReview: null,
+  schoolDataImport: null,
   showNewSchoolForm: false,
   selectedNewClientId: null,
   showNewJobForm: false,
@@ -448,6 +464,328 @@ function setAddRecordsModalVisible(visible) {
     addRecordsForm.reset();
     addRecordsForm.elements.recordCount.focus();
     addRecordsForm.elements.recordCount.select();
+  }
+}
+
+function setEndOfDayModalVisible(visible) {
+  endOfDayModal.hidden = !visible;
+  if (!visible) {
+    jobsState.endOfDayReview = null;
+    endOfDayStatus.textContent = '';
+    endOfDayReview.innerHTML = '<div class="empty-state">Loading changes...</div>';
+    confirmEndOfDayButton.disabled = false;
+    confirmEndOfDayButton.textContent = 'Create End of Day';
+  }
+}
+
+function shortChangeValue(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '(blank)';
+  }
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+}
+
+function renderEndOfDayReview(review) {
+  const counts = review.counts || {};
+  const changes = review.subjectChanges || {};
+  const capturedImages = review.capturedImages || [];
+  const newSubjects = changes.newSubjects || [];
+  const editedSubjects = changes.editedSubjects || [];
+  const deletedSubjects = changes.deletedSubjects || [];
+  const limitedImages = capturedImages.slice(0, 8);
+  const limitedNewSubjects = newSubjects.slice(0, 8);
+  const limitedEditedSubjects = editedSubjects.slice(0, 6);
+  const limitedDeletedSubjects = deletedSubjects.slice(0, 6);
+
+  endOfDayReview.innerHTML = `
+    <div class="end-of-day-summary">
+      <article><span>Captured Images</span><strong>${formatNumber(counts.capturedImages || 0)}</strong></article>
+      <article><span>CR3 Files</span><strong>${formatNumber(counts.capturedRawFiles || 0)}</strong></article>
+      <article><span>New Cards</span><strong>${formatNumber(counts.newSubjects || 0)}</strong></article>
+      <article><span>Student Edits</span><strong>${formatNumber(counts.editedSubjects || 0)}</strong></article>
+    </div>
+    ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
+    <section>
+      <h3>Captured Images</h3>
+      ${limitedImages.length ? `
+        <ul class="end-of-day-list">
+          ${limitedImages.map((image) => `
+            <li>
+              <strong>${escapeHtml(image.ref || '')}</strong>
+              <span>${escapeHtml(image.studentName || image.filename || '')}</span>
+              <em>${escapeHtml(image.filename || '')}${image.rawPath ? ' / CR3' : ''}</em>
+            </li>
+          `).join('')}
+        </ul>
+        ${capturedImages.length > limitedImages.length ? `<p>${formatNumber(capturedImages.length - limitedImages.length)} more captured images will be included.</p>` : ''}
+      ` : '<div class="empty-state">No captured images found.</div>'}
+    </section>
+    <section>
+      <h3>New Camera Cards</h3>
+      ${limitedNewSubjects.length ? `
+        <ul class="end-of-day-list">
+          ${limitedNewSubjects.map((subject) => `
+            <li>
+              <strong>${escapeHtml(subject.ref || '')}</strong>
+              <span>${escapeHtml(subject.name || '')}</span>
+              <em>${escapeHtml([subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</em>
+            </li>
+          `).join('')}
+        </ul>
+        ${newSubjects.length > limitedNewSubjects.length ? `<p>${formatNumber(newSubjects.length - limitedNewSubjects.length)} more new cards will be included.</p>` : ''}
+      ` : '<div class="empty-state">No new camera cards found.</div>'}
+    </section>
+    <section>
+      <h3>Student Database Edits</h3>
+      ${limitedEditedSubjects.length ? `
+        <ul class="end-of-day-change-list">
+          ${limitedEditedSubjects.map((subject) => `
+            <li>
+              <strong>${escapeHtml(subject.ref || '')} ${escapeHtml(subject.name || '')}</strong>
+              ${subject.changes.slice(0, 4).map((change) => `
+                <span>${escapeHtml(change.label)}: ${escapeHtml(shortChangeValue(change.before))} -> ${escapeHtml(shortChangeValue(change.after))}</span>
+              `).join('')}
+              ${subject.changes.length > 4 ? `<em>${subject.changes.length - 4} more field changes</em>` : ''}
+            </li>
+          `).join('')}
+        </ul>
+        ${editedSubjects.length > limitedEditedSubjects.length ? `<p>${formatNumber(editedSubjects.length - limitedEditedSubjects.length)} more edited students will be included.</p>` : ''}
+      ` : '<div class="empty-state">No student edits found.</div>'}
+    </section>
+    ${deletedSubjects.length ? `
+      <section>
+        <h3>Deleted Records</h3>
+        <ul class="end-of-day-list">
+          ${limitedDeletedSubjects.map((subject) => `
+            <li>
+              <strong>${escapeHtml(subject.ref || '')}</strong>
+              <span>${escapeHtml(subject.name || '')}</span>
+            </li>
+          `).join('')}
+        </ul>
+        ${deletedSubjects.length > limitedDeletedSubjects.length ? `<p>${formatNumber(deletedSubjects.length - limitedDeletedSubjects.length)} more deleted records will be included.</p>` : ''}
+      </section>
+    ` : ''}
+  `;
+}
+
+async function openEndOfDayReview(jobId) {
+  jobsState.endOfDayReview = { jobId, loading: true };
+  endOfDayStatus.textContent = '';
+  endOfDayReview.innerHTML = '<div class="empty-state">Loading changes...</div>';
+  setEndOfDayModalVisible(true);
+  try {
+    const review = await trecsApi('getEndOfDayPreview').getEndOfDayPreview(jobId);
+    jobsState.endOfDayReview = { jobId, review };
+    renderEndOfDayReview(review);
+  } catch (error) {
+    jobsState.endOfDayReview = { jobId, error };
+    endOfDayReview.innerHTML = '<div class="empty-state">Could not load end of day changes.</div>';
+    endOfDayStatus.textContent = error.message || 'End of day review failed';
+    confirmEndOfDayButton.disabled = true;
+    throw error;
+  }
+}
+
+async function confirmEndOfDayPackage() {
+  const reviewState = jobsState.endOfDayReview;
+  if (!reviewState || !reviewState.jobId) {
+    return;
+  }
+
+  confirmEndOfDayButton.disabled = true;
+  confirmEndOfDayButton.textContent = 'Creating...';
+  endOfDayStatus.textContent = '';
+  jobsState.lastEndOfDayPackage = { jobId: reviewState.jobId, status: 'working' };
+
+  try {
+    const result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(reviewState.jobId);
+    jobsState.lastEndOfDayPackage = {
+      jobId: reviewState.jobId,
+      status: 'done',
+      packagePath: result.packagePath,
+      capturedImages: result.counts.capturedImages || 0
+    };
+    setEndOfDayModalVisible(false);
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    jobsState.lastEndOfDayPackage = {
+      jobId: reviewState.jobId,
+      status: 'error',
+      message: error.message || 'End of day failed'
+    };
+    endOfDayStatus.textContent = error.message || 'End of day failed';
+    confirmEndOfDayButton.disabled = false;
+    confirmEndOfDayButton.textContent = 'Create End of Day';
+    await reloadCurrentJobDetail();
+    console.error(error);
+  }
+}
+
+function setSchoolDataModalVisible(visible) {
+  schoolDataModal.hidden = !visible;
+  if (!visible) {
+    jobsState.schoolDataImport = null;
+    schoolDataFilePath.value = '';
+    schoolDataStatus.textContent = '';
+    schoolDataMapping.innerHTML = '<div class="empty-state">Choose a file to preview and map columns.</div>';
+    schoolDataPreview.innerHTML = '';
+    confirmSchoolDataButton.disabled = true;
+    confirmSchoolDataButton.textContent = 'Import School Data';
+  }
+}
+
+function openSchoolDataImport(jobId) {
+  jobsState.schoolDataImport = {
+    jobId,
+    preview: null,
+    mapping: {}
+  };
+  schoolDataFilePath.value = '';
+  schoolDataStatus.textContent = '';
+  schoolDataMapping.innerHTML = '<div class="empty-state">Choose a file to preview and map columns.</div>';
+  schoolDataPreview.innerHTML = '';
+  confirmSchoolDataButton.disabled = true;
+  setSchoolDataModalVisible(true);
+}
+
+function schoolDataColumnOptions(preview, selectedIndex) {
+  const options = ['<option value="">Do not import</option>'];
+  (preview.columns || []).forEach((column) => {
+    options.push(`
+      <option value="${column.index}" ${Number(selectedIndex) === column.index ? 'selected' : ''}>
+        ${escapeHtml(column.name)}
+      </option>
+    `);
+  });
+  return options.join('');
+}
+
+function renderSchoolDataMapping() {
+  const state = jobsState.schoolDataImport;
+  const preview = state && state.preview;
+  if (!preview) {
+    return;
+  }
+
+  const mapping = state.mapping || {};
+  schoolDataFilePath.value = preview.filePath;
+  schoolDataMapping.innerHTML = `
+    <div class="school-data-fields">
+      ${(preview.fields || []).map((field) => `
+        <label>
+          <span>${escapeHtml(field.label)}${field.required ? ' *' : ''}</span>
+          <select data-school-field="${escapeHtml(field.key)}">
+            ${schoolDataColumnOptions(preview, mapping[field.key])}
+          </select>
+        </label>
+      `).join('')}
+    </div>
+  `;
+
+  schoolDataMapping.querySelectorAll('[data-school-field]').forEach((select) => {
+    select.addEventListener('change', () => {
+      const key = select.dataset.schoolField;
+      if (select.value === '') {
+        delete jobsState.schoolDataImport.mapping[key];
+      } else {
+        jobsState.schoolDataImport.mapping[key] = Number(select.value);
+      }
+      confirmSchoolDataButton.disabled = jobsState.schoolDataImport.mapping.ref === undefined;
+      renderSchoolDataPreview();
+    });
+  });
+
+  confirmSchoolDataButton.disabled = mapping.ref === undefined;
+  renderSchoolDataPreview();
+}
+
+function renderSchoolDataPreview() {
+  const state = jobsState.schoolDataImport;
+  const preview = state && state.preview;
+  if (!preview) {
+    schoolDataPreview.innerHTML = '';
+    return;
+  }
+
+  const columns = preview.columns || [];
+  const rows = preview.rows || [];
+  schoolDataPreview.innerHTML = `
+    <div class="school-data-meta">
+      <span>${escapeHtml(preview.fileName || '')}</span>
+      <span>${preview.hasHeader ? 'Header row detected' : 'No header row detected'}</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          ${columns.map((column) => `<th>${escapeHtml(column.name)}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.slice(0, 10).map((row) => `
+          <tr>
+            ${columns.map((column) => `<td>${escapeHtml(row[column.index] || '')}</td>`).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+async function browseSchoolDataFile() {
+  const state = jobsState.schoolDataImport;
+  if (!state || !state.jobId) {
+    return;
+  }
+
+  browseSchoolDataButton.disabled = true;
+  browseSchoolDataButton.textContent = 'Browsing...';
+  schoolDataStatus.textContent = '';
+
+  try {
+    const preview = await trecsApi('chooseSchoolDataFile').chooseSchoolDataFile(state.jobId);
+    if (!preview || preview.canceled) {
+      return;
+    }
+    jobsState.schoolDataImport.preview = preview;
+    jobsState.schoolDataImport.mapping = { ...(preview.mapping || {}) };
+    renderSchoolDataMapping();
+  } catch (error) {
+    schoolDataStatus.textContent = error.message || 'Could not read school data file';
+    console.error(error);
+  } finally {
+    browseSchoolDataButton.disabled = false;
+    browseSchoolDataButton.textContent = 'Browse';
+  }
+}
+
+async function confirmSchoolDataImport() {
+  const state = jobsState.schoolDataImport;
+  if (!state || !state.preview || !state.jobId) {
+    return;
+  }
+
+  confirmSchoolDataButton.disabled = true;
+  confirmSchoolDataButton.textContent = 'Importing...';
+  schoolDataStatus.textContent = '';
+
+  try {
+    const result = await trecsApi('importSchoolData').importSchoolData(state.jobId, {
+      filePath: state.preview.filePath,
+      hasHeader: state.preview.hasHeader,
+      mapping: state.mapping
+    });
+    schoolDataStatus.textContent = `Imported ${formatNumber(result.created)} new and updated ${formatNumber(result.updated)} records.`;
+    await loadDashboard();
+    await loadJobs();
+    await loadJobDetail(state.jobId);
+    setSchoolDataModalVisible(false);
+  } catch (error) {
+    schoolDataStatus.textContent = error.message || 'School data import failed';
+    confirmSchoolDataButton.disabled = false;
+    confirmSchoolDataButton.textContent = 'Import School Data';
+    console.error(error);
   }
 }
 
@@ -2527,9 +2865,14 @@ function renderJobDetail(job) {
       </dl>
       <div class="path-box">${job.rootPath}</div>
       <div class="package-actions">
+        <button data-import-school-data="${job.id}">Import School Data</button>
         <button class="primary" data-prepare-laptop-package="${job.id}">Prepare Onsite Setup</button>
+        <button data-end-of-day-package="${job.id}">Make End of Day</button>
         <span data-laptop-package-status>
           ${renderLaptopPackageStatus(job.id)}
+        </span>
+        <span data-end-of-day-status>
+          ${renderEndOfDayStatus(job.id)}
         </span>
       </div>
     </div>
@@ -2555,48 +2898,100 @@ function renderLaptopPackageStatus(jobId) {
   return `Created onsite setup with ${laptopPackage.subjects} subjects at ${laptopPackage.packagePath}`;
 }
 
+function renderEndOfDayStatus(jobId) {
+  const endOfDay = jobsState.lastEndOfDayPackage;
+  if (!endOfDay || endOfDay.jobId !== jobId) {
+    return '';
+  }
+
+  if (endOfDay.status === 'working') {
+    return 'Creating end of day...';
+  }
+
+  if (endOfDay.status === 'error') {
+    return endOfDay.message || 'End of day failed';
+  }
+
+  return `Created end of day with ${endOfDay.capturedImages} captured images at ${endOfDay.packagePath}`;
+}
+
 function bindJobDetailActions() {
+  const importSchoolDataButton = jobDetailPanel.querySelector('[data-import-school-data]');
+  if (importSchoolDataButton) {
+    importSchoolDataButton.addEventListener('click', () => {
+      openSchoolDataImport(Number(importSchoolDataButton.dataset.importSchoolData));
+    });
+  }
+
   const button = jobDetailPanel.querySelector('[data-prepare-laptop-package]');
-  if (!button) {
+  if (button) {
+    button.addEventListener('click', async () => {
+      const jobId = Number(button.dataset.prepareLaptopPackage);
+      const status = jobDetailPanel.querySelector('[data-laptop-package-status]');
+      const originalText = button.textContent;
+
+      button.disabled = true;
+      button.textContent = 'Preparing...';
+      jobsState.lastLaptopPackage = { jobId, status: 'working' };
+      if (status) {
+        status.textContent = renderLaptopPackageStatus(jobId);
+      }
+
+      try {
+        const result = await trecsApi('prepareLaptopPackage').prepareLaptopPackage(jobId);
+        jobsState.lastLaptopPackage = {
+          jobId,
+          status: 'done',
+          packagePath: result.packagePath,
+          subjects: result.counts.subjects
+        };
+        if (status) {
+          status.textContent = renderLaptopPackageStatus(jobId);
+        }
+      } catch (error) {
+        jobsState.lastLaptopPackage = {
+          jobId,
+          status: 'error',
+          message: error.message || 'Package failed'
+        };
+        if (status) {
+          status.textContent = renderLaptopPackageStatus(jobId);
+        }
+        console.error(error);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    });
+  }
+
+  const endOfDayButton = jobDetailPanel.querySelector('[data-end-of-day-package]');
+  if (!endOfDayButton) {
     return;
   }
 
-  button.addEventListener('click', async () => {
-    const jobId = Number(button.dataset.prepareLaptopPackage);
-    const status = jobDetailPanel.querySelector('[data-laptop-package-status]');
-    const originalText = button.textContent;
-
-    button.disabled = true;
-    button.textContent = 'Preparing...';
-    jobsState.lastLaptopPackage = { jobId, status: 'working' };
-    if (status) {
-      status.textContent = renderLaptopPackageStatus(jobId);
-    }
+  endOfDayButton.addEventListener('click', async () => {
+    const jobId = Number(endOfDayButton.dataset.endOfDayPackage);
+    const status = jobDetailPanel.querySelector('[data-end-of-day-status]');
+    const originalText = endOfDayButton.textContent;
 
     try {
-      const result = await trecsApi('prepareLaptopPackage').prepareLaptopPackage(jobId);
-      jobsState.lastLaptopPackage = {
-        jobId,
-        status: 'done',
-        packagePath: result.packagePath,
-        subjects: result.counts.subjects
-      };
-      if (status) {
-        status.textContent = renderLaptopPackageStatus(jobId);
-      }
+      endOfDayButton.disabled = true;
+      endOfDayButton.textContent = 'Reviewing...';
+      await openEndOfDayReview(jobId);
     } catch (error) {
-      jobsState.lastLaptopPackage = {
+      jobsState.lastEndOfDayPackage = {
         jobId,
         status: 'error',
-        message: error.message || 'Package failed'
+        message: error.message || 'End of day review failed'
       };
       if (status) {
-        status.textContent = renderLaptopPackageStatus(jobId);
+        status.textContent = renderEndOfDayStatus(jobId);
       }
       console.error(error);
     } finally {
-      button.disabled = false;
-      button.textContent = originalText;
+      endOfDayButton.disabled = false;
+      endOfDayButton.textContent = originalText;
     }
   });
 }
@@ -3897,6 +4292,15 @@ deleteOrderButton.addEventListener('click', async () => {
     await deleteWorkspaceOrder(orderId);
   }
 });
+cancelEndOfDayButton.addEventListener('click', () => {
+  setEndOfDayModalVisible(false);
+});
+confirmEndOfDayButton.addEventListener('click', confirmEndOfDayPackage);
+cancelSchoolDataButton.addEventListener('click', () => {
+  setSchoolDataModalVisible(false);
+});
+browseSchoolDataButton.addEventListener('click', browseSchoolDataFile);
+confirmSchoolDataButton.addEventListener('click', confirmSchoolDataImport);
 refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
 if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
   window.trecs.onEnvelopeScanImported(handleEnvelopeScanImported);

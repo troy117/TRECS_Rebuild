@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
+const readXlsxFile = require('read-excel-file/node');
 
 const appFolderCandidate = path.resolve(__dirname, '../..');
 const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
@@ -1021,6 +1022,326 @@ async function prepareLaptopPackage(_event, jobIdValue) {
 }
 
 ipcMain.handle('laptop-package:prepare', prepareLaptopPackage);
+
+function localCaptureRowsFromDatabase(database, jobId) {
+  createLocalCaptureSchema(database);
+  return rowsFromDatabase(database, `
+    SELECT *
+    FROM capture_events
+    WHERE job_id = ${jobId}
+    ORDER BY captured_at, id;
+  `);
+}
+
+async function readLocalCaptureRows(jobId) {
+  const dbPath = localCaptureDatabasePath(jobId);
+  if (!fs.existsSync(dbPath)) {
+    return { dbPath, rows: [] };
+  }
+
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    return {
+      dbPath,
+      rows: localCaptureRowsFromDatabase(database, jobId)
+    };
+  } finally {
+    database.close();
+  }
+}
+
+function endOfDayBaselinePath(rootPathValue) {
+  return path.join(resolveProjectPath(rootPathValue), 'Database', 'onsite-start.db');
+}
+
+function normalizeSubjectForCompare(row) {
+  return {
+    id: row.id,
+    ref: row.legacy_ref_num || '',
+    type: row.subject_type || '',
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    displayName: row.display_name || '',
+    externalId: row.external_id || '',
+    grade: row.grade || '',
+    homeroom: row.homeroom || '',
+    track: row.track || '',
+    team: row.team || '',
+    notes: row.notes || ''
+  };
+}
+
+function subjectLabel(row) {
+  return [
+    row.legacy_ref_num || row.ref || '',
+    row.display_name || row.displayName || [row.first_name || row.firstName, row.last_name || row.lastName].filter(Boolean).join(' ')
+  ].filter(Boolean).join(' - ') || `Subject ${row.id}`;
+}
+
+function compareSubjectRows(currentRows, baselineRows) {
+  const baselineById = new Map(baselineRows.map((row) => [Number(row.id), row]));
+  const currentById = new Map(currentRows.map((row) => [Number(row.id), row]));
+  const fields = [
+    ['ref', 'Reference'],
+    ['type', 'Type'],
+    ['firstName', 'First'],
+    ['lastName', 'Last'],
+    ['displayName', 'Display'],
+    ['externalId', 'Student ID'],
+    ['grade', 'Grade'],
+    ['homeroom', 'Homeroom'],
+    ['track', 'Track'],
+    ['team', 'Team'],
+    ['notes', 'Notes']
+  ];
+
+  const newSubjects = currentRows
+    .filter((row) => !baselineById.has(Number(row.id)))
+    .map((row) => ({
+      id: row.id,
+      ref: row.legacy_ref_num,
+      name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' '),
+      grade: row.grade,
+      homeroom: row.homeroom
+    }));
+
+  const editedSubjects = [];
+  currentRows.forEach((row) => {
+    const baseline = baselineById.get(Number(row.id));
+    if (!baseline) {
+      return;
+    }
+
+    const currentValue = normalizeSubjectForCompare(row);
+    const baselineValue = normalizeSubjectForCompare(baseline);
+    const changes = fields
+      .filter(([field]) => currentValue[field] !== baselineValue[field])
+      .map(([field, label]) => ({
+        field,
+        label,
+        before: baselineValue[field],
+        after: currentValue[field]
+      }));
+
+    if (changes.length) {
+      editedSubjects.push({
+        id: row.id,
+        ref: row.legacy_ref_num,
+        name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' '),
+        changes
+      });
+    }
+  });
+
+  const deletedSubjects = baselineRows
+    .filter((row) => !currentById.has(Number(row.id)))
+    .map((row) => ({
+      id: row.id,
+      ref: row.legacy_ref_num,
+      name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' ')
+    }));
+
+  return { newSubjects, editedSubjects, deletedSubjects };
+}
+
+function parseImageMetadata(metadataJson) {
+  if (!metadataJson) {
+    return {};
+  }
+  try {
+    return JSON.parse(metadataJson);
+  } catch (_error) {
+    return {};
+  }
+}
+
+async function buildEndOfDayPreview(jobId) {
+  const SQL = await getSqlModule();
+  const sourceDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+
+  try {
+    const jobRows = rowsFromDatabase(sourceDatabase, `
+      SELECT
+        j.id,
+        j.name,
+        j.type,
+        j.root_path AS rootPath,
+        c.display_name AS clientName,
+        c.trecs_name AS trecsName
+      FROM jobs j
+      JOIN clients c ON c.id = j.client_id
+      WHERE j.id = ${jobId}
+      LIMIT 1;
+    `);
+    if (!jobRows.length) {
+      throw new Error('Job not found');
+    }
+
+    const job = jobRows[0];
+    const subjectRows = rowsFromDatabase(sourceDatabase, `
+      SELECT *
+      FROM subjects
+      WHERE job_id = ${jobId}
+      ORDER BY legacy_ref_num, last_name, first_name, id;
+    `);
+    const capturedImages = rowsFromDatabase(sourceDatabase, `
+      SELECT
+        ia.id,
+        ia.filename,
+        ia.current_path AS currentPath,
+        ia.metadata_json AS metadataJson,
+        ia.captured_at AS capturedAt,
+        s.id AS subjectId,
+        s.legacy_ref_num AS ref,
+        s.display_name AS studentName,
+        si.selected
+      FROM image_assets ia
+      LEFT JOIN subject_images si ON si.image_asset_id = ia.id
+      LEFT JOIN subjects s ON s.id = si.subject_id
+      WHERE ia.job_id = ${jobId}
+        AND ia.source = 'capture_hot_folder'
+      ORDER BY ia.captured_at, ia.id;
+    `).map((row) => {
+      const metadata = parseImageMetadata(row.metadataJson);
+      return {
+        ...row,
+        rawPath: metadata.rawPath || null
+      };
+    });
+
+    const baselinePath = endOfDayBaselinePath(job.rootPath);
+    let baselineRows = [];
+    let hasBaseline = false;
+    if (fs.existsSync(baselinePath)) {
+      const baselineDatabase = new SQL.Database(fs.readFileSync(baselinePath));
+      try {
+        baselineRows = rowsFromOptionalTable(baselineDatabase, 'subjects');
+        hasBaseline = true;
+      } finally {
+        baselineDatabase.close();
+      }
+    }
+
+    const subjectChanges = hasBaseline
+      ? compareSubjectRows(subjectRows, baselineRows)
+      : {
+          newSubjects: [],
+          editedSubjects: [],
+          deletedSubjects: []
+        };
+    const localCapture = await readLocalCaptureRows(jobId);
+
+    return {
+      job,
+      baselinePath,
+      hasBaseline,
+      localCaptureDatabasePath: localCapture.dbPath,
+      counts: {
+        capturedImages: capturedImages.length,
+        capturedRawFiles: capturedImages.filter((image) => image.rawPath).length,
+        localCaptureEvents: localCapture.rows.length,
+        newSubjects: subjectChanges.newSubjects.length,
+        editedSubjects: subjectChanges.editedSubjects.length,
+        deletedSubjects: subjectChanges.deletedSubjects.length
+      },
+      capturedImages,
+      localCaptureEvents: localCapture.rows,
+      subjectChanges
+    };
+  } finally {
+    sourceDatabase.close();
+  }
+}
+
+async function getEndOfDayPreview(_event, jobIdValue) {
+  return buildEndOfDayPreview(numericId(jobIdValue));
+}
+
+function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
+  if (!sourcePathValue) {
+    return null;
+  }
+
+  const sourcePath = resolveProjectPath(sourcePathValue);
+  if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    return null;
+  }
+
+  fs.mkdirSync(destinationFolder, { recursive: true });
+  const destinationPath = uniquePath(destinationFolder, fallbackName || path.basename(sourcePath));
+  fs.copyFileSync(sourcePath, destinationPath);
+  return path.relative(projectRoot, destinationPath);
+}
+
+async function createEndOfDayPackage(_event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const preview = await buildEndOfDayPreview(jobId);
+  const createdAt = new Date();
+  const packageName = `${safeFolderName(`${preview.job.trecsName || preview.job.clientName}-${preview.job.name}`)}-end-of-day-${timestampForFolder(createdAt)}`;
+  const packagePath = path.join(projectRoot, 'exports', 'end-of-day', packageName);
+  const databaseFolder = path.join(packagePath, 'Database');
+  const imagesFolder = path.join(packagePath, 'Images');
+  fs.mkdirSync(databaseFolder, { recursive: true });
+  fs.mkdirSync(imagesFolder, { recursive: true });
+
+  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
+    fs.copyFileSync(jobDatabasePath, path.join(databaseFolder, 'job.db'));
+  }
+  if (preview.localCaptureDatabasePath && fs.existsSync(preview.localCaptureDatabasePath)) {
+    fs.copyFileSync(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
+  }
+  if (preview.hasBaseline && fs.existsSync(preview.baselinePath)) {
+    fs.copyFileSync(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
+  }
+
+  const copiedImages = [];
+  preview.capturedImages.forEach((image) => {
+    const jpgPath = copyPackageFile(image.currentPath, imagesFolder);
+    const rawPath = copyPackageFile(image.rawPath, imagesFolder);
+    copiedImages.push({
+      imageAssetId: image.id,
+      ref: image.ref,
+      studentName: image.studentName,
+      filename: image.filename,
+      jpgPath,
+      rawPath,
+      selected: image.selected === 1
+    });
+  });
+
+  const manifest = {
+    packageType: 'end_of_day',
+    app: 'TRECS',
+    createdAt: createdAt.toISOString(),
+    workstation: process.env.COMPUTERNAME || os.hostname(),
+    sourceDatabasePath: prototypeDatabasePath,
+    job: preview.job,
+    counts: preview.counts,
+    copiedImages,
+    subjectChanges: preview.subjectChanges,
+    paths: {
+      database: 'Database/job.db',
+      localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
+      onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
+      images: 'Images'
+    }
+  };
+
+  const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  return {
+    packagePath,
+    manifestPath,
+    databasePath: path.join(databaseFolder, 'job.db'),
+    counts: preview.counts
+  };
+}
+
+ipcMain.handle('end-of-day:preview', getEndOfDayPreview);
+ipcMain.handle('end-of-day:create', createEndOfDayPackage);
 
 async function writeSql(updateDatabase) {
   const SQL = await getSqlModule();
@@ -2850,7 +3171,9 @@ async function loadOnsiteSetup(_event, input = {}) {
 
       ensureJobFolders(rootPath);
       const setupCopyPath = path.join(resolveProjectPath(rootPath), 'Database', 'job.db');
+      const baselineCopyPath = path.join(resolveProjectPath(rootPath), 'Database', 'onsite-start.db');
       fs.copyFileSync(databasePath, setupCopyPath);
+      fs.copyFileSync(databasePath, baselineCopyPath);
       const copiedCroppedMed = copyOnsiteCroppedMediumImages(setupFolder, rootPath);
 
       const jobRow = {
@@ -3274,6 +3597,364 @@ ipcMain.handle('job:choose-previous-trecs-folder', choosePreviousTrecsJobFolder)
 ipcMain.handle('job:import-previous-trecs', importPreviousTrecsJob);
 ipcMain.handle('job:choose-onsite-setup-folder', chooseOnsiteSetupFolder);
 ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
+
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let value = '';
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        value += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        value += char;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(value);
+      value = '';
+    } else if (char === '\n') {
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = '';
+    } else if (char !== '\r') {
+      value += char;
+    }
+  }
+
+  if (value || row.length) {
+    row.push(value);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+async function readSchoolDataRows(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.csv' || extension === '.txt') {
+    return parseCsvRows(fs.readFileSync(filePath, 'utf8'));
+  }
+
+  if (extension === '.xlsx') {
+    return readXlsxFile(filePath);
+  }
+
+  throw new Error('School data file must be CSV or XLSX');
+}
+
+function normalizeImportCell(value) {
+  return String(value === null || value === undefined ? '' : value).trim();
+}
+
+function nonEmptySchoolDataRows(rows) {
+  return rows
+    .map((row) => row.map(normalizeImportCell))
+    .filter((row) => row.some((value) => value));
+}
+
+const SCHOOL_IMPORT_FIELDS = [
+  { key: 'ref', label: 'Reference Number', required: true, aliases: ['ref', 'refnum', 'reference', 'reference number', 'student number', 'camera card'] },
+  { key: 'firstName', label: 'First Name', aliases: ['first', 'firstname', 'first name', 'given name'] },
+  { key: 'lastName', label: 'Last Name', aliases: ['last', 'lastname', 'last name', 'surname', 'family name'] },
+  { key: 'displayName', label: 'Display Name', aliases: ['name', 'student name', 'display name', 'full name'] },
+  { key: 'externalId', label: 'Student ID', aliases: ['id', 'student id', 'studentid', 'stu id', 'stuid', 'sid', 'local id'] },
+  { key: 'grade', label: 'Grade', aliases: ['grade', 'gr'] },
+  { key: 'homeroom', label: 'Homeroom / Teacher', aliases: ['homeroom', 'home room', 'teacher', 'classroom', 'room'] },
+  { key: 'track', label: 'Track', aliases: ['track', 'program'] },
+  { key: 'team', label: 'Team', aliases: ['team', 'sport'] },
+  { key: 'subjectType', label: 'Subject Type', aliases: ['type', 'subject type', 'student type'] },
+  { key: 'notes', label: 'Notes', aliases: ['notes', 'note', 'comments', 'comment'] }
+];
+
+function looksLikeHeaderRow(row) {
+  const joined = row.map((value) => value.toLowerCase()).join(' ');
+  return SCHOOL_IMPORT_FIELDS.some((field) => field.aliases.some((alias) => joined.includes(alias)));
+}
+
+function schoolDataColumns(rows) {
+  const firstRow = rows[0] || [];
+  const hasHeader = looksLikeHeaderRow(firstRow);
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  return Array.from({ length: width }, (_unused, index) => ({
+    index,
+    name: hasHeader ? (firstRow[index] || `Column ${index + 1}`) : `Column ${index + 1}`,
+    sample: (hasHeader ? rows.slice(1) : rows).map((row) => row[index] || '').filter(Boolean).slice(0, 3)
+  }));
+}
+
+function guessedSchoolDataMapping(columns) {
+  const mapping = {};
+  columns.forEach((column) => {
+    const normalizedName = column.name.toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const field = SCHOOL_IMPORT_FIELDS.find((candidate) => candidate.aliases.includes(normalizedName));
+    if (field && mapping[field.key] === undefined) {
+      mapping[field.key] = column.index;
+    }
+  });
+  return mapping;
+}
+
+async function previewSchoolData(filePath) {
+  const rows = nonEmptySchoolDataRows(await readSchoolDataRows(filePath));
+  if (!rows.length) {
+    throw new Error('The selected school data file is empty');
+  }
+
+  const hasHeader = looksLikeHeaderRow(rows[0]);
+  const columns = schoolDataColumns(rows);
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  return {
+    filePath,
+    fileName: path.basename(filePath),
+    hasHeader,
+    columns,
+    mapping: guessedSchoolDataMapping(columns),
+    fields: SCHOOL_IMPORT_FIELDS,
+    rows: dataRows.slice(0, 25)
+  };
+}
+
+async function chooseSchoolDataFile(event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const jobRows = await querySql(`
+    SELECT root_path AS rootPath
+    FROM jobs
+    WHERE id = ${jobId}
+    LIMIT 1;
+  `);
+  if (!jobRows.length) {
+    throw new Error('Job not found');
+  }
+
+  const defaultPath = path.join(resolveProjectPath(jobRows[0].rootPath), 'Database');
+  fs.mkdirSync(defaultPath, { recursive: true });
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose School Data File',
+    defaultPath,
+    properties: ['openFile'],
+    filters: [
+      { name: 'School data', extensions: ['csv', 'xlsx'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  return {
+    canceled: false,
+    ...(await previewSchoolData(result.filePaths[0]))
+  };
+}
+
+function importRowValue(row, mapping, key) {
+  const columnIndex = mapping[key];
+  if (columnIndex === null || columnIndex === undefined || columnIndex === '') {
+    return '';
+  }
+  return normalizeImportCell(row[Number(columnIndex)]);
+}
+
+function normalizedImportSubjectType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) {
+    return 'student';
+  }
+  if (['faculty', 'staff', 'teacher', 'fac'].includes(text)) {
+    return 'faculty';
+  }
+  return 'student';
+}
+
+function displayNameFromImport(firstName, lastName, displayName) {
+  return optionalText(displayName, 255) || [firstName, lastName].filter(Boolean).join(' ') || null;
+}
+
+function copySchoolDataSourceFile(filePath, jobRoot) {
+  const importsFolder = path.join(jobRoot, 'Database', 'Imports');
+  fs.mkdirSync(importsFolder, { recursive: true });
+  const destinationPath = uniquePath(importsFolder, path.basename(filePath));
+  fs.copyFileSync(filePath, destinationPath);
+  return path.relative(projectRoot, destinationPath);
+}
+
+async function importSchoolData(_event, jobIdValue, input = {}) {
+  const jobId = numericId(jobIdValue);
+  const filePath = normalizeText(input.filePath, 'School data file', 1000);
+  const mapping = input.mapping || {};
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error('School data file was not found');
+  }
+  if (mapping.ref === null || mapping.ref === undefined || mapping.ref === '') {
+    throw new Error('Reference Number must be mapped before importing');
+  }
+
+  const allRows = nonEmptySchoolDataRows(await readSchoolDataRows(filePath));
+  const hasHeader = Boolean(input.hasHeader);
+  const dataRows = hasHeader ? allRows.slice(1) : allRows;
+  const importedAt = new Date().toISOString();
+
+  const result = await writeSql((database) => {
+    const jobRows = rowsFromDatabase(database, `
+      SELECT id, root_path AS rootPath
+      FROM jobs
+      WHERE id = ${jobId}
+      LIMIT 1;
+    `);
+    if (!jobRows.length) {
+      throw new Error('Job not found');
+    }
+
+    const jobRoot = resolveProjectPath(jobRows[0].rootPath);
+    const copiedSourcePath = copySchoolDataSourceFile(filePath, jobRoot);
+    const subjectStatement = database.prepare(`
+      INSERT INTO subjects (
+        job_id,
+        legacy_ref_num,
+        subject_type,
+        first_name,
+        last_name,
+        display_name,
+        external_id,
+        grade,
+        homeroom,
+        track,
+        team,
+        photographed_status,
+        notes
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?);
+    `);
+    const updateStatement = database.prepare(`
+      UPDATE subjects
+      SET subject_type = ?,
+          first_name = ?,
+          last_name = ?,
+          display_name = ?,
+          external_id = ?,
+          grade = ?,
+          homeroom = ?,
+          track = ?,
+          team = ?,
+          notes = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `);
+    const codeStatement = database.prepare(`
+      INSERT OR IGNORE INTO subject_codes (
+        subject_id,
+        code_type,
+        code
+      )
+      VALUES (?, ?, ?);
+    `);
+
+    const skippedRows = [];
+    let created = 0;
+    let updated = 0;
+
+    try {
+      dataRows.forEach((row, index) => {
+        const ref = importRowValue(row, mapping, 'ref');
+        if (!ref) {
+          skippedRows.push({ rowNumber: index + (hasHeader ? 2 : 1), reason: 'Missing reference number' });
+          return;
+        }
+
+        const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
+        const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
+        const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
+        const externalId = optionalText(importRowValue(row, mapping, 'externalId'), 255);
+        const grade = optionalText(importRowValue(row, mapping, 'grade'), 100);
+        const homeroom = optionalText(importRowValue(row, mapping, 'homeroom'), 100);
+        const track = optionalText(importRowValue(row, mapping, 'track'), 100);
+        const team = optionalText(importRowValue(row, mapping, 'team'), 100);
+        const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
+        const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
+        const existingRows = rowsFromDatabase(database, `
+          SELECT id
+          FROM subjects
+          WHERE job_id = ${jobId}
+            AND legacy_ref_num = ${sqlLiteral(ref)}
+          LIMIT 1;
+        `);
+
+        let subjectId = null;
+        if (existingRows.length) {
+          subjectId = existingRows[0].id;
+          updateStatement.run([
+            subjectType,
+            firstName,
+            lastName,
+            displayName,
+            externalId,
+            grade,
+            homeroom,
+            track,
+            team,
+            notes,
+            subjectId
+          ]);
+          updated += 1;
+        } else {
+          subjectStatement.run([
+            jobId,
+            ref,
+            subjectType,
+            firstName,
+            lastName,
+            displayName,
+            externalId,
+            grade,
+            homeroom,
+            track,
+            team,
+            notes
+          ]);
+          subjectId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+          created += 1;
+        }
+
+        codeStatement.run([subjectId, 'legacy_ref', ref]);
+        if (externalId) {
+          codeStatement.run([subjectId, 'student_id', externalId]);
+        }
+      });
+    } finally {
+      subjectStatement.free();
+      updateStatement.free();
+      codeStatement.free();
+    }
+
+    return {
+      jobId,
+      created,
+      updated,
+      skipped: skippedRows.length,
+      skippedRows: skippedRows.slice(0, 25),
+      sourceFilePath: copiedSourcePath,
+      importedAt
+    };
+  });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+ipcMain.handle('school-data:choose-file', chooseSchoolDataFile);
+ipcMain.handle('school-data:import', importSchoolData);
 
 async function getJobDetail(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
@@ -5028,7 +5709,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
   const sourcePath = pair.imagePath;
   const rawSourcePath = pair.rawPath;
 
-  return writeSql((database) => {
+  const result = await writeSql((database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,

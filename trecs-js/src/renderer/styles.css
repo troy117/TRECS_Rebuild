@@ -659,6 +659,148 @@ dd {
   width: min(86vw, 980px);
 }
 
+.end-of-day-card {
+  max-height: min(88vh, 780px);
+  overflow: hidden;
+  width: min(88vw, 920px);
+}
+
+.end-of-day-review {
+  display: grid;
+  gap: 14px;
+  max-height: min(62vh, 560px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.end-of-day-summary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.end-of-day-summary article {
+  background: #f6f8fb;
+  border: 1px solid #d7e0e8;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.end-of-day-summary span,
+.end-of-day-list em,
+.end-of-day-change-list em {
+  color: #617488;
+  font-size: 12px;
+}
+
+.end-of-day-summary strong {
+  display: block;
+  font-size: 22px;
+  margin-top: 4px;
+}
+
+.end-of-day-review h3 {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.end-of-day-review p {
+  color: #617488;
+  margin: 6px 0 0;
+  min-height: 0;
+}
+
+.end-of-day-list,
+.end-of-day-change-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.end-of-day-list li,
+.end-of-day-change-list li {
+  border: 1px solid #d7e0e8;
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+}
+
+.end-of-day-change-list span {
+  color: #374151;
+  font-size: 13px;
+}
+
+.end-of-day-warning {
+  background: #fff8e5;
+  border: 1px solid #ead58c;
+  border-radius: 8px;
+  color: #725a00;
+  padding: 10px;
+}
+
+.school-data-card {
+  max-height: min(90vh, 820px);
+  overflow: hidden;
+  width: min(92vw, 1040px);
+}
+
+.school-data-file-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.school-data-file-row input,
+.school-data-fields select {
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  font: inherit;
+  height: 38px;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.school-data-fields {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.school-data-fields label span {
+  color: #617488;
+  display: block;
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.school-data-meta {
+  color: #617488;
+  display: flex;
+  font-size: 13px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.school-data-preview {
+  max-height: min(36vh, 360px);
+  overflow: auto;
+}
+
+.school-data-preview table {
+  min-width: 720px;
+}
+
+.school-data-preview th,
+.school-data-preview td {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .edit-order-card {
   max-height: min(90vh, 820px);
   width: min(82vw, 860px);

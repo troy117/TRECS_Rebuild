@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('trecs', {
   importPreviousTrecsJob: (input) => ipcRenderer.invoke('job:import-previous-trecs', input),
   chooseOnsiteSetupFolder: () => ipcRenderer.invoke('job:choose-onsite-setup-folder'),
   loadOnsiteSetup: (input) => ipcRenderer.invoke('job:load-onsite-setup', input),
+  chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
+  importSchoolData: (jobId, input) => ipcRenderer.invoke('school-data:import', jobId, input),
   getAdminItems: (jobId, stage) => ipcRenderer.invoke('admin-items:get', jobId, stage),
   renderAdminItem: (jobId, input) => ipcRenderer.invoke('admin-items:render', jobId, input),
   renderSubjectIdCard: (jobId, subjectId, input) => ipcRenderer.invoke('id-card:render-subject', jobId, subjectId, input),
@@ -51,5 +53,7 @@ contextBridge.exposeInMainWorld('trecs', {
   createEnvelopeOrder: (jobId, subjectId, input) => ipcRenderer.invoke('envelope:create-order', jobId, subjectId, input),
   linkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:link-subject', subjectId, imageId),
   getImagePreview: (imageId) => ipcRenderer.invoke('image:preview', imageId),
-  prepareLaptopPackage: (jobId) => ipcRenderer.invoke('laptop-package:prepare', jobId)
+  prepareLaptopPackage: (jobId) => ipcRenderer.invoke('laptop-package:prepare', jobId),
+  getEndOfDayPreview: (jobId) => ipcRenderer.invoke('end-of-day:preview', jobId),
+  createEndOfDayPackage: (jobId) => ipcRenderer.invoke('end-of-day:create', jobId)
 });

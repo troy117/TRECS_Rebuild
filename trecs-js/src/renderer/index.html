@@ -285,6 +285,28 @@
             </div>
           </section>
 
+          <div class="modal-backdrop" id="schoolDataModal" hidden>
+            <div class="modal-card school-data-card">
+              <div class="modal-heading">
+                <h2>Import School Data</h2>
+                <button id="cancelSchoolDataButton" type="button">Cancel</button>
+              </div>
+              <div class="school-data-file-row">
+                <input id="schoolDataFilePath" readonly placeholder="Choose CSV or Excel file">
+                <button id="browseSchoolDataButton" type="button">Browse</button>
+              </div>
+              <div id="schoolDataMapping" class="school-data-mapping">
+                <div class="empty-state">Choose a file to preview and map columns.</div>
+              </div>
+              <div id="schoolDataPreview" class="school-data-preview"></div>
+              <p id="schoolDataStatus"></p>
+              <div class="form-actions">
+                <span>Reference Number is required. Existing references will be updated.</span>
+                <button class="primary" id="confirmSchoolDataButton" type="button" disabled>Import School Data</button>
+              </div>
+            </div>
+          </div>
+
           <section class="job-student-workspace" id="jobStudentWorkspace" hidden>
             <div class="workspace-header">
               <div>
@@ -540,6 +562,24 @@
                 </div>
               </form>
             </div>
+
+            <div class="modal-backdrop" id="endOfDayModal" hidden>
+              <div class="modal-card end-of-day-card">
+                <div class="modal-heading">
+                  <h2>End of Day Review</h2>
+                  <button id="cancelEndOfDayButton" type="button">Cancel</button>
+                </div>
+                <div id="endOfDayReview" class="end-of-day-review">
+                  <div class="empty-state">Loading changes...</div>
+                </div>
+                <p id="endOfDayStatus"></p>
+                <div class="form-actions">
+                  <span>Confirm these changes before creating the package.</span>
+                  <button class="primary" id="confirmEndOfDayButton" type="button">Create End of Day</button>
+                </div>
+              </div>
+            </div>
+
           </section>
         </section>
       </main>
