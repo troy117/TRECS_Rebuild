@@ -692,12 +692,12 @@ function renderSchoolDataMapping() {
       } else {
         jobsState.schoolDataImport.mapping[key] = Number(select.value);
       }
-      confirmSchoolDataButton.disabled = jobsState.schoolDataImport.mapping.ref === undefined;
+      confirmSchoolDataButton.disabled = false;
       renderSchoolDataPreview();
     });
   });
 
-  confirmSchoolDataButton.disabled = mapping.ref === undefined;
+  confirmSchoolDataButton.disabled = false;
   renderSchoolDataPreview();
 }
 

@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
-const readXlsxFile = require('read-excel-file/node');
+const XLSX = require('xlsx');
 
 const appFolderCandidate = path.resolve(__dirname, '../..');
 const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
@@ -3645,11 +3645,20 @@ async function readSchoolDataRows(filePath) {
     return parseCsvRows(fs.readFileSync(filePath, 'utf8'));
   }
 
-  if (extension === '.xlsx') {
-    return readXlsxFile(filePath);
+  if (['.xls', '.xlsx', '.xlsm'].includes(extension)) {
+    const workbook = XLSX.readFile(filePath, { cellDates: false });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) {
+      throw new Error('The selected Excel file does not contain any worksheets');
+    }
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      raw: false,
+      defval: ''
+    });
   }
 
-  throw new Error('School data file must be CSV or XLSX');
+  throw new Error('School data file must be CSV, XLS, XLSX, or XLSM');
 }
 
 function normalizeImportCell(value) {
@@ -3663,7 +3672,7 @@ function nonEmptySchoolDataRows(rows) {
 }
 
 const SCHOOL_IMPORT_FIELDS = [
-  { key: 'ref', label: 'Reference Number', required: true, aliases: ['ref', 'refnum', 'reference', 'reference number', 'student number', 'camera card'] },
+  { key: 'ref', label: 'Reference Number', aliases: ['ref', 'refnum', 'reference', 'reference number', 'student number', 'camera card'] },
   { key: 'firstName', label: 'First Name', aliases: ['first', 'firstname', 'first name', 'given name'] },
   { key: 'lastName', label: 'Last Name', aliases: ['last', 'lastname', 'last name', 'surname', 'family name'] },
   { key: 'displayName', label: 'Display Name', aliases: ['name', 'student name', 'display name', 'full name'] },
@@ -3743,7 +3752,7 @@ async function chooseSchoolDataFile(event, jobIdValue) {
     defaultPath,
     properties: ['openFile'],
     filters: [
-      { name: 'School data', extensions: ['csv', 'xlsx'] },
+      { name: 'School data', extensions: ['csv', 'txt', 'xls', 'xlsx', 'xlsm'] },
       { name: 'All files', extensions: ['*'] }
     ]
   });
@@ -3781,6 +3790,21 @@ function displayNameFromImport(firstName, lastName, displayName) {
   return optionalText(displayName, 255) || [firstName, lastName].filter(Boolean).join(' ') || null;
 }
 
+function numericReferenceValue(value) {
+  const text = String(value || '').trim();
+  return /^\d+$/.test(text) ? Number(text) : null;
+}
+
+function nextImportReference(usedRefs, state) {
+  while (usedRefs.has(String(state.nextRef))) {
+    state.nextRef += 1;
+  }
+  const ref = String(state.nextRef);
+  usedRefs.add(ref);
+  state.nextRef += 1;
+  return ref;
+}
+
 function copySchoolDataSourceFile(filePath, jobRoot) {
   const importsFolder = path.join(jobRoot, 'Database', 'Imports');
   fs.mkdirSync(importsFolder, { recursive: true });
@@ -3796,9 +3820,6 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
     throw new Error('School data file was not found');
   }
-  if (mapping.ref === null || mapping.ref === undefined || mapping.ref === '') {
-    throw new Error('Reference Number must be mapped before importing');
-  }
 
   const allRows = nonEmptySchoolDataRows(await readSchoolDataRows(filePath));
   const hasHeader = Boolean(input.hasHeader);
@@ -3807,9 +3828,13 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 
   const result = await writeSql((database) => {
     const jobRows = rowsFromDatabase(database, `
-      SELECT id, root_path AS rootPath
-      FROM jobs
-      WHERE id = ${jobId}
+      SELECT
+        j.id,
+        j.root_path AS rootPath,
+        c.reference_number AS clientReferenceNumber
+      FROM jobs j
+      JOIN clients c ON c.id = j.client_id
+      WHERE j.id = ${jobId}
       LIMIT 1;
     `);
     if (!jobRows.length) {
@@ -3817,6 +3842,22 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
     }
 
     const jobRoot = resolveProjectPath(jobRows[0].rootPath);
+    const existingRefs = rowsFromDatabase(database, `
+      SELECT legacy_ref_num AS ref
+      FROM subjects
+      WHERE job_id = ${jobId}
+        AND legacy_ref_num IS NOT NULL
+        AND legacy_ref_num != '';
+    `).map((row) => String(row.ref));
+    const usedRefs = new Set(existingRefs);
+    const maxExistingRef = existingRefs
+      .map(numericReferenceValue)
+      .filter((value) => value !== null)
+      .reduce((max, value) => Math.max(max, value), 0);
+    const schoolStartRef = numericReferenceValue(jobRows[0].clientReferenceNumber) || 1;
+    const referenceState = {
+      nextRef: maxExistingRef > 0 ? maxExistingRef + 1 : schoolStartRef
+    };
     const copiedSourcePath = copySchoolDataSourceFile(filePath, jobRoot);
     const subjectStatement = database.prepare(`
       INSERT INTO subjects (
@@ -3866,12 +3907,6 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 
     try {
       dataRows.forEach((row, index) => {
-        const ref = importRowValue(row, mapping, 'ref');
-        if (!ref) {
-          skippedRows.push({ rowNumber: index + (hasHeader ? 2 : 1), reason: 'Missing reference number' });
-          return;
-        }
-
         const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
         const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
         const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
@@ -3882,6 +3917,28 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         const team = optionalText(importRowValue(row, mapping, 'team'), 100);
         const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
         const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
+        const mappedRef = importRowValue(row, mapping, 'ref');
+        const hasImportedData = Boolean(
+          mappedRef ||
+          firstName ||
+          lastName ||
+          displayName ||
+          externalId ||
+          grade ||
+          homeroom ||
+          track ||
+          team ||
+          notes
+        );
+        if (!hasImportedData) {
+          skippedRows.push({ rowNumber: index + (hasHeader ? 2 : 1), reason: 'No mapped student data' });
+          return;
+        }
+
+        const ref = mappedRef || nextImportReference(usedRefs, referenceState);
+        if (mappedRef) {
+          usedRefs.add(mappedRef);
+        }
         const existingRows = rowsFromDatabase(database, `
           SELECT id
           FROM subjects
