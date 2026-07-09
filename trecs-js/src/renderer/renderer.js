@@ -19,6 +19,7 @@ const backToJobsButton = document.getElementById('backToJobsButton');
 const workspaceJobTitle = document.getElementById('workspaceJobTitle');
 const workspaceJobMeta = document.getElementById('workspaceJobMeta');
 const workspaceStudentsButton = document.getElementById('workspaceStudentsButton');
+const workspaceEnvelopeButton = document.getElementById('workspaceEnvelopeButton');
 const workspaceAdminItemsButton = document.getElementById('workspaceAdminItemsButton');
 const workspaceAddBlankButton = document.getElementById('workspaceAddBlankButton');
 const workspaceEditStudentButton = document.getElementById('workspaceEditStudentButton');
@@ -33,6 +34,29 @@ const addRecordsModal = document.getElementById('addRecordsModal');
 const addRecordsForm = document.getElementById('addRecordsForm');
 const cancelAddRecordsButton = document.getElementById('cancelAddRecordsButton');
 const addRecordsStatus = document.getElementById('addRecordsStatus');
+const envelopeWorkspace = document.getElementById('envelopeWorkspace');
+const envelopeEntryForm = document.getElementById('envelopeEntryForm');
+const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
+const envelopeSubjectDetail = document.getElementById('envelopeSubjectDetail');
+const envelopePreview = document.getElementById('envelopePreview');
+const envelopePreviewMeta = document.getElementById('envelopePreviewMeta');
+const envelopeConfirmModal = document.getElementById('envelopeConfirmModal');
+const envelopeConfirmMessage = document.getElementById('envelopeConfirmMessage');
+const confirmEnvelopeButton = document.getElementById('confirmEnvelopeButton');
+const cancelEnvelopeConfirmButton = document.getElementById('cancelEnvelopeConfirmButton');
+const orderEnvelopeModal = document.getElementById('orderEnvelopeModal');
+const orderEnvelopeTitle = document.getElementById('orderEnvelopeTitle');
+const orderEnvelopePreview = document.getElementById('orderEnvelopePreview');
+const closeOrderEnvelopeButton = document.getElementById('closeOrderEnvelopeButton');
+const editOrderModal = document.getElementById('editOrderModal');
+const editOrderForm = document.getElementById('editOrderForm');
+const editOrderTitle = document.getElementById('editOrderTitle');
+const editOrderStatus = document.getElementById('editOrderStatus');
+const editOrderEnvelopePreview = document.getElementById('editOrderEnvelopePreview');
+const cancelEditOrderButton = document.getElementById('cancelEditOrderButton');
+const deleteOrderButton = document.getElementById('deleteOrderButton');
+const refreshUnlinkedEnvelopesButton = document.getElementById('refreshUnlinkedEnvelopesButton');
+const unlinkedEnvelopeList = document.getElementById('unlinkedEnvelopeList');
 const adminItemsWorkspace = document.getElementById('adminItemsWorkspace');
 const adminOptionsForm = document.getElementById('adminOptionsForm');
 const adminItemsStatus = document.getElementById('adminItemsStatus');
@@ -69,6 +93,12 @@ let jobsState = {
   jobWorkspaceOpen: false,
   workspaceMode: 'students',
   workspaceStudentSearch: '',
+  envelopeSubject: null,
+  envelopeScan: null,
+  envelopePending: null,
+  envelopeWatcherSubjectId: null,
+  unlinkedEnvelopeScans: [],
+  editingOrderId: null,
   showStudentEditForm: false,
   showAddRecordsModal: false,
   adminItems: null,
@@ -344,17 +374,27 @@ function closeJobWorkspace() {
 function setWorkspaceMode(mode) {
   jobsState.workspaceMode = mode;
   const studentsOpen = mode === 'students';
+  const envelopeOpen = mode === 'envelope';
+  const adminOpen = mode === 'admin';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
-  adminItemsWorkspace.hidden = studentsOpen;
+  envelopeWorkspace.hidden = !envelopeOpen;
+  adminItemsWorkspace.hidden = !adminOpen;
   workspaceStudentsButton.classList.toggle('active', studentsOpen);
-  workspaceAdminItemsButton.classList.toggle('active', !studentsOpen);
+  workspaceEnvelopeButton.classList.toggle('active', envelopeOpen);
+  workspaceAdminItemsButton.classList.toggle('active', adminOpen);
   workspaceAddBlankButton.hidden = !studentsOpen;
   workspaceEditStudentButton.hidden = !studentsOpen;
   workspacePreviousButton.hidden = !studentsOpen;
   workspaceNextButton.hidden = !studentsOpen;
 
+  if (!envelopeOpen) {
+    stopEnvelopeWatcher().catch((error) => console.error(error));
+  }
+
   if (studentsOpen) {
     renderStudentWorkspace();
+  } else if (envelopeOpen) {
+    renderEnvelopeWorkspace();
   } else {
     renderAdminItemsWorkspace();
   }
@@ -729,6 +769,31 @@ async function loadWorkspacePhoto(imageId) {
   }
 }
 
+async function loadEnvelopeSubjectPhoto(imageId) {
+  const panel = document.getElementById('envelopeSubjectPhoto');
+  if (!panel) {
+    return;
+  }
+
+  if (!imageId) {
+    panel.innerHTML = '<div class="empty-state">No photo linked.</div>';
+    return;
+  }
+
+  try {
+    const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+    if (!preview || preview.missing || !preview.dataUrl) {
+      panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+      return;
+    }
+
+    panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
+  } catch (error) {
+    panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+    console.error(error);
+  }
+}
+
 function renderWorkspaceOrderDetail(subject) {
   if (!subject) {
     workspaceOrderDetail.innerHTML = '<div class="empty-state">No student selected.</div>';
@@ -746,9 +811,14 @@ function renderWorkspaceOrderDetail(subject) {
     ${renderMiniSection(
       'Order Summary',
       orders.map((order) => `
-        <div>
+        <div class="mini-order-row">
           <span>#${order.id} ${order.source} / ${order.paidStatus}</span>
           <strong>${order.packageCodes || 'No codes'} (${order.itemCount} items)</strong>
+          <div class="mini-row-actions">
+            <button data-workspace-order-envelope="${order.id}" type="button">View</button>
+            <button data-workspace-order-edit="${order.id}" type="button">Edit</button>
+            <button data-workspace-order-delete="${order.id}" type="button">Delete</button>
+          </div>
         </div>
       `),
       'No orders for this student.'
@@ -764,6 +834,436 @@ function renderWorkspaceOrderDetail(subject) {
       'No linked images.'
     )}
   `;
+
+  workspaceOrderDetail.querySelectorAll('[data-workspace-order-envelope]').forEach((row) => {
+    row.addEventListener('click', () => {
+      showOrderEnvelope(Number(row.dataset.workspaceOrderEnvelope));
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-workspace-order-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      showEditOrder(Number(button.dataset.workspaceOrderEdit));
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-workspace-order-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      deleteWorkspaceOrder(Number(button.dataset.workspaceOrderDelete));
+    });
+  });
+}
+
+async function showOrderEnvelope(orderId) {
+  orderEnvelopeModal.hidden = false;
+  orderEnvelopeTitle.textContent = `Order #${orderId} Envelope`;
+  orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
+
+  try {
+    const preview = await trecsApi('getOrderEnvelopePreview').getOrderEnvelopePreview(orderId);
+    const subjectLine = [preview.ref, preview.subjectName].filter(Boolean).join(' ');
+    orderEnvelopeTitle.textContent = `Order #${orderId}${subjectLine ? ` / ${subjectLine}` : ''}`;
+    renderOrderEnvelopePreview(orderEnvelopePreview, preview);
+  } catch (error) {
+    orderEnvelopePreview.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load envelope.')}</div>`;
+    console.error(error);
+  }
+}
+
+function renderOrderEnvelopePreview(container, preview) {
+  if (preview.missing || !preview.dataUrl) {
+    container.innerHTML = `<div class="empty-state">${escapeHtml(preview.reason || 'No envelope scan linked.')}</div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Envelope scan')}">
+    <div class="order-envelope-meta">
+      <span>${escapeHtml(preview.filename || '')}</span>
+      <span>${preview.keyedOrderCode ? `Codes: ${escapeHtml(preview.keyedOrderCode)}` : ''}</span>
+    </div>
+  `;
+}
+
+function closeOrderEnvelope() {
+  orderEnvelopeModal.hidden = true;
+  orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
+}
+
+function showEditOrder(orderId) {
+  const order = findById(jobsState.detail.subjectOrders || [], orderId) || findById(jobsState.detail.orders || [], orderId);
+  if (!order) {
+    return;
+  }
+
+  jobsState.editingOrderId = orderId;
+  editOrderTitle.textContent = `Edit Order #${orderId}`;
+  editOrderForm.elements.orderCodes.value = order.packageCodes || '';
+  editOrderForm.elements.paidStatus.value = order.paidStatus || 'unknown';
+  editOrderForm.elements.notes.value = order.notes || '';
+  editOrderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
+  editOrderStatus.textContent = '';
+  editOrderModal.hidden = false;
+  editOrderForm.elements.orderCodes.focus();
+  editOrderForm.elements.orderCodes.select();
+  loadEditOrderEnvelope(orderId);
+}
+
+async function loadEditOrderEnvelope(orderId) {
+  try {
+    const preview = await trecsApi('getOrderEnvelopePreview').getOrderEnvelopePreview(orderId);
+    renderOrderEnvelopePreview(editOrderEnvelopePreview, preview);
+  } catch (error) {
+    editOrderEnvelopePreview.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load envelope.')}</div>`;
+    console.error(error);
+  }
+}
+
+function closeEditOrder() {
+  jobsState.editingOrderId = null;
+  editOrderModal.hidden = true;
+  editOrderStatus.textContent = '';
+}
+
+async function submitEditOrder(event) {
+  event.preventDefault();
+  if (!jobsState.editingOrderId) {
+    return;
+  }
+
+  const button = editOrderForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  editOrderStatus.textContent = 'Saving...';
+
+  try {
+    const result = await trecsApi('updateOrder').updateOrder(jobsState.editingOrderId, {
+      orderCodes: editOrderForm.elements.orderCodes.value,
+      paidStatus: editOrderForm.elements.paidStatus.value,
+      notes: editOrderForm.elements.notes.value
+    });
+    jobsState.selectedOrderId = result.id;
+    closeEditOrder();
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    editOrderStatus.textContent = error.message || 'Save failed';
+    console.error(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteWorkspaceOrder(orderId) {
+  const order = findById(jobsState.detail.subjectOrders || [], orderId) || findById(jobsState.detail.orders || [], orderId);
+  const label = order && order.packageCodes ? `#${orderId} (${order.packageCodes})` : `#${orderId}`;
+  if (!confirm(`Delete order ${label}? This will keep the envelope scan but remove the order and its items.`)) {
+    return;
+  }
+
+  try {
+    await trecsApi('deleteOrder').deleteOrder(orderId);
+    if (jobsState.selectedOrderId === orderId) {
+      jobsState.selectedOrderId = null;
+    }
+    await reloadCurrentJobDetail();
+    if (jobsState.workspaceMode === 'envelope') {
+      await loadUnlinkedEnvelopeScans();
+    }
+  } catch (error) {
+    alert(error.message || 'Delete failed');
+    console.error(error);
+  }
+}
+
+function renderEnvelopeWorkspace() {
+  if (!jobsState.detail || !jobsState.detail.summary) {
+    return;
+  }
+
+  const job = jobsState.detail.summary;
+  title.textContent = `${job.job} Envelope Entry`;
+  workspaceJobTitle.textContent = `${job.location} / ${job.job}`;
+  workspaceJobMeta.textContent = `${formatType(job.type)} / Envelope scan order entry`;
+  renderEnvelopeSubject();
+  renderEnvelopePreview();
+  loadUnlinkedEnvelopeScans();
+
+  setTimeout(() => {
+    envelopeEntryForm.elements.barcode.focus();
+    envelopeEntryForm.elements.barcode.select();
+  }, 0);
+}
+
+async function loadUnlinkedEnvelopeScans() {
+  if (!jobsState.selectedJobId || jobsState.workspaceMode !== 'envelope') {
+    return;
+  }
+
+  unlinkedEnvelopeList.innerHTML = '<div class="empty-state">Loading unlinked envelopes...</div>';
+  try {
+    jobsState.unlinkedEnvelopeScans = await trecsApi('getUnlinkedEnvelopeScans').getUnlinkedEnvelopeScans(jobsState.selectedJobId);
+    renderUnlinkedEnvelopeScans();
+  } catch (error) {
+    unlinkedEnvelopeList.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load unlinked envelopes.')}</div>`;
+    console.error(error);
+  }
+}
+
+function renderUnlinkedEnvelopeScans() {
+  const scans = jobsState.unlinkedEnvelopeScans || [];
+  if (!scans.length) {
+    unlinkedEnvelopeList.innerHTML = '<div class="empty-state">No unlinked envelopes.</div>';
+    return;
+  }
+
+  unlinkedEnvelopeList.innerHTML = scans.map((scan) => `
+    <div class="unlinked-envelope-row">
+      <div>
+        <span>${escapeHtml(scan.ref || scan.envelopeIdentifier || '')}</span>
+        <strong>${escapeHtml(scan.subjectName || 'Unassigned envelope')}</strong>
+        <em>${escapeHtml(scan.scanPath || '')}</em>
+      </div>
+      <button data-unlinked-envelope-view="${scan.id}" type="button">View</button>
+    </div>
+  `).join('');
+
+  unlinkedEnvelopeList.querySelectorAll('[data-unlinked-envelope-view]').forEach((button) => {
+    button.addEventListener('click', () => {
+      showEnvelopeScan(Number(button.dataset.unlinkedEnvelopeView));
+    });
+  });
+}
+
+async function showEnvelopeScan(scanId) {
+  orderEnvelopeModal.hidden = false;
+  orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}`;
+  orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
+
+  try {
+    const preview = await trecsApi('getEnvelopeScanPreview').getEnvelopeScanPreview(scanId);
+    const subjectLine = [preview.ref, preview.subjectName].filter(Boolean).join(' ');
+    orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}${subjectLine ? ` / ${subjectLine}` : ''}`;
+    renderOrderEnvelopePreview(orderEnvelopePreview, preview);
+  } catch (error) {
+    orderEnvelopePreview.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load envelope.')}</div>`;
+    console.error(error);
+  }
+}
+
+function renderEnvelopeSubject() {
+  const subject = jobsState.envelopeSubject;
+  if (!subject) {
+    envelopeSubjectDetail.innerHTML = '<div class="empty-state">Scan a camera card barcode.</div>';
+    return;
+  }
+
+  const existingOrders = rowsFor(jobsState.detail.subjectOrders || [], 'subjectId', subject.id);
+  envelopeSubjectDetail.innerHTML = `
+    <div class="workspace-student-header">
+      <div>
+        <span>Ref # ${subject.ref || ''}</span>
+        <h2>${subject.name || 'Unnamed student'}</h2>
+      </div>
+      <span class="status ${subject.imageAssetId ? 'ready' : 'review'}">${subject.imageAssetId ? 'Photo linked' : 'No photo'}</span>
+    </div>
+    <div class="envelope-subject-photo" id="envelopeSubjectPhoto">
+      <div class="empty-state">Loading photo...</div>
+    </div>
+    <dl class="workspace-fields envelope-fields">
+      <div><dt>Student ID</dt><dd>${subject.externalId || ''}</dd></div>
+      <div><dt>Grade</dt><dd>${subject.grade || ''}</dd></div>
+      <div><dt>Homeroom</dt><dd>${subject.homeroom || ''}</dd></div>
+      <div><dt>Orders</dt><dd>${formatNumber(existingOrders.length)}</dd></div>
+    </dl>
+    ${renderMiniSection(
+      'Existing Orders',
+      existingOrders.map((order) => `
+        <div>
+          <span>#${order.id} ${order.source} / ${order.paidStatus}</span>
+          <strong>${order.packageCodes || 'No codes'} (${order.itemCount} items)</strong>
+        </div>
+      `),
+      'No existing orders.'
+    )}
+  `;
+  loadEnvelopeSubjectPhoto(subject.imageAssetId);
+}
+
+function renderEnvelopePreview() {
+  const scan = jobsState.envelopeScan;
+  if (!scan) {
+    envelopePreviewMeta.textContent = '';
+    envelopePreview.innerHTML = '<div class="empty-state">No envelope scan imported.</div>';
+    return;
+  }
+
+  envelopePreviewMeta.textContent = scan.filename || '';
+  if (!scan.dataUrl) {
+    envelopePreview.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+    return;
+  }
+
+  envelopePreview.innerHTML = `<img src="${scan.dataUrl}" alt="${escapeHtml(scan.filename || 'Envelope scan')}">`;
+}
+
+async function lookupEnvelopeSubject() {
+  const barcode = envelopeEntryForm.elements.barcode.value.trim();
+  if (!barcode || !jobsState.selectedJobId) {
+    return;
+  }
+
+  envelopeEntryStatus.textContent = '';
+  try {
+    const result = await trecsApi('findSubjectByBarcode').findSubjectByBarcode(jobsState.selectedJobId, barcode);
+    const previousSubjectId = jobsState.envelopeSubject ? jobsState.envelopeSubject.id : null;
+    jobsState.envelopeSubject = result.subject;
+    jobsState.selectedSubjectId = result.subject.id;
+    if (previousSubjectId !== result.subject.id) {
+      jobsState.envelopeScan = null;
+      jobsState.envelopePending = null;
+      envelopeConfirmModal.hidden = true;
+      renderEnvelopePreview();
+    }
+    envelopeEntryStatus.textContent = '';
+    renderEnvelopeSubject();
+    await startEnvelopeWatcherForCurrentSubject();
+    envelopeEntryForm.elements.orderCodes.focus();
+  } catch (error) {
+    jobsState.envelopeSubject = null;
+    jobsState.envelopeWatcherSubjectId = null;
+    await stopEnvelopeWatcher();
+    envelopeEntryStatus.textContent = error.message || 'Student not found';
+    renderEnvelopeSubject();
+    console.error(error);
+  }
+}
+
+async function startEnvelopeWatcherForCurrentSubject() {
+  const hotFolder = 'EnvelopeHotFolder';
+  if (!jobsState.envelopeSubject) {
+    return;
+  }
+
+  const result = await trecsApi('startEnvelopeWatcher').startEnvelopeWatcher(
+    jobsState.selectedJobId,
+    jobsState.envelopeSubject.id,
+    hotFolder
+  );
+  jobsState.envelopeWatcherSubjectId = jobsState.envelopeSubject.id;
+  return result;
+}
+
+async function stopEnvelopeWatcher() {
+  if (!window.trecs || typeof window.trecs.stopEnvelopeWatcher !== 'function') {
+    return;
+  }
+  jobsState.envelopeWatcherSubjectId = null;
+  await trecsApi('stopEnvelopeWatcher').stopEnvelopeWatcher();
+}
+
+function handleEnvelopeScanImported(payload) {
+  if (!payload) {
+    return;
+  }
+  if (payload.pending) {
+    showEnvelopeConfirm(payload.pending);
+    return;
+  }
+  if (payload.error) {
+    envelopeEntryStatus.textContent = payload.error;
+    return;
+  }
+  if (!payload.scan) {
+    return;
+  }
+  if (!jobsState.envelopeSubject || payload.scan.subjectId !== jobsState.envelopeSubject.id) {
+    return;
+  }
+  jobsState.envelopeScan = payload.scan;
+  envelopeEntryStatus.textContent = '';
+  renderEnvelopePreview();
+  loadUnlinkedEnvelopeScans();
+  envelopeEntryForm.elements.orderCodes.focus();
+}
+
+function showEnvelopeConfirm(pending) {
+  if (!jobsState.envelopeSubject || pending.subjectId !== jobsState.envelopeSubject.id) {
+    return;
+  }
+
+  jobsState.envelopePending = pending;
+  envelopeConfirmMessage.textContent = `Another envelope was scanned. Attach ${pending.filename} to ref ${jobsState.envelopeSubject.ref || ''}?`;
+  envelopeConfirmModal.hidden = false;
+  confirmEnvelopeButton.focus();
+}
+
+async function respondEnvelopeConfirm(accept) {
+  if (!jobsState.envelopePending) {
+    envelopeConfirmModal.hidden = true;
+    return;
+  }
+
+  confirmEnvelopeButton.disabled = true;
+  cancelEnvelopeConfirmButton.disabled = true;
+  try {
+    const result = await trecsApi('confirmEnvelopeScan').confirmEnvelopeScan(accept);
+    envelopeConfirmModal.hidden = true;
+    jobsState.envelopePending = null;
+    if (accept && result.scan) {
+      handleEnvelopeScanImported({ scan: result.scan });
+    } else {
+      envelopeEntryForm.elements.barcode.focus();
+      envelopeEntryForm.elements.barcode.select();
+    }
+  } catch (error) {
+    envelopeConfirmMessage.textContent = error.message || 'Could not confirm envelope';
+    console.error(error);
+  } finally {
+    confirmEnvelopeButton.disabled = false;
+    cancelEnvelopeConfirmButton.disabled = false;
+  }
+}
+
+async function submitEnvelopeOrder(event) {
+  event.preventDefault();
+  if (!jobsState.selectedJobId) {
+    return;
+  }
+  if (!jobsState.envelopeSubject) {
+    await lookupEnvelopeSubject();
+  }
+  if (!jobsState.envelopeSubject) {
+    return;
+  }
+
+  const orderInput = envelopeEntryForm.elements.orderCodes;
+  orderInput.disabled = true;
+  envelopeEntryStatus.textContent = '';
+
+  try {
+    const result = await trecsApi('createEnvelopeOrder').createEnvelopeOrder(
+      jobsState.selectedJobId,
+      jobsState.envelopeSubject.id,
+      {
+        envelopeScanId: jobsState.envelopeScan ? jobsState.envelopeScan.id : null,
+        orderCodes: envelopeEntryForm.elements.orderCodes.value,
+        paidStatus: envelopeEntryForm.elements.paidStatus.value,
+        notes: envelopeEntryForm.elements.notes.value
+      }
+    );
+    envelopeEntryStatus.textContent = `Created order #${result.orderId}`;
+    jobsState.selectedOrderId = result.orderId;
+    envelopeEntryForm.elements.orderCodes.value = '';
+    envelopeEntryForm.elements.notes.value = '';
+    await reloadCurrentJobDetail();
+    jobsState.envelopeSubject = jobsState.detail.subjects.find((subject) => subject.id === result.subjectId) || jobsState.envelopeSubject;
+    renderEnvelopeSubject();
+    renderEnvelopePreview();
+    envelopeEntryForm.elements.barcode.focus();
+    envelopeEntryForm.elements.barcode.select();
+  } catch (error) {
+    envelopeEntryStatus.textContent = error.message || 'Order failed';
+    console.error(error);
+  } finally {
+    orderInput.disabled = false;
+  }
 }
 
 function adminItemLabel(type) {
@@ -2235,6 +2735,10 @@ async function loadJobDetail(jobId) {
   jobsState.imageSearch = '';
   jobsState.imageLinkSubjectSearch = '';
   jobsState.workspaceStudentSearch = '';
+  jobsState.envelopeSubject = null;
+  jobsState.envelopeScan = null;
+  jobsState.envelopePending = null;
+  envelopeConfirmModal.hidden = true;
   jobsState.showStudentEditForm = false;
   jobsState.workspaceMode = 'students';
   jobsState.adminItems = null;
@@ -2251,6 +2755,8 @@ async function reloadCurrentJobDetail() {
   if (jobsState.jobWorkspaceOpen) {
     if (jobsState.workspaceMode === 'admin') {
       renderAdminItemsWorkspace();
+    } else if (jobsState.workspaceMode === 'envelope') {
+      renderEnvelopeWorkspace();
     } else {
       renderStudentWorkspace();
     }
@@ -2496,6 +3002,10 @@ workspaceStudentsButton.addEventListener('click', () => {
   setWorkspaceMode('students');
 });
 
+workspaceEnvelopeButton.addEventListener('click', () => {
+  setWorkspaceMode('envelope');
+});
+
 workspaceAdminItemsButton.addEventListener('click', () => {
   setWorkspaceMode('admin');
 });
@@ -2534,6 +3044,40 @@ workspaceStudentSearch.addEventListener('input', () => {
   jobsState.workspaceStudentSearch = workspaceStudentSearch.value;
   renderStudentWorkspace();
 });
+
+envelopeEntryForm.addEventListener('submit', submitEnvelopeOrder);
+envelopeEntryForm.elements.barcode.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    lookupEnvelopeSubject();
+  }
+});
+envelopeEntryForm.elements.orderCodes.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    submitEnvelopeOrder(event);
+  }
+});
+confirmEnvelopeButton.addEventListener('click', () => {
+  respondEnvelopeConfirm(true);
+});
+cancelEnvelopeConfirmButton.addEventListener('click', () => {
+  respondEnvelopeConfirm(false);
+});
+closeOrderEnvelopeButton.addEventListener('click', closeOrderEnvelope);
+cancelEditOrderButton.addEventListener('click', closeEditOrder);
+editOrderForm.addEventListener('submit', submitEditOrder);
+deleteOrderButton.addEventListener('click', async () => {
+  const orderId = jobsState.editingOrderId;
+  closeEditOrder();
+  if (orderId) {
+    await deleteWorkspaceOrder(orderId);
+  }
+});
+refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
+if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
+  window.trecs.onEnvelopeScanImported(handleEnvelopeScanImported);
+}
 
 newSchoolButton.addEventListener('click', () => {
   setNewSchoolFormVisible(!jobsState.showNewSchoolForm);

@@ -240,6 +240,7 @@
               </div>
               <div class="workspace-actions">
                 <button class="active" id="workspaceStudentsButton" type="button">Students</button>
+                <button id="workspaceEnvelopeButton" type="button">Envelope Entry</button>
                 <button id="workspaceAdminItemsButton" type="button">Admin Items</button>
                 <button id="workspaceAddBlankButton" type="button">Add Records</button>
                 <button id="workspaceEditStudentButton" type="button">Edit Student</button>
@@ -269,6 +270,63 @@
                 <div id="workspaceOrderDetail"></div>
               </aside>
             </div>
+
+            <section class="envelope-workspace" id="envelopeWorkspace" hidden>
+              <section class="panel envelope-entry-panel">
+                <div class="panel-heading">
+                  <h2>Envelope Scan Order Entry</h2>
+                </div>
+                <form class="envelope-entry-form" id="envelopeEntryForm">
+                  <label>
+                    <span>Camera Card Barcode / Ref</span>
+                    <input name="barcode" autocomplete="off" placeholder="Scan barcode" required>
+                  </label>
+                  <label>
+                    <span>Order Codes</span>
+                    <input name="orderCodes" autocomplete="off" placeholder="3.75.45">
+                  </label>
+                  <label>
+                    <span>Payment</span>
+                    <select name="paidStatus">
+                      <option value="paid">Paid</option>
+                      <option value="unpaid">Unpaid</option>
+                      <option value="unknown">Unknown</option>
+                    </select>
+                  </label>
+                  <label class="wide-field">
+                    <span>Notes</span>
+                    <textarea name="notes" rows="3"></textarea>
+                  </label>
+                  <div class="form-actions wide-field">
+                    <span>Press Enter after scanning the reference, then press Enter after keying the order code.</span>
+                  </div>
+                  <p id="envelopeEntryStatus" class="envelope-entry-status"></p>
+                </form>
+                <div class="unlinked-envelope-panel">
+                  <div class="subheading">
+                    <h3>Unlinked Envelopes</h3>
+                    <button id="refreshUnlinkedEnvelopesButton" type="button">Refresh</button>
+                  </div>
+                  <div id="unlinkedEnvelopeList" class="unlinked-envelope-list">
+                    <div class="empty-state">No unlinked envelopes loaded.</div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel envelope-subject-panel">
+                <div id="envelopeSubjectDetail" class="empty-state">Scan a camera card barcode.</div>
+              </section>
+
+              <section class="panel envelope-preview-panel">
+                <div class="panel-heading">
+                  <h2>Envelope</h2>
+                  <span id="envelopePreviewMeta"></span>
+                </div>
+                <div id="envelopePreview" class="envelope-preview">
+                  <div class="empty-state">No envelope scan imported.</div>
+                </div>
+              </section>
+            </section>
 
             <section class="admin-items-workspace" id="adminItemsWorkspace" hidden>
               <section class="panel admin-items-main">
@@ -321,6 +379,64 @@
                 <div class="form-actions">
                   <span>Reference numbers will continue from the largest current ref.</span>
                   <button class="primary" type="submit">Add Records</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="modal-backdrop" id="envelopeConfirmModal" hidden>
+              <div class="modal-card">
+                <div class="modal-heading">
+                  <h2>Confirm Envelope</h2>
+                </div>
+                <p id="envelopeConfirmMessage"></p>
+                <div class="form-actions">
+                  <button id="cancelEnvelopeConfirmButton" type="button">No</button>
+                  <button class="primary" id="confirmEnvelopeButton" type="button">Yes</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="modal-backdrop" id="orderEnvelopeModal" hidden>
+              <div class="modal-card order-envelope-card">
+                <div class="modal-heading">
+                  <h2 id="orderEnvelopeTitle">Envelope</h2>
+                  <button id="closeOrderEnvelopeButton" type="button">Close</button>
+                </div>
+                <div id="orderEnvelopePreview" class="order-envelope-preview">
+                  <div class="empty-state">Loading envelope...</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="modal-backdrop" id="editOrderModal" hidden>
+              <form class="modal-card edit-order-card" id="editOrderForm">
+                <div class="modal-heading">
+                  <h2 id="editOrderTitle">Edit Order</h2>
+                  <button id="cancelEditOrderButton" type="button">Cancel</button>
+                </div>
+                <label>
+                  <span>Order Codes</span>
+                  <input name="orderCodes" autocomplete="off" required>
+                </label>
+                <label>
+                  <span>Payment</span>
+                  <select name="paidStatus">
+                    <option value="paid">Paid</option>
+                    <option value="unpaid">Unpaid</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Notes</span>
+                  <textarea name="notes" rows="4"></textarea>
+                </label>
+                <div id="editOrderEnvelopePreview" class="edit-order-envelope-preview">
+                  <div class="empty-state">Loading envelope...</div>
+                </div>
+                <p id="editOrderStatus"></p>
+                <div class="form-actions">
+                  <button id="deleteOrderButton" type="button">Delete Order</button>
+                  <button class="primary" type="submit">Save Order</button>
                 </div>
               </form>
             </div>

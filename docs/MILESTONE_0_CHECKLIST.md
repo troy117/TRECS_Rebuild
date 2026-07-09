@@ -130,7 +130,7 @@ Reason:
 1. [x] Prototype "Prepare Laptop Package" export for one selected job.
 2. [x] Add a basic new-job creation workflow for test jobs.
 3. [x] Add school/client creation for test jobs.
-4. [ ] Prototype envelope scan order entry for one selected job.
+4. [x] Prototype envelope scan order entry for one selected job.
 5. [ ] Add render batch creation from queued orders.
 6. [ ] Add an image/link review queue for conflicts and unlinked images.
 7. [ ] Add laptop package import validation for manifest/job matching.

@@ -72,6 +72,26 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id
       ON admin_item_batches(job_id, shoot_stage, admin_item_type);
+
+      CREATE TABLE IF NOT EXISTS envelope_scans (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        subject_id INTEGER,
+        capture_session_id INTEGER,
+        image_import_event_id INTEGER,
+        order_id INTEGER,
+        scan_path TEXT,
+        envelope_identifier TEXT,
+        keyed_order_code TEXT,
+        keyed_by TEXT,
+        status TEXT NOT NULL DEFAULT 'scanned',
+        scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        keyed_at TEXT,
+        notes TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id
+      ON envelope_scans(job_id, subject_id, status);
     `);
     changed = true;
 
@@ -2252,6 +2272,7 @@ async function getJobDetail(_event, jobIdValue) {
       o.source_reference AS sourceReference,
       o.paid_status AS paidStatus,
       o.render_status AS renderStatus,
+      o.notes,
       COUNT(oi.id) AS itemCount,
       GROUP_CONCAT(oi.package_code, '.') AS packageCodes
     FROM orders o
@@ -2791,6 +2812,749 @@ async function updateOrderRenderStatus(_event, orderIdValue, statusValue) {
 }
 
 ipcMain.handle('order:update-render-status', updateOrderRenderStatus);
+
+async function updateOrder(_event, orderIdValue, input = {}) {
+  const orderId = numericId(orderIdValue);
+  const paidStatus = normalizePaidStatus(input.paidStatus);
+  const notes = normalizeNotes(input.notes);
+  const { raw, codes } = orderCodesFromInput(input.orderCodes);
+
+  return writeSql((database) => {
+    const orderRows = rowsFromDatabase(database, `
+      SELECT id, subject_id AS subjectId
+      FROM orders
+      WHERE id = ${orderId};
+    `);
+
+    if (!orderRows.length) {
+      throw new Error('Order not found');
+    }
+
+    database.run(`
+      UPDATE orders
+      SET paid_status = ?,
+          notes = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `, [paidStatus, notes, orderId]);
+
+    database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
+
+    const itemStatement = database.prepare(`
+      INSERT INTO order_items (
+        order_id,
+        subject_id,
+        package_code,
+        quantity,
+        raw_code,
+        status,
+        notes
+      )
+      VALUES (?, ?, ?, 1, ?, 'open', ?);
+    `);
+
+    try {
+      codes.forEach((code) => {
+        itemStatement.run([orderId, orderRows[0].subjectId, code, raw, 'Edited order code']);
+      });
+    } finally {
+      itemStatement.free();
+    }
+
+    database.run(`
+      UPDATE envelope_scans
+      SET keyed_order_code = ?,
+          notes = COALESCE(NULLIF(?, ''), notes)
+      WHERE order_id = ?;
+    `, [raw, notes, orderId]);
+
+    return {
+      id: orderId,
+      paidStatus,
+      notes,
+      packageCodes: raw,
+      itemCount: codes.length
+    };
+  });
+}
+
+async function deleteOrder(_event, orderIdValue) {
+  const orderId = numericId(orderIdValue);
+
+  return writeSql((database) => {
+    const orderRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM orders
+      WHERE id = ${orderId};
+    `);
+
+    if (!orderRows.length) {
+      throw new Error('Order not found');
+    }
+
+    database.run(`
+      UPDATE envelope_scans
+      SET order_id = NULL,
+          status = 'scanned',
+          keyed_order_code = NULL,
+          keyed_at = NULL
+      WHERE order_id = ?;
+    `, [orderId]);
+    database.run('DELETE FROM payments WHERE order_id = ?;', [orderId]);
+    database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
+    database.run('DELETE FROM orders WHERE id = ?;', [orderId]);
+
+    return { id: orderId, deleted: true };
+  });
+}
+
+ipcMain.handle('order:update', updateOrder);
+ipcMain.handle('order:delete', deleteOrder);
+
+function sqlLiteral(value) {
+  if (value === null || value === undefined || value === '') {
+    return 'NULL';
+  }
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function normalizeBarcode(value) {
+  const barcode = String(value || '').trim();
+  if (!barcode) {
+    throw new Error('Barcode/reference is required');
+  }
+  if (barcode.length > 100) {
+    throw new Error('Barcode/reference is too long');
+  }
+  return barcode;
+}
+
+function subjectRowForEnvelope(row) {
+  return {
+    id: row.id,
+    ref: row.ref,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    name: row.name,
+    externalId: row.externalId,
+    grade: row.grade,
+    homeroom: row.homeroom,
+    track: row.track,
+    team: row.team,
+    subjectType: row.subjectType,
+    photographedStatus: row.photographedStatus,
+    imageAssetId: row.imageAssetId,
+    imageFilename: row.imageFilename,
+    imagePath: row.imagePath
+  };
+}
+
+async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
+  const jobId = numericId(jobIdValue);
+  const barcode = normalizeBarcode(barcodeValue);
+  const barcodeSql = sqlLiteral(barcode);
+  const rows = await querySql(`
+    SELECT
+      s.id,
+      s.legacy_ref_num AS ref,
+      s.first_name AS firstName,
+      s.last_name AS lastName,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS name,
+      s.external_id AS externalId,
+      s.grade,
+      s.homeroom,
+      s.track,
+      s.team,
+      s.subject_type AS subjectType,
+      s.photographed_status AS photographedStatus,
+      ia.id AS imageAssetId,
+      ia.filename AS imageFilename,
+      ia.current_path AS imagePath
+    FROM subjects s
+    LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE s.job_id = ${jobId}
+      AND (
+        s.legacy_ref_num = ${barcodeSql}
+        OR s.external_id = ${barcodeSql}
+        OR EXISTS (
+          SELECT 1
+          FROM subject_codes sc
+          WHERE sc.subject_id = s.id
+            AND sc.code = ${barcodeSql}
+        )
+      )
+    ORDER BY
+      CASE WHEN s.legacy_ref_num = ${barcodeSql} THEN 0 ELSE 1 END,
+      s.id
+    LIMIT 2;
+  `);
+
+  if (!rows.length) {
+    throw new Error(`No student found for ${barcode}`);
+  }
+  if (rows.length > 1) {
+    throw new Error(`More than one student matched ${barcode}`);
+  }
+
+  return { subject: subjectRowForEnvelope(rows[0]) };
+}
+
+function resolveWorkspacePath(inputPath) {
+  const text = String(inputPath || '').trim();
+  if (!text) {
+    return projectRoot;
+  }
+  return path.isAbsolute(text) ? text : path.join(projectRoot, text);
+}
+
+function latestImageInFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) {
+    throw new Error(`Hot folder not found: ${folderPath}`);
+  }
+
+  const files = fs.readdirSync(folderPath)
+    .map((name) => path.join(folderPath, name))
+    .filter((filePath) => {
+      const extension = path.extname(filePath).toLowerCase();
+      return fs.statSync(filePath).isFile() && ['.jpg', '.jpeg', '.png'].includes(extension);
+    })
+    .map((filePath) => ({
+      path: filePath,
+      modified: fs.statSync(filePath).mtimeMs
+    }))
+    .sort((first, second) => second.modified - first.modified);
+
+  if (!files.length) {
+    throw new Error('No JPG/PNG envelope scans found in the hot folder');
+  }
+
+  return files[0].path;
+}
+
+function envelopeDestinationName(ref, sourcePath) {
+  const extension = path.extname(sourcePath) || '.jpg';
+  const base = path.basename(sourcePath, extension)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim() || 'scan';
+  const prefix = String(ref || 'unknown').replace(/[<>:"/\\|?*\x00-\x1F]/g, '-');
+  return base.toLowerCase().startsWith(`${prefix.toLowerCase()}-`)
+    ? `${base}${extension}`
+    : `${prefix}-${base}${extension}`;
+}
+
+function uniquePath(folderPath, filename) {
+  let candidate = path.join(folderPath, filename);
+  if (!fs.existsSync(candidate)) {
+    return candidate;
+  }
+
+  const extension = path.extname(filename);
+  const base = path.basename(filename, extension);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  candidate = path.join(folderPath, `${base}-${stamp}${extension}`);
+  let index = 2;
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(folderPath, `${base}-${stamp}-${index}${extension}`);
+    index += 1;
+  }
+  return candidate;
+}
+
+function moveFile(sourcePath, destinationPath) {
+  try {
+    fs.renameSync(sourcePath, destinationPath);
+  } catch (error) {
+    if (error.code !== 'EXDEV') {
+      throw error;
+    }
+    fs.copyFileSync(sourcePath, destinationPath);
+    fs.unlinkSync(sourcePath);
+  }
+}
+
+function imageDataUrl(filePath) {
+  const bytes = fs.readFileSync(filePath);
+  return `data:${mimeTypeFor(filePath)};base64,${bytes.toString('base64')}`;
+}
+
+const envelopeWatchers = new Map();
+
+async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourcePath = null) {
+  const sourcePath = explicitSourcePath || latestImageInFolder(hotFolder);
+
+  return writeSql((database) => {
+    const rows = rowsFromDatabase(database, `
+      SELECT
+        s.id AS subjectId,
+        s.legacy_ref_num AS ref,
+        j.id AS jobId,
+        j.root_path AS rootPath
+      FROM subjects s
+      JOIN jobs j ON j.id = s.job_id
+      WHERE s.id = ${subjectId}
+        AND j.id = ${jobId};
+    `);
+
+    if (!rows.length) {
+      throw new Error('Student does not belong to this job');
+    }
+
+    const row = rows[0];
+    const jobRoot = resolveWorkspacePath(row.rootPath);
+    const envelopeFolder = path.join(jobRoot, 'Envelopes');
+    fs.mkdirSync(envelopeFolder, { recursive: true });
+    const filename = envelopeDestinationName(row.ref, sourcePath);
+    const destinationPath = uniquePath(envelopeFolder, filename);
+    moveFile(sourcePath, destinationPath);
+    const relativeDestination = path.relative(projectRoot, destinationPath);
+
+    const statement = database.prepare(`
+      INSERT INTO envelope_scans (
+        job_id,
+        subject_id,
+        scan_path,
+        envelope_identifier,
+        status,
+        notes
+      )
+      VALUES (?, ?, ?, ?, 'scanned', ?);
+    `);
+
+    try {
+      statement.run([
+        jobId,
+        subjectId,
+        relativeDestination,
+        row.ref,
+        `Imported from ${hotFolder}`
+      ]);
+    } finally {
+      statement.free();
+    }
+
+    const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
+    return {
+      scan: {
+        id: idRows[0].id,
+        subjectId,
+        path: relativeDestination,
+        filename: path.basename(destinationPath),
+        dataUrl: imageDataUrl(destinationPath)
+      }
+    };
+  });
+}
+
+async function envelopeScanCount(jobId, subjectId) {
+  const rows = await querySql(`
+    SELECT COUNT(*) AS scanCount
+    FROM envelope_scans
+    WHERE job_id = ${jobId}
+      AND subject_id = ${subjectId}
+      AND status != 'void';
+  `);
+  return rows.length ? Number(rows[0].scanCount || 0) : 0;
+}
+
+async function importEnvelopeScan(_event, jobIdValue, subjectIdValue, hotFolderValue) {
+  const jobId = numericId(jobIdValue);
+  const subjectId = numericId(subjectIdValue);
+  const hotFolder = resolveWorkspacePath(hotFolderValue || 'EnvelopeHotFolder');
+  return importEnvelopeScanCore(jobId, subjectId, hotFolder);
+}
+
+function closeEnvelopeWatcher(webContentsId) {
+  const watcherState = envelopeWatchers.get(webContentsId);
+  if (!watcherState) {
+    return;
+  }
+  clearTimeout(watcherState.timer);
+  watcherState.watcher.close();
+  envelopeWatchers.delete(webContentsId);
+}
+
+async function startEnvelopeWatcher(event, jobIdValue, subjectIdValue, hotFolderValue) {
+  const jobId = numericId(jobIdValue);
+  const subjectId = numericId(subjectIdValue);
+  const hotFolder = resolveWorkspacePath(hotFolderValue || 'EnvelopeHotFolder');
+  if (!fs.existsSync(hotFolder)) {
+    fs.mkdirSync(hotFolder, { recursive: true });
+  }
+
+  const webContentsId = event.sender.id;
+  closeEnvelopeWatcher(webContentsId);
+
+  const watcherState = {
+    jobId,
+    subjectId,
+    hotFolder,
+    timer: null,
+    importing: false,
+    lastImportAt: 0,
+    pendingSourcePath: null,
+    watcher: null
+  };
+
+  const importLatest = (quietWhenEmpty = false) => {
+    clearTimeout(watcherState.timer);
+    watcherState.timer = setTimeout(async () => {
+      if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
+        return;
+      }
+      if (Date.now() - watcherState.lastImportAt < 1800) {
+        return;
+      }
+      watcherState.importing = true;
+      try {
+        const sourcePath = latestImageInFolder(hotFolder);
+        const scanCount = await envelopeScanCount(jobId, subjectId);
+        if (scanCount > 0) {
+          if (watcherState.pendingSourcePath === sourcePath) {
+            return;
+          }
+          watcherState.pendingSourcePath = sourcePath;
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('envelope:scan-imported', {
+              pending: {
+                subjectId,
+                filename: path.basename(sourcePath),
+                scanCount
+              }
+            });
+          }
+          return;
+        }
+
+        const result = await importEnvelopeScanCore(jobId, subjectId, hotFolder, sourcePath);
+        watcherState.lastImportAt = Date.now();
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('envelope:scan-imported', result);
+        }
+      } catch (error) {
+        if (quietWhenEmpty && /No JPG\/PNG envelope scans/.test(error.message || '')) {
+          return;
+        }
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('envelope:scan-imported', {
+            error: error.message || 'Envelope scan import failed'
+          });
+        }
+      } finally {
+        watcherState.importing = false;
+      }
+    }, 900);
+  };
+
+  watcherState.watcher = fs.watch(hotFolder, (eventType) => {
+    if (eventType === 'rename' || eventType === 'change') {
+      importLatest();
+    }
+  });
+  envelopeWatchers.set(webContentsId, watcherState);
+  event.sender.once('destroyed', () => closeEnvelopeWatcher(webContentsId));
+  if (fs.readdirSync(hotFolder).some((name) => ['.jpg', '.jpeg', '.png'].includes(path.extname(name).toLowerCase()))) {
+    importLatest(true);
+  }
+
+  return {
+    jobId,
+    subjectId,
+    hotFolder
+  };
+}
+
+async function confirmEnvelopeScan(event, acceptValue) {
+  const webContentsId = event.sender.id;
+  const watcherState = envelopeWatchers.get(webContentsId);
+  if (!watcherState || !watcherState.pendingSourcePath) {
+    return { accepted: false };
+  }
+
+  const pendingSourcePath = watcherState.pendingSourcePath;
+  watcherState.pendingSourcePath = null;
+  if (!acceptValue) {
+    return { accepted: false };
+  }
+
+  watcherState.importing = true;
+  try {
+    const result = await importEnvelopeScanCore(
+      watcherState.jobId,
+      watcherState.subjectId,
+      watcherState.hotFolder,
+      pendingSourcePath
+    );
+    watcherState.lastImportAt = Date.now();
+    return { accepted: true, ...result };
+  } finally {
+    watcherState.importing = false;
+  }
+}
+
+async function stopEnvelopeWatcher(event) {
+  closeEnvelopeWatcher(event.sender.id);
+  return { stopped: true };
+}
+
+function normalizePaidStatus(value) {
+  const status = String(value || 'unknown').trim();
+  const allowed = new Set(['paid', 'unpaid', 'unknown']);
+  if (!allowed.has(status)) {
+    throw new Error('Invalid payment status');
+  }
+  return status;
+}
+
+function orderCodesFromInput(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    throw new Error('Order codes are required');
+  }
+  if (raw.length > 500) {
+    throw new Error('Order codes are too long');
+  }
+  const codes = raw.split('.').map((code) => code.trim()).filter(Boolean);
+  if (!codes.length) {
+    throw new Error('Order codes are required');
+  }
+  return { raw, codes };
+}
+
+async function createEnvelopeOrder(_event, jobIdValue, subjectIdValue, input = {}) {
+  const jobId = numericId(jobIdValue);
+  const subjectId = numericId(subjectIdValue);
+  const envelopeScanId = input.envelopeScanId ? numericId(input.envelopeScanId) : null;
+  const paidStatus = normalizePaidStatus(input.paidStatus);
+  const notes = normalizeNotes(input.notes);
+  const { raw, codes } = orderCodesFromInput(input.orderCodes);
+
+  return writeSql((database) => {
+    const subjectRows = rowsFromDatabase(database, `
+      SELECT id, primary_image_asset_id AS primaryImageAssetId
+      FROM subjects
+      WHERE id = ${subjectId}
+        AND job_id = ${jobId};
+    `);
+    if (!subjectRows.length) {
+      throw new Error('Student does not belong to this job');
+    }
+
+    if (envelopeScanId) {
+      const scanRows = rowsFromDatabase(database, `
+        SELECT id
+        FROM envelope_scans
+        WHERE id = ${envelopeScanId}
+          AND job_id = ${jobId}
+          AND subject_id = ${subjectId};
+      `);
+      if (!scanRows.length) {
+        throw new Error('Envelope scan does not belong to this student');
+      }
+    }
+
+    const renderStatus = subjectRows[0].primaryImageAssetId ? 'ready' : 'not_ready';
+    const orderStatement = database.prepare(`
+      INSERT INTO orders (
+        job_id,
+        subject_id,
+        source,
+        entry_timing,
+        status,
+        paid_status,
+        render_status,
+        notes
+      )
+      VALUES (?, ?, 'paper', 'unknown', 'open', ?, ?, ?);
+    `);
+
+    try {
+      orderStatement.run([jobId, subjectId, paidStatus, renderStatus, notes]);
+    } finally {
+      orderStatement.free();
+    }
+
+    const orderRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
+    const orderId = orderRows[0].id;
+    const itemStatement = database.prepare(`
+      INSERT INTO order_items (
+        order_id,
+        subject_id,
+        package_code,
+        quantity,
+        raw_code,
+        status,
+        notes
+      )
+      VALUES (?, ?, ?, 1, ?, 'open', ?);
+    `);
+
+    try {
+      codes.forEach((code) => {
+        itemStatement.run([orderId, subjectId, code, raw, 'Envelope scan keyed order']);
+      });
+    } finally {
+      itemStatement.free();
+    }
+
+    if (envelopeScanId) {
+      database.run(`
+        UPDATE envelope_scans
+        SET order_id = ?,
+            keyed_order_code = ?,
+            status = 'order_created',
+            keyed_at = CURRENT_TIMESTAMP,
+            notes = COALESCE(NULLIF(?, ''), notes)
+        WHERE id = ?;
+      `, [orderId, raw, notes, envelopeScanId]);
+    }
+
+    return {
+      orderId,
+      subjectId,
+      itemCount: codes.length
+    };
+  });
+}
+
+async function getOrderEnvelopePreview(_event, orderIdValue) {
+  const orderId = numericId(orderIdValue);
+  const rows = await querySql(`
+    SELECT
+      es.id,
+      es.scan_path AS scanPath,
+      es.envelope_identifier AS envelopeIdentifier,
+      es.keyed_order_code AS keyedOrderCode,
+      es.scanned_at AS scannedAt,
+      o.source,
+      s.legacy_ref_num AS ref,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName
+    FROM orders o
+    LEFT JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN envelope_scans es ON es.order_id = o.id
+    WHERE o.id = ${orderId}
+    ORDER BY es.id DESC
+    LIMIT 1;
+  `);
+
+  if (!rows.length) {
+    throw new Error('Order not found');
+  }
+
+  const row = rows[0];
+  if (!row.scanPath) {
+    return {
+      orderId,
+      missing: true,
+      reason: row.source === 'paper' ? 'No envelope scan is linked to this paper order.' : 'This is not a scanned paper order.',
+      ref: row.ref,
+      subjectName: row.subjectName
+    };
+  }
+
+  const fullPath = resolveProjectPath(row.scanPath);
+  if (!fullPath || !fs.existsSync(fullPath)) {
+    return {
+      orderId,
+      missing: true,
+      reason: 'Envelope image file is missing.',
+      path: fullPath,
+      filename: path.basename(row.scanPath),
+      ref: row.ref,
+      subjectName: row.subjectName
+    };
+  }
+
+  return {
+    orderId,
+    id: row.id,
+    ref: row.ref,
+    subjectName: row.subjectName,
+    filename: path.basename(fullPath),
+    path: fullPath,
+    scannedAt: row.scannedAt,
+    keyedOrderCode: row.keyedOrderCode,
+    dataUrl: imageDataUrl(fullPath),
+    missing: false
+  };
+}
+
+async function getEnvelopeScanPreview(_event, scanIdValue) {
+  const scanId = numericId(scanIdValue);
+  const rows = await querySql(`
+    SELECT
+      es.id,
+      es.job_id AS jobId,
+      es.subject_id AS subjectId,
+      es.order_id AS orderId,
+      es.scan_path AS scanPath,
+      es.envelope_identifier AS envelopeIdentifier,
+      es.keyed_order_code AS keyedOrderCode,
+      es.status,
+      es.scanned_at AS scannedAt,
+      s.legacy_ref_num AS ref,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName
+    FROM envelope_scans es
+    LEFT JOIN subjects s ON s.id = es.subject_id
+    WHERE es.id = ${scanId}
+    LIMIT 1;
+  `);
+
+  if (!rows.length) {
+    throw new Error('Envelope scan not found');
+  }
+
+  const row = rows[0];
+  const fullPath = resolveProjectPath(row.scanPath);
+  if (!fullPath || !fs.existsSync(fullPath)) {
+    return {
+      ...row,
+      missing: true,
+      reason: 'Envelope image file is missing.',
+      filename: row.scanPath ? path.basename(row.scanPath) : ''
+    };
+  }
+
+  return {
+    ...row,
+    filename: path.basename(fullPath),
+    path: fullPath,
+    dataUrl: imageDataUrl(fullPath),
+    missing: false
+  };
+}
+
+async function getUnlinkedEnvelopeScans(_event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  return querySql(`
+    SELECT
+      es.id,
+      es.subject_id AS subjectId,
+      es.scan_path AS scanPath,
+      es.envelope_identifier AS envelopeIdentifier,
+      es.keyed_order_code AS keyedOrderCode,
+      es.status,
+      es.scanned_at AS scannedAt,
+      s.legacy_ref_num AS ref,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName
+    FROM envelope_scans es
+    LEFT JOIN subjects s ON s.id = es.subject_id
+    WHERE es.job_id = ${jobId}
+      AND es.order_id IS NULL
+      AND es.status != 'void'
+    ORDER BY es.scanned_at DESC, es.id DESC
+    LIMIT 100;
+  `);
+}
+
+ipcMain.handle('envelope:find-subject', findSubjectByBarcode);
+ipcMain.handle('envelope:start-watcher', startEnvelopeWatcher);
+ipcMain.handle('envelope:stop-watcher', stopEnvelopeWatcher);
+ipcMain.handle('envelope:confirm-scan', confirmEnvelopeScan);
+ipcMain.handle('envelope:order-preview', getOrderEnvelopePreview);
+ipcMain.handle('envelope:scan-preview', getEnvelopeScanPreview);
+ipcMain.handle('envelope:unlinked-list', getUnlinkedEnvelopeScans);
+ipcMain.handle('envelope:create-order', createEnvelopeOrder);
 
 async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
