@@ -23,12 +23,15 @@ contextBridge.exposeInMainWorld('trecs', {
   updateOrder: (orderId, input) => ipcRenderer.invoke('order:update', orderId, input),
   deleteOrder: (orderId) => ipcRenderer.invoke('order:delete', orderId),
   findSubjectByBarcode: (jobId, barcode) => ipcRenderer.invoke('envelope:find-subject', jobId, barcode),
+  searchEnvelopeSubjects: (jobId, search) => ipcRenderer.invoke('envelope:search-subjects', jobId, search),
   startEnvelopeWatcher: (jobId, subjectId, hotFolder) => ipcRenderer.invoke('envelope:start-watcher', jobId, subjectId, hotFolder),
   stopEnvelopeWatcher: () => ipcRenderer.invoke('envelope:stop-watcher'),
   confirmEnvelopeScan: (accept) => ipcRenderer.invoke('envelope:confirm-scan', accept),
   getOrderEnvelopePreview: (orderId) => ipcRenderer.invoke('envelope:order-preview', orderId),
   getUnlinkedEnvelopeScans: (jobId) => ipcRenderer.invoke('envelope:unlinked-list', jobId),
   getEnvelopeScanPreview: (scanId) => ipcRenderer.invoke('envelope:scan-preview', scanId),
+  assignEnvelopeScan: (scanId, subjectId) => ipcRenderer.invoke('envelope:assign-scan', scanId, subjectId),
+  deleteEnvelopeScan: (scanId) => ipcRenderer.invoke('envelope:delete-scan', scanId),
   onEnvelopeScanImported: (callback) => {
     ipcRenderer.removeAllListeners('envelope:scan-imported');
     ipcRenderer.on('envelope:scan-imported', (_event, payload) => callback(payload));

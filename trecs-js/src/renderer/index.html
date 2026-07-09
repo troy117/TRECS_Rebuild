@@ -279,11 +279,16 @@
                 <form class="envelope-entry-form" id="envelopeEntryForm">
                   <label>
                     <span>Camera Card Barcode / Ref</span>
-                    <input name="barcode" autocomplete="off" placeholder="Scan barcode" required>
+                    <input name="barcode" autocomplete="off" placeholder="Scan barcode">
+                  </label>
+                  <label class="envelope-search-field">
+                    <span>Student Name Search</span>
+                    <input name="studentSearch" autocomplete="off" placeholder="Type student name">
+                    <div id="envelopeStudentSearchResults" class="student-search-results" hidden></div>
                   </label>
                   <label>
                     <span>Order Codes</span>
-                    <input name="orderCodes" autocomplete="off" placeholder="3.75.45">
+                    <input name="orderCodes" autocomplete="off">
                   </label>
                   <label>
                     <span>Payment</span>
@@ -404,6 +409,10 @@
                 </div>
                 <div id="orderEnvelopePreview" class="order-envelope-preview">
                   <div class="empty-state">Loading envelope...</div>
+                </div>
+                <div class="order-envelope-actions" id="orderEnvelopeActions" hidden>
+                  <button id="assignEnvelopeScanButton" type="button">Assign to Current Ref</button>
+                  <button class="danger" id="deleteEnvelopeScanButton" type="button">Delete Envelope</button>
                 </div>
               </div>
             </div>

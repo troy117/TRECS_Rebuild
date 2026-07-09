@@ -723,6 +723,23 @@ dd {
   object-fit: contain;
 }
 
+.order-envelope-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.order-envelope-actions button {
+  min-height: 34px;
+}
+
+.order-envelope-actions .danger {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
 .order-envelope-meta {
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid #d7e0e8;
@@ -823,6 +840,55 @@ dd {
 .envelope-entry-form input,
 .envelope-entry-form select {
   height: 38px;
+}
+
+.envelope-search-field {
+  position: relative;
+}
+
+.student-search-results {
+  background: #fff;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgba(20, 32, 45, 0.16);
+  left: 0;
+  max-height: 260px;
+  overflow: auto;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 8;
+}
+
+.student-search-results button {
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid #edf1f5;
+  border-radius: 0;
+  display: block;
+  min-height: 48px;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.student-search-results button:hover,
+.student-search-results button.active {
+  background: #eaf4f8;
+}
+
+.student-search-results strong,
+.student-search-results span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-search-results span {
+  color: #617488;
+  font-size: 12px;
+  margin-top: 2px;
 }
 
 .envelope-entry-form .form-actions {

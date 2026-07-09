@@ -40,6 +40,7 @@ const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
 const envelopeSubjectDetail = document.getElementById('envelopeSubjectDetail');
 const envelopePreview = document.getElementById('envelopePreview');
 const envelopePreviewMeta = document.getElementById('envelopePreviewMeta');
+const envelopeStudentSearchResults = document.getElementById('envelopeStudentSearchResults');
 const envelopeConfirmModal = document.getElementById('envelopeConfirmModal');
 const envelopeConfirmMessage = document.getElementById('envelopeConfirmMessage');
 const confirmEnvelopeButton = document.getElementById('confirmEnvelopeButton');
@@ -48,6 +49,9 @@ const orderEnvelopeModal = document.getElementById('orderEnvelopeModal');
 const orderEnvelopeTitle = document.getElementById('orderEnvelopeTitle');
 const orderEnvelopePreview = document.getElementById('orderEnvelopePreview');
 const closeOrderEnvelopeButton = document.getElementById('closeOrderEnvelopeButton');
+const orderEnvelopeActions = document.getElementById('orderEnvelopeActions');
+const assignEnvelopeScanButton = document.getElementById('assignEnvelopeScanButton');
+const deleteEnvelopeScanButton = document.getElementById('deleteEnvelopeScanButton');
 const editOrderModal = document.getElementById('editOrderModal');
 const editOrderForm = document.getElementById('editOrderForm');
 const editOrderTitle = document.getElementById('editOrderTitle');
@@ -97,7 +101,11 @@ let jobsState = {
   envelopeScan: null,
   envelopePending: null,
   envelopeWatcherSubjectId: null,
+  envelopeSearchResults: [],
+  envelopeSearchActiveIndex: -1,
+  envelopeSearchTimer: null,
   unlinkedEnvelopeScans: [],
+  viewingEnvelopeScanId: null,
   editingOrderId: null,
   showStudentEditForm: false,
   showAddRecordsModal: false,
@@ -853,7 +861,9 @@ function renderWorkspaceOrderDetail(subject) {
 }
 
 async function showOrderEnvelope(orderId) {
+  jobsState.viewingEnvelopeScanId = null;
   orderEnvelopeModal.hidden = false;
+  orderEnvelopeActions.hidden = true;
   orderEnvelopeTitle.textContent = `Order #${orderId} Envelope`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
 
@@ -884,7 +894,9 @@ function renderOrderEnvelopePreview(container, preview) {
 }
 
 function closeOrderEnvelope() {
+  jobsState.viewingEnvelopeScanId = null;
   orderEnvelopeModal.hidden = true;
+  orderEnvelopeActions.hidden = true;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
 }
 
@@ -1032,7 +1044,9 @@ function renderUnlinkedEnvelopeScans() {
 }
 
 async function showEnvelopeScan(scanId) {
+  jobsState.viewingEnvelopeScanId = scanId;
   orderEnvelopeModal.hidden = false;
+  orderEnvelopeActions.hidden = false;
   orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
 
@@ -1044,6 +1058,70 @@ async function showEnvelopeScan(scanId) {
   } catch (error) {
     orderEnvelopePreview.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load envelope.')}</div>`;
     console.error(error);
+  }
+}
+
+async function assignViewedEnvelopeScan() {
+  const scanId = jobsState.viewingEnvelopeScanId;
+  const subject = jobsState.envelopeSubject;
+  if (!scanId) {
+    return;
+  }
+  if (!subject) {
+    alert('Load a student reference before assigning this envelope.');
+    envelopeEntryForm.elements.barcode.focus();
+    return;
+  }
+
+  assignEnvelopeScanButton.disabled = true;
+  deleteEnvelopeScanButton.disabled = true;
+  orderEnvelopePreview.insertAdjacentHTML('afterbegin', '<div class="empty-state">Assigning envelope...</div>');
+
+  try {
+    const result = await trecsApi('assignEnvelopeScan').assignEnvelopeScan(scanId, subject.id);
+    jobsState.envelopeScan = result.scan;
+    renderEnvelopePreview();
+    await loadUnlinkedEnvelopeScans();
+    const preview = await trecsApi('getEnvelopeScanPreview').getEnvelopeScanPreview(scanId);
+    const subjectLine = [preview.ref, preview.subjectName].filter(Boolean).join(' ');
+    orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}${subjectLine ? ` / ${subjectLine}` : ''}`;
+    renderOrderEnvelopePreview(orderEnvelopePreview, preview);
+    orderEnvelopeActions.hidden = true;
+    envelopeEntryForm.elements.orderCodes.focus();
+  } catch (error) {
+    orderEnvelopePreview.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not assign envelope.')}</div>`;
+    console.error(error);
+  } finally {
+    assignEnvelopeScanButton.disabled = false;
+    deleteEnvelopeScanButton.disabled = false;
+  }
+}
+
+async function deleteViewedEnvelopeScan() {
+  const scanId = jobsState.viewingEnvelopeScanId;
+  if (!scanId) {
+    return;
+  }
+  if (!confirm('Delete this unlinked envelope scan and its image file?')) {
+    return;
+  }
+
+  assignEnvelopeScanButton.disabled = true;
+  deleteEnvelopeScanButton.disabled = true;
+  try {
+    await trecsApi('deleteEnvelopeScan').deleteEnvelopeScan(scanId);
+    if (jobsState.envelopeScan && Number(jobsState.envelopeScan.id) === Number(scanId)) {
+      jobsState.envelopeScan = null;
+      renderEnvelopePreview();
+    }
+    closeOrderEnvelope();
+    await loadUnlinkedEnvelopeScans();
+  } catch (error) {
+    alert(error.message || 'Could not delete envelope.');
+    console.error(error);
+  } finally {
+    assignEnvelopeScanButton.disabled = false;
+    deleteEnvelopeScanButton.disabled = false;
   }
 }
 
@@ -1112,19 +1190,7 @@ async function lookupEnvelopeSubject() {
   envelopeEntryStatus.textContent = '';
   try {
     const result = await trecsApi('findSubjectByBarcode').findSubjectByBarcode(jobsState.selectedJobId, barcode);
-    const previousSubjectId = jobsState.envelopeSubject ? jobsState.envelopeSubject.id : null;
-    jobsState.envelopeSubject = result.subject;
-    jobsState.selectedSubjectId = result.subject.id;
-    if (previousSubjectId !== result.subject.id) {
-      jobsState.envelopeScan = null;
-      jobsState.envelopePending = null;
-      envelopeConfirmModal.hidden = true;
-      renderEnvelopePreview();
-    }
-    envelopeEntryStatus.textContent = '';
-    renderEnvelopeSubject();
-    await startEnvelopeWatcherForCurrentSubject();
-    envelopeEntryForm.elements.orderCodes.focus();
+    await setEnvelopeSubject(result.subject, true);
   } catch (error) {
     jobsState.envelopeSubject = null;
     jobsState.envelopeWatcherSubjectId = null;
@@ -1133,6 +1199,96 @@ async function lookupEnvelopeSubject() {
     renderEnvelopeSubject();
     console.error(error);
   }
+}
+
+async function setEnvelopeSubject(subject, focusOrderCodes = false) {
+  if (!subject) {
+    return;
+  }
+
+  const previousSubjectId = jobsState.envelopeSubject ? jobsState.envelopeSubject.id : null;
+  jobsState.envelopeSubject = subject;
+  jobsState.selectedSubjectId = subject.id;
+  envelopeEntryForm.elements.barcode.value = subject.ref || subject.externalId || '';
+  if (previousSubjectId !== subject.id) {
+    jobsState.envelopeScan = null;
+    jobsState.envelopePending = null;
+    envelopeConfirmModal.hidden = true;
+    renderEnvelopePreview();
+  }
+  envelopeEntryStatus.textContent = '';
+  renderEnvelopeSubject();
+  await startEnvelopeWatcherForCurrentSubject();
+  if (focusOrderCodes) {
+    envelopeEntryForm.elements.orderCodes.focus();
+  }
+}
+
+function hideEnvelopeStudentSearch() {
+  jobsState.envelopeSearchResults = [];
+  jobsState.envelopeSearchActiveIndex = -1;
+  envelopeStudentSearchResults.hidden = true;
+  envelopeStudentSearchResults.innerHTML = '';
+}
+
+function renderEnvelopeStudentSearchResults() {
+  const results = jobsState.envelopeSearchResults || [];
+  if (!results.length) {
+    envelopeStudentSearchResults.hidden = true;
+    envelopeStudentSearchResults.innerHTML = '';
+    return;
+  }
+
+  envelopeStudentSearchResults.innerHTML = results.map((subject, index) => `
+    <button class="${index === jobsState.envelopeSearchActiveIndex ? 'active' : ''}" data-envelope-student-index="${index}" type="button">
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade ? `Grade ${subject.grade}` : '', subject.homeroom ? `HR ${subject.homeroom}` : ''].filter(Boolean).join(' / '))}</span>
+    </button>
+  `).join('');
+  envelopeStudentSearchResults.hidden = false;
+
+  envelopeStudentSearchResults.querySelectorAll('[data-envelope-student-index]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener('click', () => {
+      selectEnvelopeSearchResult(Number(button.dataset.envelopeStudentIndex));
+    });
+  });
+}
+
+async function searchEnvelopeStudents() {
+  const input = envelopeEntryForm.elements.studentSearch;
+  const search = input.value.trim();
+  if (!jobsState.selectedJobId || search.length < 2) {
+    hideEnvelopeStudentSearch();
+    return;
+  }
+
+  try {
+    const results = await trecsApi('searchEnvelopeSubjects').searchEnvelopeSubjects(jobsState.selectedJobId, search);
+    if (input.value.trim() !== search) {
+      return;
+    }
+    jobsState.envelopeSearchResults = results;
+    jobsState.envelopeSearchActiveIndex = results.length ? 0 : -1;
+    renderEnvelopeStudentSearchResults();
+  } catch (error) {
+    envelopeStudentSearchResults.hidden = false;
+    envelopeStudentSearchResults.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Student search failed')}</div>`;
+    console.error(error);
+  }
+}
+
+async function selectEnvelopeSearchResult(index) {
+  const subject = jobsState.envelopeSearchResults[index];
+  if (!subject) {
+    return;
+  }
+
+  envelopeEntryForm.elements.studentSearch.value = subject.name || '';
+  hideEnvelopeStudentSearch();
+  await setEnvelopeSubject(subject, true);
 }
 
 async function startEnvelopeWatcherForCurrentSubject() {
@@ -3052,6 +3208,30 @@ envelopeEntryForm.elements.barcode.addEventListener('keydown', (event) => {
     lookupEnvelopeSubject();
   }
 });
+envelopeEntryForm.elements.studentSearch.addEventListener('input', () => {
+  clearTimeout(jobsState.envelopeSearchTimer);
+  jobsState.envelopeSearchTimer = setTimeout(searchEnvelopeStudents, 180);
+});
+envelopeEntryForm.elements.studentSearch.addEventListener('keydown', (event) => {
+  const results = jobsState.envelopeSearchResults || [];
+  if (event.key === 'ArrowDown' && results.length) {
+    event.preventDefault();
+    jobsState.envelopeSearchActiveIndex = Math.min(results.length - 1, jobsState.envelopeSearchActiveIndex + 1);
+    renderEnvelopeStudentSearchResults();
+  } else if (event.key === 'ArrowUp' && results.length) {
+    event.preventDefault();
+    jobsState.envelopeSearchActiveIndex = Math.max(0, jobsState.envelopeSearchActiveIndex - 1);
+    renderEnvelopeStudentSearchResults();
+  } else if (event.key === 'Enter' && results.length) {
+    event.preventDefault();
+    selectEnvelopeSearchResult(Math.max(0, jobsState.envelopeSearchActiveIndex));
+  } else if (event.key === 'Escape') {
+    hideEnvelopeStudentSearch();
+  }
+});
+envelopeEntryForm.elements.studentSearch.addEventListener('blur', () => {
+  setTimeout(hideEnvelopeStudentSearch, 120);
+});
 envelopeEntryForm.elements.orderCodes.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
@@ -3065,6 +3245,8 @@ cancelEnvelopeConfirmButton.addEventListener('click', () => {
   respondEnvelopeConfirm(false);
 });
 closeOrderEnvelopeButton.addEventListener('click', closeOrderEnvelope);
+assignEnvelopeScanButton.addEventListener('click', assignViewedEnvelopeScan);
+deleteEnvelopeScanButton.addEventListener('click', deleteViewedEnvelopeScan);
 cancelEditOrderButton.addEventListener('click', closeEditOrder);
 editOrderForm.addEventListener('submit', submitEditOrder);
 deleteOrderButton.addEventListener('click', async () => {

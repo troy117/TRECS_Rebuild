@@ -2929,6 +2929,14 @@ function normalizeBarcode(value) {
   return barcode;
 }
 
+function normalizeEnvelopeSearch(value) {
+  const search = String(value || '').trim().replace(/\s+/g, ' ');
+  if (search.length > 100) {
+    throw new Error('Student search is too long');
+  }
+  return search;
+}
+
 function subjectRowForEnvelope(row) {
   return {
     id: row.id,
@@ -2997,6 +3005,59 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
   }
 
   return { subject: subjectRowForEnvelope(rows[0]) };
+}
+
+async function searchEnvelopeSubjects(_event, jobIdValue, searchValue) {
+  const jobId = numericId(jobIdValue);
+  const search = normalizeEnvelopeSearch(searchValue);
+  if (search.length < 2) {
+    return [];
+  }
+
+  const likeSql = sqlLiteral(`%${search}%`);
+  const exactSql = sqlLiteral(search);
+  const rows = await querySql(`
+    SELECT
+      s.id,
+      s.legacy_ref_num AS ref,
+      s.first_name AS firstName,
+      s.last_name AS lastName,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS name,
+      s.external_id AS externalId,
+      s.grade,
+      s.homeroom,
+      s.track,
+      s.team,
+      s.subject_type AS subjectType,
+      s.photographed_status AS photographedStatus,
+      ia.id AS imageAssetId,
+      ia.filename AS imageFilename,
+      ia.current_path AS imagePath
+    FROM subjects s
+    LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE s.job_id = ${jobId}
+      AND (
+        s.legacy_ref_num = ${exactSql}
+        OR s.external_id = ${exactSql}
+        OR COALESCE(s.display_name, '') LIKE ${likeSql}
+        OR COALESCE(s.first_name, '') LIKE ${likeSql}
+        OR COALESCE(s.last_name, '') LIKE ${likeSql}
+        OR TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, '')) LIKE ${likeSql}
+      )
+    ORDER BY
+      CASE
+        WHEN s.legacy_ref_num = ${exactSql} THEN 0
+        WHEN s.external_id = ${exactSql} THEN 1
+        WHEN COALESCE(s.display_name, '') LIKE ${likeSql} THEN 2
+        ELSE 3
+      END,
+      s.last_name,
+      s.first_name,
+      s.id
+    LIMIT 12;
+  `);
+
+  return rows.map(subjectRowForEnvelope);
 }
 
 function resolveWorkspacePath(inputPath) {
@@ -3547,13 +3608,140 @@ async function getUnlinkedEnvelopeScans(_event, jobIdValue) {
   `);
 }
 
+async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
+  const scanId = numericId(scanIdValue);
+  const subjectId = numericId(subjectIdValue);
+
+  return writeSql((database) => {
+    const rows = rowsFromDatabase(database, `
+      SELECT
+        es.id,
+        es.job_id AS jobId,
+        es.order_id AS orderId,
+        es.scan_path AS scanPath,
+        es.status,
+        s.id AS subjectId,
+        s.legacy_ref_num AS ref,
+        j.root_path AS rootPath,
+        COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName
+      FROM envelope_scans es
+      JOIN subjects s ON s.id = ${subjectId}
+      JOIN jobs j ON j.id = s.job_id
+      WHERE es.id = ${scanId}
+        AND es.job_id = s.job_id
+      LIMIT 1;
+    `);
+
+    if (!rows.length) {
+      throw new Error('Envelope scan and student must belong to the same job');
+    }
+
+    const row = rows[0];
+    if (row.orderId) {
+      throw new Error('This envelope is already linked to an order');
+    }
+    if (row.status === 'void') {
+      throw new Error('This envelope has already been deleted');
+    }
+
+    const sourcePath = resolveProjectPath(row.scanPath);
+    if (!sourcePath || !fs.existsSync(sourcePath)) {
+      throw new Error('Envelope image file is missing');
+    }
+
+    const jobRoot = resolveWorkspacePath(row.rootPath);
+    const envelopeFolder = path.join(jobRoot, 'Envelopes');
+    fs.mkdirSync(envelopeFolder, { recursive: true });
+
+    const prefix = String(row.ref || 'unknown').replace(/[<>:"/\\|?*\x00-\x1F]/g, '-');
+    const sourceFolder = path.resolve(path.dirname(sourcePath));
+    const destinationFolder = path.resolve(envelopeFolder);
+    let destinationPath = sourcePath;
+    if (sourceFolder !== destinationFolder || !path.basename(sourcePath).toLowerCase().startsWith(`${prefix.toLowerCase()}-`)) {
+      const filename = envelopeDestinationName(row.ref, sourcePath);
+      destinationPath = uniquePath(envelopeFolder, filename);
+      moveFile(sourcePath, destinationPath);
+    }
+
+    const relativeDestination = path.relative(projectRoot, destinationPath);
+    const statement = database.prepare(`
+      UPDATE envelope_scans
+      SET subject_id = ?,
+          scan_path = ?,
+          envelope_identifier = ?,
+          status = 'scanned',
+          notes = ?
+      WHERE id = ?
+        AND order_id IS NULL
+        AND status != 'void';
+    `);
+
+    try {
+      statement.run([
+        subjectId,
+        relativeDestination,
+        row.ref,
+        `Assigned to ${row.ref}`,
+        scanId
+      ]);
+    } finally {
+      statement.free();
+    }
+
+    return {
+      scan: {
+        id: scanId,
+        subjectId,
+        path: relativeDestination,
+        filename: path.basename(destinationPath),
+        dataUrl: imageDataUrl(destinationPath),
+        ref: row.ref,
+        subjectName: row.subjectName
+      }
+    };
+  });
+}
+
+async function deleteEnvelopeScan(_event, scanIdValue) {
+  const scanId = numericId(scanIdValue);
+
+  return writeSql((database) => {
+    const rows = rowsFromDatabase(database, `
+      SELECT id, order_id AS orderId, scan_path AS scanPath, status
+      FROM envelope_scans
+      WHERE id = ${scanId}
+      LIMIT 1;
+    `);
+
+    if (!rows.length) {
+      throw new Error('Envelope scan not found');
+    }
+
+    const row = rows[0];
+    if (row.orderId) {
+      throw new Error('Cannot delete an envelope that is linked to an order');
+    }
+
+    const fullPath = resolveProjectPath(row.scanPath);
+    database.run('DELETE FROM envelope_scans WHERE id = ? AND order_id IS NULL;', [scanId]);
+    if (fullPath && fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+    }
+
+    return { id: scanId, deleted: true };
+  });
+}
+
 ipcMain.handle('envelope:find-subject', findSubjectByBarcode);
+ipcMain.handle('envelope:search-subjects', searchEnvelopeSubjects);
 ipcMain.handle('envelope:start-watcher', startEnvelopeWatcher);
 ipcMain.handle('envelope:stop-watcher', stopEnvelopeWatcher);
 ipcMain.handle('envelope:confirm-scan', confirmEnvelopeScan);
 ipcMain.handle('envelope:order-preview', getOrderEnvelopePreview);
 ipcMain.handle('envelope:scan-preview', getEnvelopeScanPreview);
 ipcMain.handle('envelope:unlinked-list', getUnlinkedEnvelopeScans);
+ipcMain.handle('envelope:assign-scan', assignEnvelopeScan);
+ipcMain.handle('envelope:delete-scan', deleteEnvelopeScan);
 ipcMain.handle('envelope:create-order', createEnvelopeOrder);
 
 async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
