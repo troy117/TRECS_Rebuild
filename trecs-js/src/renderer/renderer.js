@@ -19,6 +19,7 @@ const backToJobsButton = document.getElementById('backToJobsButton');
 const workspaceJobTitle = document.getElementById('workspaceJobTitle');
 const workspaceJobMeta = document.getElementById('workspaceJobMeta');
 const workspaceStudentsButton = document.getElementById('workspaceStudentsButton');
+const workspaceCaptureButton = document.getElementById('workspaceCaptureButton');
 const workspaceEnvelopeButton = document.getElementById('workspaceEnvelopeButton');
 const workspaceAdminItemsButton = document.getElementById('workspaceAdminItemsButton');
 const workspaceAddBlankButton = document.getElementById('workspaceAddBlankButton');
@@ -34,6 +35,14 @@ const addRecordsModal = document.getElementById('addRecordsModal');
 const addRecordsForm = document.getElementById('addRecordsForm');
 const cancelAddRecordsButton = document.getElementById('cancelAddRecordsButton');
 const addRecordsStatus = document.getElementById('addRecordsStatus');
+const captureWorkspace = document.getElementById('captureWorkspace');
+const captureEntryForm = document.getElementById('captureEntryForm');
+const captureEntryStatus = document.getElementById('captureEntryStatus');
+const captureStudentSearchResults = document.getElementById('captureStudentSearchResults');
+const captureSubjectDetail = document.getElementById('captureSubjectDetail');
+const captureCompareGrid = document.getElementById('captureCompareGrid');
+const capturePreviewMeta = document.getElementById('capturePreviewMeta');
+const capturePairStatus = document.getElementById('capturePairStatus');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -97,6 +106,11 @@ let jobsState = {
   jobWorkspaceOpen: false,
   workspaceMode: 'students',
   workspaceStudentSearch: '',
+  captureSubject: null,
+  captureImages: [],
+  captureSearchResults: [],
+  captureSearchActiveIndex: -1,
+  captureSearchTimer: null,
   envelopeSubject: null,
   envelopeScan: null,
   envelopePending: null,
@@ -375,6 +389,8 @@ async function openJob(jobId) {
 }
 
 function closeJobWorkspace() {
+  stopCaptureWatcher().catch((error) => console.error(error));
+  stopEnvelopeWatcher().catch((error) => console.error(error));
   setJobsWorkspaceMode(false);
   title.textContent = 'Jobs';
 }
@@ -382,12 +398,15 @@ function closeJobWorkspace() {
 function setWorkspaceMode(mode) {
   jobsState.workspaceMode = mode;
   const studentsOpen = mode === 'students';
+  const captureOpen = mode === 'capture';
   const envelopeOpen = mode === 'envelope';
   const adminOpen = mode === 'admin';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
+  captureWorkspace.hidden = !captureOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
   workspaceStudentsButton.classList.toggle('active', studentsOpen);
+  workspaceCaptureButton.classList.toggle('active', captureOpen);
   workspaceEnvelopeButton.classList.toggle('active', envelopeOpen);
   workspaceAdminItemsButton.classList.toggle('active', adminOpen);
   workspaceAddBlankButton.hidden = !studentsOpen;
@@ -398,9 +417,14 @@ function setWorkspaceMode(mode) {
   if (!envelopeOpen) {
     stopEnvelopeWatcher().catch((error) => console.error(error));
   }
+  if (!captureOpen) {
+    stopCaptureWatcher().catch((error) => console.error(error));
+  }
 
   if (studentsOpen) {
     renderStudentWorkspace();
+  } else if (captureOpen) {
+    renderCaptureWorkspace();
   } else if (envelopeOpen) {
     renderEnvelopeWorkspace();
   } else {
@@ -981,6 +1005,405 @@ async function deleteWorkspaceOrder(orderId) {
   } catch (error) {
     alert(error.message || 'Delete failed');
     console.error(error);
+  }
+}
+
+function renderCaptureWorkspace() {
+  if (!jobsState.detail || !jobsState.detail.summary) {
+    return;
+  }
+
+  const job = jobsState.detail.summary;
+  title.textContent = `${job.job} Image Capture`;
+  workspaceJobTitle.textContent = `${job.location} / ${job.job}`;
+  workspaceJobMeta.textContent = `${formatType(job.type)} / Image capture`;
+  renderCaptureSubject();
+  loadCaptureImages();
+
+  setTimeout(() => {
+    captureEntryForm.elements.barcode.focus();
+    captureEntryForm.elements.barcode.select();
+  }, 0);
+}
+
+function renderCaptureSubject() {
+  const subject = jobsState.captureSubject;
+  if (!subject) {
+    captureSubjectDetail.innerHTML = '<div class="empty-state">Scan a camera card barcode or search for a student.</div>';
+    capturePreviewMeta.textContent = '';
+    return;
+  }
+
+  const isBlank = !(subject.firstName || subject.lastName || subject.name || subject.externalId || subject.grade || subject.homeroom);
+  captureSubjectDetail.innerHTML = `
+    <div class="capture-subject-card">
+      <span>${escapeHtml(subject.ref || '')}</span>
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <em>${escapeHtml([subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</em>
+      <small>${escapeHtml(subject.externalId || '')}</small>
+      ${subject.imageAssetId ? '<div class="capture-subject-photo" id="captureSubjectPhoto"><div class="empty-state">Loading photo...</div></div>' : ''}
+    </div>
+    <form class="capture-subject-form" data-capture-subject-form data-subject-id="${subject.id}">
+      <div class="subheading">
+        <h3>${isBlank ? 'Student Info' : 'Student Notes'}</h3>
+        <span data-capture-subject-status></span>
+      </div>
+      <div class="capture-subject-fields ${isBlank ? '' : 'compact'}">
+        ${isBlank ? `
+          <label>
+            <span>First Name</span>
+            <input name="firstName" value="${escapeHtml(subject.firstName || '')}">
+          </label>
+          <label>
+            <span>Last Name</span>
+            <input name="lastName" value="${escapeHtml(subject.lastName || '')}">
+          </label>
+          <label>
+            <span>Student ID</span>
+            <input name="externalId" value="${escapeHtml(subject.externalId || '')}">
+          </label>
+          <label>
+            <span>Grade</span>
+            <input name="grade" value="${escapeHtml(subject.grade || '')}">
+          </label>
+          <label>
+            <span>Homeroom</span>
+            <input name="homeroom" value="${escapeHtml(subject.homeroom || '')}">
+          </label>
+        ` : ''}
+        <label class="wide-field">
+          <span>Notes</span>
+          <textarea name="notes" rows="${isBlank ? '3' : '5'}">${escapeHtml(subject.notes || '')}</textarea>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button class="primary" type="submit">Save</button>
+      </div>
+    </form>
+  `;
+  bindCaptureSubjectForm();
+  loadCaptureSubjectPhoto(subject.imageAssetId);
+}
+
+function renderCaptureCompare() {
+  const images = jobsState.captureImages || [];
+  capturePreviewMeta.textContent = jobsState.captureSubject
+    ? `${formatNumber(images.length)} comparison image${images.length === 1 ? '' : 's'}`
+    : '';
+
+  if (!jobsState.captureSubject) {
+    captureCompareGrid.innerHTML = '<div class="empty-state">Load a student, then capture images into CaptureHotFolder.</div>';
+    return;
+  }
+
+  const mostRecent = images[0] || null;
+  const previous = images[1] || null;
+  const slots = [
+    { image: previous, label: 'Previous Image' },
+    { image: mostRecent, label: 'Most Recent Image' }
+  ];
+  captureCompareGrid.innerHTML = slots.map((slot) => {
+    const image = slot.image;
+    if (!image) {
+      return `
+        <button class="capture-image-slot empty" type="button" disabled>
+          <span>${slot.label}</span>
+          <strong>No image yet</strong>
+        </button>
+      `;
+    }
+    return `
+      <button class="capture-image-slot ${image.selected ? 'selected' : ''}" data-capture-select-image="${image.id}" type="button">
+        <span>${slot.label}</span>
+        ${image.dataUrl ? `<div class="capture-image-stage"><img class="rotate-ccw" src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}"></div>` : '<strong>Preview unavailable</strong>'}
+        <em>${escapeHtml(image.filename || '')}</em>
+      </button>
+    `;
+  }).join('');
+
+  captureCompareGrid.querySelectorAll('[data-capture-select-image]').forEach((button) => {
+    button.addEventListener('click', () => {
+      selectCaptureImage(Number(button.dataset.captureSelectImage), button);
+    });
+  });
+}
+
+function setCapturePairStatus(status) {
+  const ready = !status || status.ready !== false;
+  const message = status && status.message ? status.message : 'Ready';
+  capturePairStatus.classList.toggle('ready', ready);
+  capturePairStatus.classList.toggle('waiting', !ready);
+  capturePairStatus.innerHTML = `<i></i>${escapeHtml(message)}`;
+}
+
+async function loadCaptureSubjectPhoto(imageId) {
+  const panel = document.getElementById('captureSubjectPhoto');
+  if (!panel || !imageId) {
+    return;
+  }
+
+  try {
+    const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+    if (!preview || preview.missing || !preview.dataUrl) {
+      panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+      return;
+    }
+
+    panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Student photo')}">`;
+    const image = panel.querySelector('img');
+    image.addEventListener('load', () => {
+      image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
+    }, { once: true });
+  } catch (error) {
+    panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+    console.error(error);
+  }
+}
+
+function bindCaptureSubjectForm() {
+  const form = captureSubjectDetail.querySelector('[data-capture-subject-form]');
+  if (!form) {
+    return;
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const subject = jobsState.captureSubject;
+    if (!subject) {
+      return;
+    }
+
+    const status = form.querySelector('[data-capture-subject-status]');
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    status.textContent = 'Saving...';
+
+    try {
+      if (form.elements.firstName) {
+        const updatedSubjectFields = {
+          externalId: form.elements.externalId.value,
+          firstName: form.elements.firstName.value,
+          lastName: form.elements.lastName.value,
+          grade: form.elements.grade.value,
+          homeroom: form.elements.homeroom.value,
+          track: subject.track || '',
+          team: subject.team || '',
+          subjectType: subject.subjectType || 'student',
+          photographedStatus: subject.photographedStatus || 'unknown'
+        };
+        await trecsApi('updateSubject').updateSubject(subject.id, updatedSubjectFields);
+        jobsState.captureSubject = {
+          ...subject,
+          ...updatedSubjectFields,
+          name: [updatedSubjectFields.firstName, updatedSubjectFields.lastName].filter(Boolean).join(' ') || subject.name
+        };
+      }
+
+      const notesResult = await trecsApi('updateSubjectNotes').updateSubjectNotes(subject.id, form.elements.notes.value);
+      jobsState.captureSubject = {
+        ...jobsState.captureSubject,
+        notes: notesResult.notes
+      };
+      const detailSubject = findById(jobsState.detail.subjects || [], subject.id);
+      if (detailSubject) {
+        Object.assign(detailSubject, jobsState.captureSubject);
+      }
+      status.textContent = 'Saved';
+      renderCaptureSubject();
+    } catch (error) {
+      status.textContent = error.message || 'Save failed';
+      console.error(error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+async function loadCaptureImages() {
+  if (!jobsState.captureSubject) {
+    jobsState.captureImages = [];
+    renderCaptureCompare();
+    return;
+  }
+
+  try {
+    jobsState.captureImages = await trecsApi('getCaptureSubjectImages').getCaptureSubjectImages(jobsState.captureSubject.id);
+    renderCaptureCompare();
+  } catch (error) {
+    captureCompareGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load capture images.')}</div>`;
+    console.error(error);
+  }
+}
+
+async function lookupCaptureSubject() {
+  const barcode = captureEntryForm.elements.barcode.value.trim();
+  if (!barcode || !jobsState.selectedJobId) {
+    return;
+  }
+
+  captureEntryStatus.textContent = '';
+  try {
+    const result = await trecsApi('findSubjectByBarcode').findSubjectByBarcode(jobsState.selectedJobId, barcode);
+    await setCaptureSubject(result.subject, true);
+  } catch (error) {
+    jobsState.captureSubject = null;
+    await stopCaptureWatcher();
+    captureEntryStatus.textContent = error.message || 'Student not found';
+    renderCaptureSubject();
+    renderCaptureCompare();
+    console.error(error);
+  }
+}
+
+async function setCaptureSubject(subject, focusBarcode = false) {
+  if (!subject) {
+    return;
+  }
+
+  jobsState.captureSubject = subject;
+  jobsState.selectedSubjectId = subject.id;
+  captureEntryForm.elements.barcode.value = subject.ref || subject.externalId || '';
+  captureEntryStatus.textContent = '';
+  renderCaptureSubject();
+  await loadCaptureImages();
+  await startCaptureWatcherForCurrentSubject();
+  if (focusBarcode) {
+    captureEntryForm.elements.barcode.focus();
+    captureEntryForm.elements.barcode.select();
+  }
+}
+
+function hideCaptureStudentSearch() {
+  jobsState.captureSearchResults = [];
+  jobsState.captureSearchActiveIndex = -1;
+  captureStudentSearchResults.hidden = true;
+  captureStudentSearchResults.innerHTML = '';
+}
+
+function renderCaptureStudentSearchResults() {
+  const results = jobsState.captureSearchResults || [];
+  if (!results.length) {
+    captureStudentSearchResults.hidden = true;
+    captureStudentSearchResults.innerHTML = '';
+    return;
+  }
+
+  captureStudentSearchResults.innerHTML = results.map((subject, index) => `
+    <button class="${index === jobsState.captureSearchActiveIndex ? 'active' : ''}" data-capture-student-index="${index}" type="button">
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade ? `Grade ${subject.grade}` : '', subject.homeroom ? `HR ${subject.homeroom}` : ''].filter(Boolean).join(' / '))}</span>
+    </button>
+  `).join('');
+  captureStudentSearchResults.hidden = false;
+
+  captureStudentSearchResults.querySelectorAll('[data-capture-student-index]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener('click', () => {
+      selectCaptureSearchResult(Number(button.dataset.captureStudentIndex));
+    });
+  });
+}
+
+async function searchCaptureStudents() {
+  const input = captureEntryForm.elements.studentSearch;
+  const search = input.value.trim();
+  if (!jobsState.selectedJobId || search.length < 2) {
+    hideCaptureStudentSearch();
+    return;
+  }
+
+  try {
+    const results = await trecsApi('searchEnvelopeSubjects').searchEnvelopeSubjects(jobsState.selectedJobId, search);
+    if (input.value.trim() !== search) {
+      return;
+    }
+    jobsState.captureSearchResults = results;
+    jobsState.captureSearchActiveIndex = results.length ? 0 : -1;
+    renderCaptureStudentSearchResults();
+  } catch (error) {
+    captureStudentSearchResults.hidden = false;
+    captureStudentSearchResults.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Student search failed')}</div>`;
+    console.error(error);
+  }
+}
+
+async function selectCaptureSearchResult(index) {
+  const subject = jobsState.captureSearchResults[index];
+  if (!subject) {
+    return;
+  }
+
+  captureEntryForm.elements.studentSearch.value = '';
+  hideCaptureStudentSearch();
+  await setCaptureSubject(subject, true);
+}
+
+async function startCaptureWatcherForCurrentSubject() {
+  if (!jobsState.captureSubject) {
+    return;
+  }
+
+  setCapturePairStatus({ ready: true, message: 'Ready' });
+  return trecsApi('startCaptureWatcher').startCaptureWatcher(
+    jobsState.selectedJobId,
+    jobsState.captureSubject.id
+  );
+}
+
+async function stopCaptureWatcher() {
+  if (!window.trecs || typeof window.trecs.stopCaptureWatcher !== 'function') {
+    return;
+  }
+  await trecsApi('stopCaptureWatcher').stopCaptureWatcher();
+}
+
+async function handleCaptureImageImported(payload) {
+  if (!payload) {
+    return;
+  }
+  if (payload.status) {
+    setCapturePairStatus(payload.status);
+  }
+  if (payload.error) {
+    captureEntryStatus.textContent = payload.error;
+    return;
+  }
+  if (!payload.image || !jobsState.captureSubject || payload.image.subjectId !== jobsState.captureSubject.id) {
+    return;
+  }
+
+  captureEntryStatus.textContent = `Captured ${payload.image.filename}`;
+  await loadCaptureImages();
+  await reloadCurrentJobDetail();
+}
+
+async function selectCaptureImage(imageId, control) {
+  if (!jobsState.captureSubject || !imageId) {
+    return;
+  }
+
+  const originalText = control ? control.querySelector('span')?.textContent : '';
+  if (control) {
+    control.disabled = true;
+  }
+
+  try {
+    await trecsApi('selectCaptureImage').selectCaptureImage(jobsState.captureSubject.id, imageId);
+    await loadCaptureImages();
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    captureEntryStatus.textContent = error.message || 'Could not select image';
+    console.error(error);
+  } finally {
+    if (control) {
+      control.disabled = false;
+      const label = control.querySelector('span');
+      if (label && originalText) {
+        label.textContent = originalText;
+      }
+    }
   }
 }
 
@@ -2891,6 +3314,10 @@ async function loadJobDetail(jobId) {
   jobsState.imageSearch = '';
   jobsState.imageLinkSubjectSearch = '';
   jobsState.workspaceStudentSearch = '';
+  jobsState.captureSubject = null;
+  jobsState.captureImages = [];
+  jobsState.captureSearchResults = [];
+  hideCaptureStudentSearch();
   jobsState.envelopeSubject = null;
   jobsState.envelopeScan = null;
   jobsState.envelopePending = null;
@@ -2911,6 +3338,8 @@ async function reloadCurrentJobDetail() {
   if (jobsState.jobWorkspaceOpen) {
     if (jobsState.workspaceMode === 'admin') {
       renderAdminItemsWorkspace();
+    } else if (jobsState.workspaceMode === 'capture') {
+      renderCaptureWorkspace();
     } else if (jobsState.workspaceMode === 'envelope') {
       renderEnvelopeWorkspace();
     } else {
@@ -3158,6 +3587,10 @@ workspaceStudentsButton.addEventListener('click', () => {
   setWorkspaceMode('students');
 });
 
+workspaceCaptureButton.addEventListener('click', () => {
+  setWorkspaceMode('capture');
+});
+
 workspaceEnvelopeButton.addEventListener('click', () => {
   setWorkspaceMode('envelope');
 });
@@ -3182,6 +3615,41 @@ cancelAddRecordsButton.addEventListener('click', () => {
 });
 
 addRecordsForm.addEventListener('submit', submitAddRecords);
+
+captureEntryForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  lookupCaptureSubject();
+});
+captureEntryForm.elements.barcode.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    lookupCaptureSubject();
+  }
+});
+captureEntryForm.elements.studentSearch.addEventListener('input', () => {
+  clearTimeout(jobsState.captureSearchTimer);
+  jobsState.captureSearchTimer = setTimeout(searchCaptureStudents, 180);
+});
+captureEntryForm.elements.studentSearch.addEventListener('keydown', (event) => {
+  const results = jobsState.captureSearchResults || [];
+  if (event.key === 'ArrowDown' && results.length) {
+    event.preventDefault();
+    jobsState.captureSearchActiveIndex = Math.min(results.length - 1, jobsState.captureSearchActiveIndex + 1);
+    renderCaptureStudentSearchResults();
+  } else if (event.key === 'ArrowUp' && results.length) {
+    event.preventDefault();
+    jobsState.captureSearchActiveIndex = Math.max(0, jobsState.captureSearchActiveIndex - 1);
+    renderCaptureStudentSearchResults();
+  } else if (event.key === 'Enter' && results.length) {
+    event.preventDefault();
+    selectCaptureSearchResult(Math.max(0, jobsState.captureSearchActiveIndex));
+  } else if (event.key === 'Escape') {
+    hideCaptureStudentSearch();
+  }
+});
+captureEntryForm.elements.studentSearch.addEventListener('blur', () => {
+  setTimeout(hideCaptureStudentSearch, 120);
+});
 
 workspaceEditStudentButton.addEventListener('click', () => {
   jobsState.showStudentEditForm = !jobsState.showStudentEditForm;
@@ -3259,6 +3727,9 @@ deleteOrderButton.addEventListener('click', async () => {
 refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
 if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
   window.trecs.onEnvelopeScanImported(handleEnvelopeScanImported);
+}
+if (window.trecs && typeof window.trecs.onCaptureImageImported === 'function') {
+  window.trecs.onCaptureImageImported(handleCaptureImageImported);
 }
 
 newSchoolButton.addEventListener('click', () => {

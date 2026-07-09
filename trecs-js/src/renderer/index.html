@@ -240,6 +240,7 @@
               </div>
               <div class="workspace-actions">
                 <button class="active" id="workspaceStudentsButton" type="button">Students</button>
+                <button id="workspaceCaptureButton" type="button">Image Capture</button>
                 <button id="workspaceEnvelopeButton" type="button">Envelope Entry</button>
                 <button id="workspaceAdminItemsButton" type="button">Admin Items</button>
                 <button id="workspaceAddBlankButton" type="button">Add Records</button>
@@ -329,6 +330,42 @@
                 </div>
                 <div id="envelopePreview" class="envelope-preview">
                   <div class="empty-state">No envelope scan imported.</div>
+                </div>
+              </section>
+            </section>
+
+            <section class="capture-workspace" id="captureWorkspace" hidden>
+              <section class="panel capture-entry-panel">
+                <div class="panel-heading">
+                  <h2>Image Capture</h2>
+                </div>
+                <form class="capture-entry-form" id="captureEntryForm">
+                  <label>
+                    <span>Camera Card Barcode / Ref</span>
+                    <input name="barcode" autocomplete="off" placeholder="Scan barcode">
+                  </label>
+                  <label class="capture-search-field">
+                    <span>Student Name Search</span>
+                    <input name="studentSearch" autocomplete="off" placeholder="Type student name">
+                    <div id="captureStudentSearchResults" class="student-search-results" hidden></div>
+                  </label>
+                  <p id="captureEntryStatus" class="capture-entry-status"></p>
+                </form>
+                <div id="captureSubjectDetail" class="capture-subject-detail">
+                  <div class="empty-state">Scan a camera card barcode or search for a student.</div>
+                </div>
+              </section>
+
+              <section class="panel capture-compare-panel">
+                <div class="panel-heading">
+                  <h2>Compare Images</h2>
+                  <div class="capture-heading-status">
+                    <span id="capturePairStatus" class="capture-pair-status ready"><i></i>Ready</span>
+                    <span id="capturePreviewMeta"></span>
+                  </div>
+                </div>
+                <div id="captureCompareGrid" class="capture-compare-grid">
+                  <div class="empty-state">Load a student, then capture images into CaptureHotFolder.</div>
                 </div>
               </section>
             </section>
