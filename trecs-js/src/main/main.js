@@ -1867,7 +1867,29 @@ function selectedDirectorySubjects(subjects, options, listSubjectIds) {
   });
 }
 
+function subjectImageChoice(subject, purpose = 'production') {
+  const paths = purpose === 'medium'
+    ? [
+        subject.croppedMediumPath,
+        subject.croppedLargePath,
+        subject.originalImagePath,
+        subject.imagePath
+      ]
+    : [
+        subject.croppedLargePath,
+        subject.croppedMediumPath,
+        subject.originalImagePath,
+        subject.imagePath
+      ];
+  const selectedPath = paths.find((value) => String(value || '').trim()) || '';
+  return {
+    path: selectedPath,
+    filename: selectedPath ? path.basename(selectedPath) : subject.imageFilename || ''
+  };
+}
+
 function directorySubjectRow(subject, page, position, groupLabel, directoryType) {
+  const image = subjectImageChoice(subject, 'medium');
   return {
     Page: page,
     Position: position,
@@ -1881,8 +1903,8 @@ function directorySubjectRow(subject, page, position, groupLabel, directoryType)
     Homeroom: subject.homeroom,
     Track: subject.track,
     Team: subject.team,
-    Image: subject.imageFilename,
-    'Image Path': subject.imagePath,
+    Image: image.filename,
+    'Image Path': image.path,
     'Photo Status': subject.imageFilename ? 'photographed' : 'not_photographed',
     'Directory Type': directoryType
   };
@@ -1980,6 +2002,7 @@ function buildStickerRows(subjects, options) {
   let currentGroup = '';
 
   sorted.forEach((subject) => {
+    const image = subjectImageChoice(subject, 'medium');
     const groupValue = options.stickerSortMethod === 'alpha_teacher'
       ? subject.homeroom || ''
       : options.stickerSortMethod === 'alpha_grade'
@@ -2008,8 +2031,8 @@ function buildStickerRows(subjects, options) {
         'Student ID': subject.externalId,
         Grade: subject.grade,
         Homeroom: subject.homeroom,
-        Image: subject.imageFilename,
-        'Image Path': subject.imagePath
+        Image: image.filename,
+        'Image Path': image.path
       });
       position += 1;
     }
@@ -2105,6 +2128,7 @@ function buildSisFormatOutput(format, subjects) {
   const summaryRows = [];
 
   subjects.forEach((subject) => {
+    const image = subjectImageChoice(subject, 'production');
     const hasId = Boolean(String(subject.externalId || '').trim());
     const hasImage = Boolean(String(subject.imageFilename || '').trim());
     const targetImage = hasId ? sisTargetImagePath(format, subject) : '';
@@ -2119,7 +2143,7 @@ function buildSisFormatOutput(format, subjects) {
         First: subject.firstName,
         Last: subject.lastName,
         Grade: subject.grade,
-        'Image Source': subject.imagePath || subject.imageFilename || '',
+        'Image Source': image.path || image.filename || '',
         'Image Target': '',
         Message: 'No Student ID'
       });
@@ -2152,7 +2176,7 @@ function buildSisFormatOutput(format, subjects) {
       First: subject.firstName,
       Last: subject.lastName,
       Grade: subject.grade,
-      'Image Source': subject.imagePath || subject.imageFilename || '',
+      'Image Source': image.path || image.filename || '',
       'Image Target': targetImage,
       Message: ''
     });
@@ -2185,21 +2209,24 @@ function selectedIdCardSubjects(subjects, options, listSubjectIds) {
 }
 
 function buildIdCardRows(subjects, options) {
-  return sortDirectorySubjects(subjects, 'alpha_school').map((subject, index) => ({
-    Card: index + 1,
-    Ref: subject.ref,
-    Name: subjectDisplayName(subject),
-    'Student ID': subject.externalId,
-    Grade: subject.grade,
-    Homeroom: subject.homeroom,
-    Track: subject.track,
-    Type: subject.subjectType,
-    Layout: options.idCardLayout,
-    Reason: options.idCardReason,
-    Image: subject.imageFilename,
-    'Image Path': subject.imagePath,
-    Status: subject.imageFilename ? 'ready' : 'missing_photo'
-  }));
+  return sortDirectorySubjects(subjects, 'alpha_school').map((subject, index) => {
+    const image = subjectImageChoice(subject, 'production');
+    return {
+      Card: index + 1,
+      Ref: subject.ref,
+      Name: subjectDisplayName(subject),
+      'Student ID': subject.externalId,
+      Grade: subject.grade,
+      Homeroom: subject.homeroom,
+      Track: subject.track,
+      Type: subject.subjectType,
+      Layout: options.idCardLayout,
+      Reason: options.idCardReason,
+      Image: image.filename,
+      'Image Path': image.path,
+      Status: subject.imageFilename ? 'ready' : 'missing_photo'
+    };
+  });
 }
 
 function buildIdCardOutput(job, subjects, options) {
@@ -2301,7 +2328,68 @@ async function adminSubjectRows(jobId) {
       s.subject_type AS subjectType,
       s.photographed_status AS photographedStatus,
       ia.filename AS imageFilename,
-      ia.current_path AS imagePath
+      (
+        SELECT iv.path
+        FROM image_versions iv
+        WHERE iv.image_asset_id = ia.id
+          AND iv.version_type = 'original'
+        ORDER BY iv.created_at DESC, iv.id DESC
+        LIMIT 1
+      ) AS originalVersionPath,
+      (
+        SELECT iv.path
+        FROM image_versions iv
+        WHERE iv.image_asset_id = ia.id
+          AND iv.version_type = 'cropped_large'
+        ORDER BY iv.created_at DESC, iv.id DESC
+        LIMIT 1
+      ) AS croppedLargePath,
+      (
+        SELECT iv.path
+        FROM image_versions iv
+        WHERE iv.image_asset_id = ia.id
+          AND iv.version_type = 'cropped_med'
+        ORDER BY iv.created_at DESC, iv.id DESC
+        LIMIT 1
+      ) AS croppedMediumPath,
+      COALESCE(
+        (
+          SELECT iv.path
+          FROM image_versions iv
+          WHERE iv.image_asset_id = ia.id
+            AND iv.version_type = 'original'
+          ORDER BY iv.created_at DESC, iv.id DESC
+          LIMIT 1
+        ),
+        ia.current_path
+      ) AS originalImagePath,
+      COALESCE(
+        (
+          SELECT iv.path
+          FROM image_versions iv
+          WHERE iv.image_asset_id = ia.id
+            AND iv.version_type = 'cropped_med'
+          ORDER BY iv.created_at DESC, iv.id DESC
+          LIMIT 1
+        ),
+        (
+          SELECT iv.path
+          FROM image_versions iv
+          WHERE iv.image_asset_id = ia.id
+            AND iv.version_type = 'cropped_large'
+          ORDER BY iv.created_at DESC, iv.id DESC
+          LIMIT 1
+        ),
+        (
+          SELECT iv.path
+          FROM image_versions iv
+          WHERE iv.image_asset_id = ia.id
+            AND iv.version_type = 'original'
+          ORDER BY iv.created_at DESC, iv.id DESC
+          LIMIT 1
+        ),
+        ia.current_path
+      ) AS imagePath
     FROM subjects s
     LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
     WHERE s.job_id = ${jobId}
@@ -2757,6 +2845,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
 
 ipcMain.handle('admin-items:get', getAdminItems);
 ipcMain.handle('admin-items:render', renderAdminItem);
+ipcMain.handle('images:sync-cropped', syncCroppedImages);
 
 async function renderSubjectIdCard(_event, jobIdValue, subjectIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
@@ -2974,6 +3063,109 @@ function oldTrecsOnlineOrderReference(notes) {
 
 function isImportableImage(filePath) {
   return ['.jpg', '.jpeg', '.png'].includes(path.extname(filePath).toLowerCase());
+}
+
+const CROPPED_IMAGE_FOLDERS = [
+  { folder: 'CroppedLarge', versionType: 'cropped_large' },
+  { folder: 'CroppedMed', versionType: 'cropped_med' }
+];
+
+function scanCroppedImageFolder(jobRoot, folder, versionType, imageRows) {
+  const folderPath = path.join(jobRoot, folder);
+  const imagesByFilename = new Map(
+    imageRows.map((row) => [String(row.filename || '').toLowerCase(), row])
+  );
+  const summary = {
+    folder,
+    versionType,
+    scanned: 0,
+    matched: 0,
+    unmatched: [],
+    missingFolder: false
+  };
+  const entries = [];
+
+  if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+    summary.missingFolder = true;
+    return { summary, entries };
+  }
+
+  fs.readdirSync(folderPath).forEach((name) => {
+    const sourcePath = path.join(folderPath, name);
+    if (!fs.statSync(sourcePath).isFile() || !isImportableImage(sourcePath)) {
+      return;
+    }
+
+    summary.scanned += 1;
+    const image = imagesByFilename.get(name.toLowerCase());
+    if (!image) {
+      summary.unmatched.push(name);
+      return;
+    }
+
+    entries.push({
+      imageAssetId: image.id,
+      versionType,
+      path: path.relative(projectRoot, sourcePath)
+    });
+    summary.matched += 1;
+  });
+
+  return { summary, entries };
+}
+
+async function syncCroppedImages(_event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const job = await adminJobSummary(jobId);
+  const jobRoot = resolveProjectPath(job.rootPath);
+  if (!jobRoot || !fs.existsSync(jobRoot) || !fs.statSync(jobRoot).isDirectory()) {
+    throw new Error('Job folder was not found');
+  }
+
+  const imageRows = await querySql(`
+    SELECT id, filename
+    FROM image_assets
+    WHERE job_id = ${jobId};
+  `);
+  const scanned = CROPPED_IMAGE_FOLDERS.map((folder) => (
+    scanCroppedImageFolder(jobRoot, folder.folder, folder.versionType, imageRows)
+  ));
+  const entries = scanned.flatMap((result) => result.entries);
+  const syncResult = await writeSql((database) => {
+    const deleteStatement = database.prepare(`
+      DELETE FROM image_versions
+      WHERE image_asset_id = ?
+        AND version_type = ?;
+    `);
+    const insertStatement = database.prepare(`
+      INSERT INTO image_versions (
+        image_asset_id,
+        version_type,
+        path,
+        created_at
+      )
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP);
+    `);
+
+    try {
+      entries.forEach((entry) => {
+        deleteStatement.run([entry.imageAssetId, entry.versionType]);
+        insertStatement.run([entry.imageAssetId, entry.versionType, entry.path]);
+      });
+    } finally {
+      deleteStatement.free();
+      insertStatement.free();
+    }
+
+    return {
+      jobId,
+      folders: scanned.map((result) => result.summary),
+      registered: entries.length
+    };
+  });
+
+  syncResult.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  return syncResult;
 }
 
 function copyPreviousTrecsImages(sourceRoot, jobRoot) {

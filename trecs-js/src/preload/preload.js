@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('trecs', {
   getAdminItems: (jobId, stage) => ipcRenderer.invoke('admin-items:get', jobId, stage),
   renderAdminItem: (jobId, input) => ipcRenderer.invoke('admin-items:render', jobId, input),
   renderSubjectIdCard: (jobId, subjectId, input) => ipcRenderer.invoke('id-card:render-subject', jobId, subjectId, input),
+  syncCroppedImages: (jobId) => ipcRenderer.invoke('images:sync-cropped', jobId),
   getCapturePlan: async (jobId) => {
     const detail = await ipcRenderer.invoke('job:detail', jobId);
     return detail.capture;

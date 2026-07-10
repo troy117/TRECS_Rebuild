@@ -180,6 +180,7 @@ let jobsState = {
   imageLinkSubjectSearch: '',
   lastLaptopPackage: null,
   lastEndOfDayPackage: null,
+  lastCroppedImageSync: null,
   endOfDayReview: null,
   endOfDayCollapsed: {
     capturedImages: true,
@@ -3203,8 +3204,12 @@ function renderJobDetail(job) {
       <div class="path-box">${job.rootPath}</div>
       <div class="package-actions">
         <button data-import-school-data="${job.id}">Import School Data</button>
+        <button data-sync-cropped-images="${job.id}">Sync Cropped Images</button>
         <button class="primary" data-prepare-laptop-package="${job.id}">Prepare Onsite Setup</button>
         <button data-end-of-day-package="${job.id}">Make End of Day</button>
+        <span data-cropped-image-sync-status>
+          ${renderCroppedImageSyncStatus(job.id)}
+        </span>
         <span data-laptop-package-status>
           ${renderLaptopPackageStatus(job.id)}
         </span>
@@ -3216,6 +3221,23 @@ function renderJobDetail(job) {
   `;
 
   bindJobDetailActions();
+}
+
+function renderCroppedImageSyncStatus(jobId) {
+  const sync = jobsState.lastCroppedImageSync;
+  if (!sync || sync.jobId !== jobId) {
+    return '';
+  }
+
+  if (sync.status === 'working') {
+    return 'Syncing cropped images...';
+  }
+
+  if (sync.status === 'error') {
+    return sync.message || 'Cropped image sync failed';
+  }
+
+  return `Synced ${sync.registered} cropped images (${sync.croppedLarge} large, ${sync.croppedMed} medium). ${sync.unmatched} unmatched.`;
 }
 
 function renderLaptopPackageStatus(jobId) {
@@ -3298,6 +3320,51 @@ function bindJobDetailActions() {
       } finally {
         button.disabled = false;
         button.textContent = originalText;
+      }
+    });
+  }
+
+  const croppedSyncButton = jobDetailPanel.querySelector('[data-sync-cropped-images]');
+  if (croppedSyncButton) {
+    croppedSyncButton.addEventListener('click', async () => {
+      const jobId = Number(croppedSyncButton.dataset.syncCroppedImages);
+      const status = jobDetailPanel.querySelector('[data-cropped-image-sync-status]');
+      const originalText = croppedSyncButton.textContent;
+
+      croppedSyncButton.disabled = true;
+      croppedSyncButton.textContent = 'Syncing...';
+      jobsState.lastCroppedImageSync = { jobId, status: 'working' };
+      if (status) {
+        status.textContent = renderCroppedImageSyncStatus(jobId);
+      }
+
+      try {
+        const result = await trecsApi('syncCroppedImages').syncCroppedImages(jobId);
+        const folderCounts = Object.fromEntries(
+          result.folders.map((folder) => [folder.versionType, folder])
+        );
+        jobsState.lastCroppedImageSync = {
+          jobId,
+          status: 'done',
+          registered: result.registered,
+          croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
+          croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
+          unmatched: result.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
+        };
+        await reloadCurrentJobDetail();
+      } catch (error) {
+        jobsState.lastCroppedImageSync = {
+          jobId,
+          status: 'error',
+          message: error.message || 'Cropped image sync failed'
+        };
+        if (status) {
+          status.textContent = renderCroppedImageSyncStatus(jobId);
+        }
+        console.error(error);
+      } finally {
+        croppedSyncButton.disabled = false;
+        croppedSyncButton.textContent = originalText;
       }
     });
   }
