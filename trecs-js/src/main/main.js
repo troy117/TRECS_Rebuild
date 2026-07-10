@@ -3090,6 +3090,44 @@ function insertImportedRows(database, tableName, rows) {
   insertRows(database, tableName, columns, rows);
 }
 
+function upsertImportedRowsById(database, tableName, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const targetColumns = tableColumnNames(database, tableName);
+  const rowColumns = Object.keys(rows[0] || {});
+  const columns = targetColumns.filter((column) => rowColumns.includes(column));
+  const updateColumns = columns.filter((column) => column !== 'id');
+  if (!columns.includes('id') || !updateColumns.length) {
+    insertImportedRows(database, tableName, rows);
+    return;
+  }
+
+  const insertPlaceholders = columns.map(() => '?').join(', ');
+  const updateSql = `
+    UPDATE ${tableName}
+    SET ${updateColumns.map((column) => `${column} = ?`).join(', ')}
+    WHERE id = ?;
+  `;
+  const insertSql = `
+    INSERT OR IGNORE INTO ${tableName} (${columns.join(', ')})
+    VALUES (${insertPlaceholders});
+  `;
+  const updateStatement = database.prepare(updateSql);
+  const insertStatement = database.prepare(insertSql);
+
+  try {
+    rows.forEach((row) => {
+      updateStatement.run([...updateColumns.map((column) => row[column]), row.id]);
+      insertStatement.run(columns.map((column) => row[column]));
+    });
+  } finally {
+    updateStatement.free();
+    insertStatement.free();
+  }
+}
+
 function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
   const sourceFolder = path.join(setupFolder, 'CroppedMed');
   const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'CroppedMed');
@@ -3245,10 +3283,18 @@ async function approveEndOfDayPackage(_event, input = {}) {
     packageFolder,
     ...readEndOfDayPackage(packageFolder)
   };
-  const jobId = numericId(packageInfo.manifest.job && packageInfo.manifest.job.id);
-  const imageIds = new Set((packageInfo.manifest.copiedImages || []).map((image) => Number(image.imageAssetId)).filter(Boolean));
-  const newSubjectIds = endOfDayIncludedNewSubjectIds(packageInfo.manifest);
-  const editedSubjects = endOfDayEditedSubjects(packageInfo.manifest);
+  const approvedSubjectChanges = adjustedEndOfDaySubjectChanges(
+    { subjectChanges: packageInfo.manifest.subjectChanges || {} },
+    input.adjustments || {}
+  );
+  const approvedManifest = {
+    ...packageInfo.manifest,
+    subjectChanges: approvedSubjectChanges
+  };
+  const jobId = numericId(approvedManifest.job && approvedManifest.job.id);
+  const imageIds = new Set((approvedManifest.copiedImages || []).map((image) => Number(image.imageAssetId)).filter(Boolean));
+  const newSubjectIds = endOfDayIncludedNewSubjectIds(approvedManifest);
+  const editedSubjects = endOfDayEditedSubjects(approvedManifest);
 
   const SQL = await getSqlModule();
   const packageDatabase = new SQL.Database(fs.readFileSync(packageInfo.databasePath));
@@ -3291,7 +3337,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
       const newSubjectRows = subjectRowsToImport
         .filter((row) => newSubjectIds.has(Number(row.id)))
         .map((row) => {
-          const manifestSubject = ((packageInfo.manifest.subjectChanges && packageInfo.manifest.subjectChanges.newSubjects) || [])
+      const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
             .find((subject) => Number(subject.id) === Number(row.id));
           return {
             ...row,
@@ -3325,7 +3371,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
         `, values);
       });
 
-      insertImportedRows(database, 'image_assets', imageRows);
+      upsertImportedRowsById(database, 'image_assets', imageRows);
       insertImportedRows(database, 'image_versions', packageTables.image_versions);
       insertImportedRows(database, 'subject_images', packageTables.subject_images);
 

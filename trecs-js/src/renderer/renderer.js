@@ -70,8 +70,10 @@ const editOrderEnvelopePreview = document.getElementById('editOrderEnvelopePrevi
 const cancelEditOrderButton = document.getElementById('cancelEditOrderButton');
 const deleteOrderButton = document.getElementById('deleteOrderButton');
 const endOfDayModal = document.getElementById('endOfDayModal');
+const endOfDayModalTitle = document.getElementById('endOfDayModalTitle');
 const endOfDayReview = document.getElementById('endOfDayReview');
 const endOfDayStatus = document.getElementById('endOfDayStatus');
+const endOfDayActionNote = document.getElementById('endOfDayActionNote');
 const cancelEndOfDayButton = document.getElementById('cancelEndOfDayButton');
 const confirmEndOfDayButton = document.getElementById('confirmEndOfDayButton');
 const schoolDataModal = document.getElementById('schoolDataModal');
@@ -482,6 +484,8 @@ function setEndOfDayModalVisible(visible) {
     endOfDayStatus.textContent = '';
     endOfDayReview.innerHTML = '<div class="empty-state">Loading changes...</div>';
     confirmEndOfDayButton.disabled = false;
+    endOfDayModalTitle.textContent = 'End of Day Review';
+    endOfDayActionNote.textContent = 'Confirm these changes before creating the package.';
     confirmEndOfDayButton.textContent = 'Create End of Day';
   }
 }
@@ -573,13 +577,12 @@ function includedEndOfDayEditedSubjectCount(editedSubjects) {
 }
 
 function renderEndOfDayCapturedImages(capturedImages) {
-  const limitedImages = capturedImages.slice(0, 8);
-  if (!limitedImages.length) {
+  if (!capturedImages.length) {
     return '<div class="empty-state">No captured images found.</div>';
   }
   return `
     <ul class="end-of-day-list">
-      ${limitedImages.map((image) => `
+      ${capturedImages.map((image) => `
         <li>
           <strong>${escapeHtml(image.ref || '')}</strong>
           <span>${escapeHtml(image.studentName || image.filename || '')}</span>
@@ -587,18 +590,16 @@ function renderEndOfDayCapturedImages(capturedImages) {
         </li>
       `).join('')}
     </ul>
-    ${capturedImages.length > limitedImages.length ? `<p>${formatNumber(capturedImages.length - limitedImages.length)} more captured images will be included.</p>` : ''}
   `;
 }
 
 function renderEndOfDayNewSubjects(newSubjects) {
-  const limitedNewSubjects = newSubjects.slice(0, 8);
-  if (!limitedNewSubjects.length) {
+  if (!newSubjects.length) {
     return '<div class="empty-state">No new camera cards found.</div>';
   }
   return `
     <ul class="end-of-day-list editable">
-      ${limitedNewSubjects.map((subject) => {
+      ${newSubjects.map((subject) => {
         const adjustment = endOfDayNewSubjectAdjustment(subject.id) || {};
         return `
           <li>
@@ -624,18 +625,16 @@ function renderEndOfDayNewSubjects(newSubjects) {
         `;
       }).join('')}
     </ul>
-    ${newSubjects.length > limitedNewSubjects.length ? `<p>${formatNumber(newSubjects.length - limitedNewSubjects.length)} more new cards will be included.</p>` : ''}
   `;
 }
 
 function renderEndOfDayEditedSubjects(editedSubjects) {
-  const limitedEditedSubjects = editedSubjects.slice(0, 6);
-  if (!limitedEditedSubjects.length) {
+  if (!editedSubjects.length) {
     return '<div class="empty-state">No student edits found.</div>';
   }
   return `
     <ul class="end-of-day-change-list">
-      ${limitedEditedSubjects.map((subject) => {
+      ${editedSubjects.map((subject) => {
         const adjustment = endOfDayEditedSubjectAdjustment(subject.id) || {};
         return `
           <li>
@@ -662,7 +661,6 @@ function renderEndOfDayEditedSubjects(editedSubjects) {
         `;
       }).join('')}
     </ul>
-    ${editedSubjects.length > limitedEditedSubjects.length ? `<p>${formatNumber(editedSubjects.length - limitedEditedSubjects.length)} more edited students will be included.</p>` : ''}
   `;
 }
 
@@ -673,7 +671,6 @@ function renderEndOfDayReview(review) {
   const newSubjects = changes.newSubjects || [];
   const editedSubjects = changes.editedSubjects || [];
   const deletedSubjects = changes.deletedSubjects || [];
-  const limitedDeletedSubjects = deletedSubjects.slice(0, 6);
   const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
   const includedEditedSubjectCount = includedEndOfDayEditedSubjectCount(editedSubjects);
 
@@ -692,14 +689,13 @@ function renderEndOfDayReview(review) {
       <section>
         <h3>Deleted Records</h3>
         <ul class="end-of-day-list">
-          ${limitedDeletedSubjects.map((subject) => `
+          ${deletedSubjects.map((subject) => `
             <li>
               <strong>${escapeHtml(subject.ref || '')}</strong>
               <span>${escapeHtml(subject.name || '')}</span>
             </li>
           `).join('')}
         </ul>
-        ${deletedSubjects.length > limitedDeletedSubjects.length ? `<p>${formatNumber(deletedSubjects.length - limitedDeletedSubjects.length)} more deleted records will be included.</p>` : ''}
       </section>
     ` : ''}
   `;
@@ -775,18 +771,22 @@ function bindEndOfDayReviewControls(review) {
 }
 
 async function openEndOfDayReview(jobId) {
-  jobsState.endOfDayReview = { jobId, loading: true };
+  jobsState.endOfDayReview = { mode: 'create', jobId, loading: true };
   jobsState.endOfDayCollapsed = {
     capturedImages: true,
     newSubjects: false,
     editedSubjects: false
   };
+  endOfDayModalTitle.textContent = 'End of Day Review';
+  endOfDayActionNote.textContent = 'Confirm these changes before creating the package.';
+  confirmEndOfDayButton.textContent = 'Create End of Day';
   endOfDayStatus.textContent = '';
   endOfDayReview.innerHTML = '<div class="empty-state">Loading changes...</div>';
   setEndOfDayModalVisible(true);
   try {
     const review = await trecsApi('getEndOfDayPreview').getEndOfDayPreview(jobId);
     jobsState.endOfDayReview = {
+      mode: 'create',
       jobId,
       review,
       adjustments: createEndOfDayAdjustments(review)
@@ -801,30 +801,97 @@ async function openEndOfDayReview(jobId) {
   }
 }
 
+function reviewFromEndOfDayManifest(manifest) {
+  return {
+    job: manifest.job || {},
+    hasBaseline: true,
+    counts: manifest.counts || {},
+    capturedImages: (manifest.copiedImages || []).map((image) => ({
+      ...image,
+      id: image.imageAssetId,
+      currentPath: image.jpgPath,
+      rawPath: image.rawPath || null
+    })),
+    subjectChanges: manifest.subjectChanges || {
+      newSubjects: [],
+      editedSubjects: [],
+      deletedSubjects: []
+    }
+  };
+}
+
+function openEndOfDayPackageReview(choice) {
+  const review = reviewFromEndOfDayManifest(choice.manifest || {});
+  jobsState.endOfDayReview = {
+    mode: 'approve',
+    packageFolder: choice.folderPath,
+    review,
+    adjustments: createEndOfDayAdjustments(review)
+  };
+  jobsState.endOfDayCollapsed = {
+    capturedImages: true,
+    newSubjects: false,
+    editedSubjects: false
+  };
+  endOfDayModalTitle.textContent = 'Approve End of Day';
+  endOfDayActionNote.textContent = 'Review these changes before updating the main database.';
+  confirmEndOfDayButton.textContent = 'Approve End of Day';
+  endOfDayStatus.textContent = '';
+  setEndOfDayModalVisible(true);
+  renderEndOfDayReview(review);
+}
+
 async function confirmEndOfDayPackage() {
   const reviewState = jobsState.endOfDayReview;
-  if (!reviewState || !reviewState.jobId) {
+  if (!reviewState) {
     return;
   }
 
   confirmEndOfDayButton.disabled = true;
-  confirmEndOfDayButton.textContent = 'Creating...';
+  confirmEndOfDayButton.textContent = reviewState.mode === 'approve' ? 'Approving...' : 'Creating...';
   endOfDayStatus.textContent = '';
-  jobsState.lastEndOfDayPackage = { jobId: reviewState.jobId, status: 'working' };
+  jobsState.lastEndOfDayPackage = { jobId: reviewState.jobId || null, status: 'working' };
 
   try {
-    const result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(
-      reviewState.jobId,
-      reviewState.adjustments || currentEndOfDayAdjustments()
-    );
+    let result;
+    if (reviewState.mode === 'approve') {
+      result = await trecsApi('approveEndOfDayPackage').approveEndOfDayPackage({
+        packageFolder: reviewState.packageFolder,
+        adjustments: reviewState.adjustments || currentEndOfDayAdjustments()
+      });
+    } else {
+      result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(
+        reviewState.jobId,
+        reviewState.adjustments || currentEndOfDayAdjustments()
+      );
+    }
     jobsState.lastEndOfDayPackage = {
-      jobId: reviewState.jobId,
+      jobId: result.id || reviewState.jobId,
       status: 'done',
       packagePath: result.packagePath,
-      capturedImages: result.counts.capturedImages || 0
+      capturedImages: result.counts.capturedImages || result.counts.images || 0
     };
     setEndOfDayModalVisible(false);
-    await reloadCurrentJobDetail();
+    if (reviewState.mode === 'approve') {
+      jobsState.selectedJobId = result.id;
+      jobsState.selectedType = 'all';
+      jobsState.search = '';
+      jobsState.detail = null;
+      jobSearchInput.value = '';
+      await loadDashboard();
+      await loadJobs();
+      await loadJobDetail(result.id);
+      window.alert([
+        'End of Day package approved.',
+        '',
+        `Files copied: ${formatNumber((result.counts && result.counts.copiedFiles) || 0)}`,
+        `Images imported: ${formatNumber((result.counts && result.counts.images) || 0)}`,
+        `New camera cards: ${formatNumber((result.counts && result.counts.newSubjects) || 0)}`,
+        `Student edits: ${formatNumber((result.counts && result.counts.editedSubjects) || 0)}`
+      ].join('\n'));
+    } else {
+      await reloadCurrentJobDetail();
+    }
   } catch (error) {
     jobsState.lastEndOfDayPackage = {
       jobId: reviewState.jobId,
@@ -833,8 +900,10 @@ async function confirmEndOfDayPackage() {
     };
     endOfDayStatus.textContent = error.message || 'End of day failed';
     confirmEndOfDayButton.disabled = false;
-    confirmEndOfDayButton.textContent = 'Create End of Day';
-    await reloadCurrentJobDetail();
+    confirmEndOfDayButton.textContent = reviewState.mode === 'approve' ? 'Approve End of Day' : 'Create End of Day';
+    if (reviewState.mode !== 'approve') {
+      await reloadCurrentJobDetail();
+    }
     console.error(error);
   }
 }
@@ -4355,22 +4424,6 @@ async function loadOnsiteSetup() {
   }
 }
 
-function endOfDayPackageSummary(manifest) {
-  const job = (manifest && manifest.job) || {};
-  const counts = (manifest && manifest.counts) || {};
-  const jobName = [job.trecsName || job.clientName, job.name].filter(Boolean).join(' / ') || 'Unknown job';
-  return [
-    `Approve End of Day package for ${jobName}?`,
-    '',
-    `Captured images: ${formatNumber(counts.capturedImages || 0)}`,
-    `CR3 files: ${formatNumber(counts.capturedRawFiles || 0)}`,
-    `New camera cards: ${formatNumber(counts.newSubjects || 0)}`,
-    `Student edits: ${formatNumber(counts.editedSubjects || 0)}`,
-    '',
-    'This will copy the image files and apply the approved student changes to the main database.'
-  ].join('\n');
-}
-
 async function loadEndOfDayPackage() {
   loadEndOfDayButton.disabled = true;
   loadEndOfDayButton.textContent = 'Choosing...';
@@ -4390,34 +4443,7 @@ async function loadEndOfDayPackage() {
       throw new Error('That folder is not a TRECS End of Day package.');
     }
 
-    const approved = window.confirm(endOfDayPackageSummary(choice.manifest));
-    if (!approved) {
-      return;
-    }
-
-    loadEndOfDayButton.textContent = 'Approving...';
-    const result = await trecsApi('approveEndOfDayPackage').approveEndOfDayPackage({
-      packageFolder: choice.folderPath
-    });
-
-    jobsState.selectedJobId = result.id;
-    jobsState.selectedType = 'all';
-    jobsState.search = '';
-    jobsState.detail = null;
-    jobSearchInput.value = '';
-    await loadDashboard();
-    await loadJobs();
-    await loadJobDetail(result.id);
-
-    const counts = result.counts || {};
-    window.alert([
-      'End of Day package approved.',
-      '',
-      `Files copied: ${formatNumber(counts.copiedFiles || 0)}`,
-      `Images imported: ${formatNumber(counts.images || 0)}`,
-      `New camera cards: ${formatNumber(counts.newSubjects || 0)}`,
-      `Student edits: ${formatNumber(counts.editedSubjects || 0)}`
-    ].join('\n'));
+    openEndOfDayPackageReview(choice);
   } catch (error) {
     window.alert(error.message || 'Load End of Day failed');
     console.error(error);
