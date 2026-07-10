@@ -177,6 +177,11 @@ let jobsState = {
   lastLaptopPackage: null,
   lastEndOfDayPackage: null,
   endOfDayReview: null,
+  endOfDayCollapsed: {
+    capturedImages: true,
+    newSubjects: false,
+    editedSubjects: false
+  },
   schoolDataImport: null,
   showNewSchoolForm: false,
   selectedNewClientId: null,
@@ -488,6 +493,178 @@ function shortChangeValue(value) {
   return text.length > 80 ? `${text.slice(0, 77)}...` : text;
 }
 
+function createEndOfDayAdjustments(review) {
+  const changes = review.subjectChanges || {};
+  return {
+    newSubjects: (changes.newSubjects || []).map((subject) => ({
+      id: subject.id,
+      include: true,
+      name: subject.name || '',
+      grade: subject.grade || '',
+      homeroom: subject.homeroom || ''
+    })),
+    editedSubjects: (changes.editedSubjects || []).map((subject) => ({
+      id: subject.id,
+      include: true,
+      changes: (subject.changes || []).map((change) => ({
+        field: change.field,
+        include: true,
+        after: change.after || ''
+      }))
+    }))
+  };
+}
+
+function currentEndOfDayAdjustments() {
+  const state = jobsState.endOfDayReview || {};
+  if (!state.adjustments && state.review) {
+    state.adjustments = createEndOfDayAdjustments(state.review);
+  }
+  return state.adjustments || { newSubjects: [], editedSubjects: [] };
+}
+
+function endOfDayNewSubjectAdjustment(subjectId) {
+  const adjustments = currentEndOfDayAdjustments();
+  return adjustments.newSubjects.find((subject) => Number(subject.id) === Number(subjectId)) || null;
+}
+
+function endOfDayEditedSubjectAdjustment(subjectId) {
+  const adjustments = currentEndOfDayAdjustments();
+  return adjustments.editedSubjects.find((subject) => Number(subject.id) === Number(subjectId)) || null;
+}
+
+function renderEndOfDaySection(sectionId, title, count, contentHtml) {
+  const collapsed = jobsState.endOfDayCollapsed[sectionId] === true;
+  return `
+    <section class="end-of-day-section ${collapsed ? 'collapsed' : ''}" data-end-of-day-section="${sectionId}">
+      <button class="end-of-day-section-heading" type="button" data-end-of-day-toggle="${sectionId}">
+        <span>${escapeHtml(title)}</span>
+        <strong>${formatNumber(count || 0)}</strong>
+      </button>
+      <div class="end-of-day-section-body" ${collapsed ? 'hidden' : ''}>
+        ${contentHtml}
+      </div>
+    </section>
+  `;
+}
+
+function includedEndOfDayNewSubjectCount(newSubjects) {
+  return newSubjects.filter((subject) => {
+    const adjustment = endOfDayNewSubjectAdjustment(subject.id);
+    return !adjustment || adjustment.include !== false;
+  }).length;
+}
+
+function includedEndOfDayEditedSubjectCount(editedSubjects) {
+  return editedSubjects.filter((subject) => {
+    const adjustment = endOfDayEditedSubjectAdjustment(subject.id);
+    if (adjustment && adjustment.include === false) {
+      return false;
+    }
+    const includedChanges = (subject.changes || []).filter((change) => {
+      const changeAdjustment = adjustment
+        ? adjustment.changes.find((item) => item.field === change.field)
+        : null;
+      return !changeAdjustment || changeAdjustment.include !== false;
+    });
+    return includedChanges.length > 0;
+  }).length;
+}
+
+function renderEndOfDayCapturedImages(capturedImages) {
+  const limitedImages = capturedImages.slice(0, 8);
+  if (!limitedImages.length) {
+    return '<div class="empty-state">No captured images found.</div>';
+  }
+  return `
+    <ul class="end-of-day-list">
+      ${limitedImages.map((image) => `
+        <li>
+          <strong>${escapeHtml(image.ref || '')}</strong>
+          <span>${escapeHtml(image.studentName || image.filename || '')}</span>
+          <em>${escapeHtml(image.filename || '')}${image.rawPath ? ' / CR3' : ''}</em>
+        </li>
+      `).join('')}
+    </ul>
+    ${capturedImages.length > limitedImages.length ? `<p>${formatNumber(capturedImages.length - limitedImages.length)} more captured images will be included.</p>` : ''}
+  `;
+}
+
+function renderEndOfDayNewSubjects(newSubjects) {
+  const limitedNewSubjects = newSubjects.slice(0, 8);
+  if (!limitedNewSubjects.length) {
+    return '<div class="empty-state">No new camera cards found.</div>';
+  }
+  return `
+    <ul class="end-of-day-list editable">
+      ${limitedNewSubjects.map((subject) => {
+        const adjustment = endOfDayNewSubjectAdjustment(subject.id) || {};
+        return `
+          <li>
+            <label class="end-of-day-include">
+              <input type="checkbox" data-eod-new-include="${subject.id}" ${adjustment.include === false ? '' : 'checked'}>
+              <strong>${escapeHtml(subject.ref || '')}</strong>
+            </label>
+            <div class="end-of-day-edit-grid">
+              <label>
+                <span>Name</span>
+                <input data-eod-new-field="${subject.id}" data-field="name" value="${escapeHtml(adjustment.name ?? subject.name ?? '')}">
+              </label>
+              <label>
+                <span>Grade</span>
+                <input data-eod-new-field="${subject.id}" data-field="grade" value="${escapeHtml(adjustment.grade ?? subject.grade ?? '')}">
+              </label>
+              <label>
+                <span>Homeroom</span>
+                <input data-eod-new-field="${subject.id}" data-field="homeroom" value="${escapeHtml(adjustment.homeroom ?? subject.homeroom ?? '')}">
+              </label>
+            </div>
+          </li>
+        `;
+      }).join('')}
+    </ul>
+    ${newSubjects.length > limitedNewSubjects.length ? `<p>${formatNumber(newSubjects.length - limitedNewSubjects.length)} more new cards will be included.</p>` : ''}
+  `;
+}
+
+function renderEndOfDayEditedSubjects(editedSubjects) {
+  const limitedEditedSubjects = editedSubjects.slice(0, 6);
+  if (!limitedEditedSubjects.length) {
+    return '<div class="empty-state">No student edits found.</div>';
+  }
+  return `
+    <ul class="end-of-day-change-list">
+      ${limitedEditedSubjects.map((subject) => {
+        const adjustment = endOfDayEditedSubjectAdjustment(subject.id) || {};
+        return `
+          <li>
+            <label class="end-of-day-include">
+              <input type="checkbox" data-eod-edit-subject-include="${subject.id}" ${adjustment.include === false ? '' : 'checked'}>
+              <strong>${escapeHtml(subject.ref || '')} ${escapeHtml(subject.name || '')}</strong>
+            </label>
+            ${(subject.changes || []).map((change) => {
+              const changeAdjustment = adjustment.changes
+                ? adjustment.changes.find((item) => item.field === change.field)
+                : null;
+              return `
+                <div class="end-of-day-change-row">
+                  <label>
+                    <input type="checkbox" data-eod-edit-change-include="${subject.id}" data-field="${escapeHtml(change.field)}" ${changeAdjustment && changeAdjustment.include === false ? '' : 'checked'}>
+                    <span>${escapeHtml(change.label)}</span>
+                  </label>
+                  <em>${escapeHtml(shortChangeValue(change.before))}</em>
+                  <input data-eod-edit-change-after="${subject.id}" data-field="${escapeHtml(change.field)}" value="${escapeHtml(changeAdjustment ? changeAdjustment.after : change.after || '')}">
+                </div>
+              `;
+            }).join('')}
+          </li>
+        `;
+      }).join('')}
+    </ul>
+    ${editedSubjects.length > limitedEditedSubjects.length ? `<p>${formatNumber(editedSubjects.length - limitedEditedSubjects.length)} more edited students will be included.</p>` : ''}
+  `;
+}
+
 function renderEndOfDayReview(review) {
   const counts = review.counts || {};
   const changes = review.subjectChanges || {};
@@ -495,66 +672,21 @@ function renderEndOfDayReview(review) {
   const newSubjects = changes.newSubjects || [];
   const editedSubjects = changes.editedSubjects || [];
   const deletedSubjects = changes.deletedSubjects || [];
-  const limitedImages = capturedImages.slice(0, 8);
-  const limitedNewSubjects = newSubjects.slice(0, 8);
-  const limitedEditedSubjects = editedSubjects.slice(0, 6);
   const limitedDeletedSubjects = deletedSubjects.slice(0, 6);
+  const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
+  const includedEditedSubjectCount = includedEndOfDayEditedSubjectCount(editedSubjects);
 
   endOfDayReview.innerHTML = `
     <div class="end-of-day-summary">
       <article><span>Captured Images</span><strong>${formatNumber(counts.capturedImages || 0)}</strong></article>
       <article><span>CR3 Files</span><strong>${formatNumber(counts.capturedRawFiles || 0)}</strong></article>
-      <article><span>New Cards</span><strong>${formatNumber(counts.newSubjects || 0)}</strong></article>
-      <article><span>Student Edits</span><strong>${formatNumber(counts.editedSubjects || 0)}</strong></article>
+      <article><span>New Cards Exported</span><strong>${formatNumber(includedNewSubjectCount)}</strong></article>
+      <article><span>Student Edits Exported</span><strong>${formatNumber(includedEditedSubjectCount)}</strong></article>
     </div>
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
-    <section>
-      <h3>Captured Images</h3>
-      ${limitedImages.length ? `
-        <ul class="end-of-day-list">
-          ${limitedImages.map((image) => `
-            <li>
-              <strong>${escapeHtml(image.ref || '')}</strong>
-              <span>${escapeHtml(image.studentName || image.filename || '')}</span>
-              <em>${escapeHtml(image.filename || '')}${image.rawPath ? ' / CR3' : ''}</em>
-            </li>
-          `).join('')}
-        </ul>
-        ${capturedImages.length > limitedImages.length ? `<p>${formatNumber(capturedImages.length - limitedImages.length)} more captured images will be included.</p>` : ''}
-      ` : '<div class="empty-state">No captured images found.</div>'}
-    </section>
-    <section>
-      <h3>New Camera Cards</h3>
-      ${limitedNewSubjects.length ? `
-        <ul class="end-of-day-list">
-          ${limitedNewSubjects.map((subject) => `
-            <li>
-              <strong>${escapeHtml(subject.ref || '')}</strong>
-              <span>${escapeHtml(subject.name || '')}</span>
-              <em>${escapeHtml([subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</em>
-            </li>
-          `).join('')}
-        </ul>
-        ${newSubjects.length > limitedNewSubjects.length ? `<p>${formatNumber(newSubjects.length - limitedNewSubjects.length)} more new cards will be included.</p>` : ''}
-      ` : '<div class="empty-state">No new camera cards found.</div>'}
-    </section>
-    <section>
-      <h3>Student Database Edits</h3>
-      ${limitedEditedSubjects.length ? `
-        <ul class="end-of-day-change-list">
-          ${limitedEditedSubjects.map((subject) => `
-            <li>
-              <strong>${escapeHtml(subject.ref || '')} ${escapeHtml(subject.name || '')}</strong>
-              ${subject.changes.slice(0, 4).map((change) => `
-                <span>${escapeHtml(change.label)}: ${escapeHtml(shortChangeValue(change.before))} -> ${escapeHtml(shortChangeValue(change.after))}</span>
-              `).join('')}
-              ${subject.changes.length > 4 ? `<em>${subject.changes.length - 4} more field changes</em>` : ''}
-            </li>
-          `).join('')}
-        </ul>
-        ${editedSubjects.length > limitedEditedSubjects.length ? `<p>${formatNumber(editedSubjects.length - limitedEditedSubjects.length)} more edited students will be included.</p>` : ''}
-      ` : '<div class="empty-state">No student edits found.</div>'}
-    </section>
+    ${renderEndOfDaySection('capturedImages', 'Captured Images', capturedImages.length, renderEndOfDayCapturedImages(capturedImages))}
+    ${renderEndOfDaySection('newSubjects', 'New Camera Cards', newSubjects.length, renderEndOfDayNewSubjects(newSubjects))}
+    ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
     ${deletedSubjects.length ? `
       <section>
         <h3>Deleted Records</h3>
@@ -570,16 +702,94 @@ function renderEndOfDayReview(review) {
       </section>
     ` : ''}
   `;
+  bindEndOfDayReviewControls(review);
+}
+
+function updateEndOfDaySummaryOnly(review) {
+  renderEndOfDayReview(review);
+}
+
+function bindEndOfDayReviewControls(review) {
+  endOfDayReview.querySelectorAll('[data-end-of-day-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const sectionId = button.dataset.endOfDayToggle;
+      jobsState.endOfDayCollapsed[sectionId] = !jobsState.endOfDayCollapsed[sectionId];
+      renderEndOfDayReview(review);
+    });
+  });
+
+  endOfDayReview.querySelectorAll('[data-eod-new-include]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const adjustment = endOfDayNewSubjectAdjustment(input.dataset.eodNewInclude);
+      if (adjustment) {
+        adjustment.include = input.checked;
+        updateEndOfDaySummaryOnly(review);
+      }
+    });
+  });
+
+  endOfDayReview.querySelectorAll('[data-eod-new-field]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const adjustment = endOfDayNewSubjectAdjustment(input.dataset.eodNewField);
+      if (adjustment) {
+        adjustment[input.dataset.field] = input.value;
+      }
+    });
+  });
+
+  endOfDayReview.querySelectorAll('[data-eod-edit-subject-include]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const adjustment = endOfDayEditedSubjectAdjustment(input.dataset.eodEditSubjectInclude);
+      if (adjustment) {
+        adjustment.include = input.checked;
+        updateEndOfDaySummaryOnly(review);
+      }
+    });
+  });
+
+  endOfDayReview.querySelectorAll('[data-eod-edit-change-include]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const adjustment = endOfDayEditedSubjectAdjustment(input.dataset.eodEditChangeInclude);
+      const change = adjustment
+        ? adjustment.changes.find((item) => item.field === input.dataset.field)
+        : null;
+      if (change) {
+        change.include = input.checked;
+        updateEndOfDaySummaryOnly(review);
+      }
+    });
+  });
+
+  endOfDayReview.querySelectorAll('[data-eod-edit-change-after]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const adjustment = endOfDayEditedSubjectAdjustment(input.dataset.eodEditChangeAfter);
+      const change = adjustment
+        ? adjustment.changes.find((item) => item.field === input.dataset.field)
+        : null;
+      if (change) {
+        change.after = input.value;
+      }
+    });
+  });
 }
 
 async function openEndOfDayReview(jobId) {
   jobsState.endOfDayReview = { jobId, loading: true };
+  jobsState.endOfDayCollapsed = {
+    capturedImages: true,
+    newSubjects: false,
+    editedSubjects: false
+  };
   endOfDayStatus.textContent = '';
   endOfDayReview.innerHTML = '<div class="empty-state">Loading changes...</div>';
   setEndOfDayModalVisible(true);
   try {
     const review = await trecsApi('getEndOfDayPreview').getEndOfDayPreview(jobId);
-    jobsState.endOfDayReview = { jobId, review };
+    jobsState.endOfDayReview = {
+      jobId,
+      review,
+      adjustments: createEndOfDayAdjustments(review)
+    };
     renderEndOfDayReview(review);
   } catch (error) {
     jobsState.endOfDayReview = { jobId, error };
@@ -602,7 +812,10 @@ async function confirmEndOfDayPackage() {
   jobsState.lastEndOfDayPackage = { jobId: reviewState.jobId, status: 'working' };
 
   try {
-    const result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(reviewState.jobId);
+    const result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(
+      reviewState.jobId,
+      reviewState.adjustments || currentEndOfDayAdjustments()
+    );
     jobsState.lastEndOfDayPackage = {
       jobId: reviewState.jobId,
       status: 'done',

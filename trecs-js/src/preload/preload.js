@@ -55,5 +55,5 @@ contextBridge.exposeInMainWorld('trecs', {
   getImagePreview: (imageId) => ipcRenderer.invoke('image:preview', imageId),
   prepareLaptopPackage: (jobId) => ipcRenderer.invoke('laptop-package:prepare', jobId),
   getEndOfDayPreview: (jobId) => ipcRenderer.invoke('end-of-day:preview', jobId),
-  createEndOfDayPackage: (jobId) => ipcRenderer.invoke('end-of-day:create', jobId)
+  createEndOfDayPackage: (jobId, adjustments) => ipcRenderer.invoke('end-of-day:create', jobId, adjustments)
 });

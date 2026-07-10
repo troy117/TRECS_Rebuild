@@ -1274,9 +1274,68 @@ function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null
   return path.relative(projectRoot, destinationPath);
 }
 
-async function createEndOfDayPackage(_event, jobIdValue) {
+function adjustedEndOfDaySubjectChanges(preview, adjustments = {}) {
+  const subjectChanges = preview.subjectChanges || {};
+  const newSubjectAdjustments = new Map((adjustments.newSubjects || []).map((subject) => [Number(subject.id), subject]));
+  const editedSubjectAdjustments = new Map((adjustments.editedSubjects || []).map((subject) => [Number(subject.id), subject]));
+
+  const newSubjects = (subjectChanges.newSubjects || [])
+    .map((subject) => {
+      const adjustment = newSubjectAdjustments.get(Number(subject.id));
+      if (adjustment && adjustment.include === false) {
+        return null;
+      }
+      return {
+        ...subject,
+        name: adjustment && Object.prototype.hasOwnProperty.call(adjustment, 'name') ? adjustment.name : subject.name,
+        grade: adjustment && Object.prototype.hasOwnProperty.call(adjustment, 'grade') ? adjustment.grade : subject.grade,
+        homeroom: adjustment && Object.prototype.hasOwnProperty.call(adjustment, 'homeroom') ? adjustment.homeroom : subject.homeroom
+      };
+    })
+    .filter(Boolean);
+
+  const editedSubjects = (subjectChanges.editedSubjects || [])
+    .map((subject) => {
+      const adjustment = editedSubjectAdjustments.get(Number(subject.id));
+      if (adjustment && adjustment.include === false) {
+        return null;
+      }
+      const changeAdjustments = new Map(((adjustment && adjustment.changes) || []).map((change) => [change.field, change]));
+      const changes = (subject.changes || [])
+        .map((change) => {
+          const changeAdjustment = changeAdjustments.get(change.field);
+          if (changeAdjustment && changeAdjustment.include === false) {
+            return null;
+          }
+          return {
+            ...change,
+            after: changeAdjustment && Object.prototype.hasOwnProperty.call(changeAdjustment, 'after')
+              ? changeAdjustment.after
+              : change.after
+          };
+        })
+        .filter(Boolean);
+      return changes.length ? { ...subject, changes } : null;
+    })
+    .filter(Boolean);
+
+  return {
+    ...subjectChanges,
+    newSubjects,
+    editedSubjects
+  };
+}
+
+async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const jobId = numericId(jobIdValue);
   const preview = await buildEndOfDayPreview(jobId);
+  const subjectChanges = adjustedEndOfDaySubjectChanges(preview, adjustments);
+  const adjustedCounts = {
+    ...preview.counts,
+    newSubjects: subjectChanges.newSubjects.length,
+    editedSubjects: subjectChanges.editedSubjects.length,
+    deletedSubjects: (subjectChanges.deletedSubjects || []).length
+  };
   const createdAt = new Date();
   const packageName = `${safeFolderName(`${preview.job.trecsName || preview.job.clientName}-${preview.job.name}`)}-end-of-day-${timestampForFolder(createdAt)}`;
   const packagePath = path.join(projectRoot, 'exports', 'end-of-day', packageName);
@@ -1318,9 +1377,10 @@ async function createEndOfDayPackage(_event, jobIdValue) {
     workstation: process.env.COMPUTERNAME || os.hostname(),
     sourceDatabasePath: prototypeDatabasePath,
     job: preview.job,
-    counts: preview.counts,
+    counts: adjustedCounts,
     copiedImages,
-    subjectChanges: preview.subjectChanges,
+    subjectChanges,
+    reviewAdjustments: adjustments || {},
     paths: {
       database: 'Database/job.db',
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
@@ -1336,7 +1396,7 @@ async function createEndOfDayPackage(_event, jobIdValue) {
     packagePath,
     manifestPath,
     databasePath: path.join(databaseFolder, 'job.db'),
-    counts: preview.counts
+    counts: adjustedCounts
   };
 }
 
