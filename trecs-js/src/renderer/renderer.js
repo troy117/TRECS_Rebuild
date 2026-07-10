@@ -7,6 +7,7 @@ const viewButtons = document.querySelectorAll('[data-view-button]');
 const viewTargets = document.querySelectorAll('[data-view-target]');
 const dashboardView = document.getElementById('dashboardView');
 const jobsView = document.getElementById('jobsView');
+const jobActionsMenu = document.getElementById('jobActionsMenu');
 const jobTypeFilters = document.getElementById('jobTypeFilters');
 const jobSearchInput = document.getElementById('jobSearchInput');
 const jobsScreenTableBody = document.getElementById('jobsScreenTableBody');
@@ -768,6 +769,17 @@ function bindEndOfDayReviewControls(review) {
       }
     });
   });
+}
+
+function closeJobActionsMenu() {
+  if (jobActionsMenu) {
+    jobActionsMenu.open = false;
+  }
+}
+
+function showJobsForAction() {
+  closeJobActionsMenu();
+  setView('jobs');
 }
 
 async function openEndOfDayReview(jobId) {
@@ -4385,6 +4397,7 @@ async function submitImportPreviousJob(event) {
 }
 
 async function loadOnsiteSetup() {
+  showJobsForAction();
   loadOnsiteSetupButton.disabled = true;
   loadOnsiteSetupButton.textContent = 'Choosing...';
 
@@ -4425,6 +4438,7 @@ async function loadOnsiteSetup() {
 }
 
 async function loadEndOfDayPackage() {
+  showJobsForAction();
   loadEndOfDayButton.disabled = true;
   loadEndOfDayButton.textContent = 'Choosing...';
 
@@ -4686,6 +4700,7 @@ if (window.trecs && typeof window.trecs.onCaptureImageImported === 'function') {
 }
 
 newSchoolButton.addEventListener('click', () => {
+  showJobsForAction();
   setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
 });
 
@@ -4696,6 +4711,7 @@ cancelNewSchoolButton.addEventListener('click', () => {
 newSchoolForm.addEventListener('submit', submitNewSchool);
 
 newJobButton.addEventListener('click', () => {
+  showJobsForAction();
   setNewJobFormVisible(!jobsState.showNewJobForm);
 });
 
@@ -4706,6 +4722,7 @@ cancelNewJobButton.addEventListener('click', () => {
 newJobForm.addEventListener('submit', submitNewJob);
 
 importPreviousJobButton.addEventListener('click', () => {
+  showJobsForAction();
   setImportPreviousJobFormVisible(!jobsState.showImportPreviousJobForm);
 });
 

@@ -31,7 +31,16 @@
             <h1>Dashboard</h1>
             <p id="databasePath"></p>
           </div>
-          <button class="primary" data-view-target="jobs">Open Job</button>
+          <details class="topbar-menu" id="jobActionsMenu">
+            <summary class="primary">Job Actions</summary>
+            <div class="topbar-menu-list">
+              <button id="newSchoolButton">New School</button>
+              <button id="newJobButton">New Job</button>
+              <button id="importPreviousJobButton">Import Previous Job</button>
+              <button id="loadOnsiteSetupButton">Load Onsite Setup</button>
+              <button id="loadEndOfDayButton">Load End of Day</button>
+            </div>
+          </details>
         </header>
 
         <section id="dashboardView" class="view active-view">
@@ -79,11 +88,6 @@
                 <span>Search</span>
                 <input id="jobSearchInput" type="search" placeholder="Location or job">
               </label>
-              <button id="newSchoolButton">New School</button>
-              <button class="primary" id="newJobButton">New Job</button>
-              <button id="importPreviousJobButton">Import Previous Job</button>
-              <button id="loadOnsiteSetupButton">Load Onsite Setup</button>
-              <button id="loadEndOfDayButton">Load End of Day</button>
             </div>
           </section>
 

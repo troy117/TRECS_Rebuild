@@ -139,6 +139,68 @@ main {
   margin-bottom: 22px;
 }
 
+.topbar-menu {
+  position: relative;
+}
+
+.topbar-menu summary {
+  align-items: center;
+  border: 1px solid #c8d4df;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  font-size: 14px;
+  font-weight: 500;
+  gap: 8px;
+  list-style: none;
+  min-height: 36px;
+  padding: 0 14px;
+  user-select: none;
+}
+
+.topbar-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.topbar-menu summary::after {
+  content: "v";
+  font-size: 11px;
+  line-height: 1;
+}
+
+.topbar-menu[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.topbar-menu-list {
+  background: #fff;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  display: grid;
+  gap: 4px;
+  min-width: 210px;
+  padding: 6px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+}
+
+.topbar-menu-list button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  justify-content: flex-start;
+  min-height: 34px;
+  text-align: left;
+  width: 100%;
+}
+
+.topbar-menu-list button:hover {
+  background: #eef4f8;
+}
+
 h1,
 h2,
 p {
