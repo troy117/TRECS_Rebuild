@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('trecs', {
     ipcRenderer.removeAllListeners('capture:image-imported');
     ipcRenderer.on('capture:image-imported', (_event, payload) => callback(payload));
   },
+  onTrecsMenuAction: (callback) => {
+    ipcRenderer.removeAllListeners('menu:trecs-action');
+    ipcRenderer.on('menu:trecs-action', (_event, action) => callback(action));
+  },
   getOrderEnvelopePreview: (orderId) => ipcRenderer.invoke('envelope:order-preview', orderId),
   getUnlinkedEnvelopeScans: (jobId) => ipcRenderer.invoke('envelope:unlinked-list', jobId),
   getEnvelopeScanPreview: (scanId) => ipcRenderer.invoke('envelope:scan-preview', scanId),

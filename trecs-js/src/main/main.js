@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -6866,6 +6866,78 @@ async function getImagePreview(_event, imageIdValue) {
 
 ipcMain.handle('image:preview', getImagePreview);
 
+function sendTrecsMenuAction(window, action) {
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+  window.webContents.send('menu:trecs-action', action);
+}
+
+function createApplicationMenu(window) {
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'close' }
+      ]
+    },
+    {
+      label: 'TRECS',
+      submenu: [
+        { label: 'Image Capture', click: () => sendTrecsMenuAction(window, 'image-capture') },
+        { label: 'Admin Items', click: () => sendTrecsMenuAction(window, 'admin-items') },
+        { label: 'Add Records', click: () => sendTrecsMenuAction(window, 'add-records') },
+        { type: 'separator' },
+        { label: 'Import School Data', click: () => sendTrecsMenuAction(window, 'import-school-data') },
+        { label: 'Sync Cropped Images', click: () => sendTrecsMenuAction(window, 'sync-cropped-images') },
+        { label: 'Prepare Onsite Setup', click: () => sendTrecsMenuAction(window, 'prepare-onsite-setup') },
+        { label: 'Make End of Day', click: () => sendTrecsMenuAction(window, 'make-end-of-day') }
+      ]
+    },
+    {
+      label: 'Help',
+      submenu: [
+        { role: 'about' }
+      ]
+    }
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   logStartup('createWindow');
   const mainWindow = new BrowserWindow({
@@ -6885,6 +6957,7 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     logStartup(`did-fail-load ${errorCode} ${errorDescription}`);
   });
+  createApplicationMenu(mainWindow);
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 

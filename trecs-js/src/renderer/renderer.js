@@ -198,6 +198,15 @@ if (window.trecs && databasePath) {
   databasePath.textContent = window.trecs.prototypeDatabasePath;
 }
 
+if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
+  window.trecs.onTrecsMenuAction((action) => {
+    handleTrecsMenuAction(action).catch((error) => {
+      console.error(error);
+      window.alert(error.message || 'Menu action failed');
+    });
+  });
+}
+
 function trecsApi(methodName) {
   if (!window.trecs) {
     throw new Error('TRECS app bridge is not loaded. Close all TRECS windows and start the app with npm start.');
@@ -442,10 +451,16 @@ function setWorkspaceMode(mode) {
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
   workspaceStudentsButton.classList.toggle('active', studentsOpen);
-  workspaceCaptureButton.classList.toggle('active', captureOpen);
+  if (workspaceCaptureButton) {
+    workspaceCaptureButton.classList.toggle('active', captureOpen);
+  }
   workspaceEnvelopeButton.classList.toggle('active', envelopeOpen);
-  workspaceAdminItemsButton.classList.toggle('active', adminOpen);
-  workspaceAddBlankButton.hidden = !studentsOpen;
+  if (workspaceAdminItemsButton) {
+    workspaceAdminItemsButton.classList.toggle('active', adminOpen);
+  }
+  if (workspaceAddBlankButton) {
+    workspaceAddBlankButton.hidden = !studentsOpen;
+  }
   workspaceEditStudentButton.hidden = !studentsOpen;
   workspacePreviousButton.hidden = !studentsOpen;
   workspaceNextButton.hidden = !studentsOpen;
@@ -3203,10 +3218,6 @@ function renderJobDetail(job) {
       </dl>
       <div class="path-box">${job.rootPath}</div>
       <div class="package-actions">
-        <button data-import-school-data="${job.id}">Import School Data</button>
-        <button data-sync-cropped-images="${job.id}">Sync Cropped Images</button>
-        <button class="primary" data-prepare-laptop-package="${job.id}">Prepare Onsite Setup</button>
-        <button data-end-of-day-package="${job.id}">Make End of Day</button>
         <span data-cropped-image-sync-status>
           ${renderCroppedImageSyncStatus(job.id)}
         </span>
@@ -3274,6 +3285,131 @@ function renderEndOfDayStatus(jobId) {
   return `Created end of day with ${endOfDay.capturedImages} captured images at ${endOfDay.packagePath}`;
 }
 
+function selectedJobIdForAction() {
+  if (jobsState.selectedJobId) {
+    return jobsState.selectedJobId;
+  }
+  window.alert('Select a job first.');
+  return null;
+}
+
+async function ensureSelectedJobWorkspace(mode) {
+  const jobId = selectedJobIdForAction();
+  if (!jobId) {
+    return null;
+  }
+
+  setView('jobs');
+  if (
+    !jobsState.jobWorkspaceOpen
+    || !jobsState.detail
+    || !jobsState.detail.summary
+    || jobsState.detail.summary.id !== jobId
+  ) {
+    await openJob(jobId);
+  }
+  setWorkspaceMode(mode);
+  return jobId;
+}
+
+async function performPrepareOnsiteSetup(jobId) {
+  const status = jobDetailPanel.querySelector('[data-laptop-package-status]');
+  jobsState.lastLaptopPackage = { jobId, status: 'working' };
+  if (status) {
+    status.textContent = renderLaptopPackageStatus(jobId);
+  }
+
+  try {
+    const result = await trecsApi('prepareLaptopPackage').prepareLaptopPackage(jobId);
+    jobsState.lastLaptopPackage = {
+      jobId,
+      status: 'done',
+      packagePath: result.packagePath,
+      subjects: result.counts.subjects
+    };
+  } catch (error) {
+    jobsState.lastLaptopPackage = {
+      jobId,
+      status: 'error',
+      message: error.message || 'Package failed'
+    };
+    console.error(error);
+  } finally {
+    if (status) {
+      status.textContent = renderLaptopPackageStatus(jobId);
+    }
+  }
+}
+
+async function performSyncCroppedImages(jobId) {
+  const status = jobDetailPanel.querySelector('[data-cropped-image-sync-status]');
+  jobsState.lastCroppedImageSync = { jobId, status: 'working' };
+  if (status) {
+    status.textContent = renderCroppedImageSyncStatus(jobId);
+  }
+
+  try {
+    const result = await trecsApi('syncCroppedImages').syncCroppedImages(jobId);
+    const folderCounts = Object.fromEntries(
+      result.folders.map((folder) => [folder.versionType, folder])
+    );
+    jobsState.lastCroppedImageSync = {
+      jobId,
+      status: 'done',
+      registered: result.registered,
+      croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
+      croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
+      unmatched: result.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
+    };
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    jobsState.lastCroppedImageSync = {
+      jobId,
+      status: 'error',
+      message: error.message || 'Cropped image sync failed'
+    };
+    if (status) {
+      status.textContent = renderCroppedImageSyncStatus(jobId);
+    }
+    console.error(error);
+  }
+}
+
+async function handleTrecsMenuAction(action) {
+  if (action === 'image-capture') {
+    await ensureSelectedJobWorkspace('capture');
+    return;
+  }
+
+  if (action === 'admin-items') {
+    await ensureSelectedJobWorkspace('admin');
+    return;
+  }
+
+  if (action === 'add-records') {
+    const jobId = await ensureSelectedJobWorkspace('students');
+    if (jobId) {
+      setAddRecordsModalVisible(true);
+    }
+    return;
+  }
+
+  const jobId = selectedJobIdForAction();
+  if (!jobId) {
+    return;
+  }
+
+  if (action === 'import-school-data') {
+    openSchoolDataImport(jobId);
+  } else if (action === 'sync-cropped-images') {
+    await performSyncCroppedImages(jobId);
+  } else if (action === 'prepare-onsite-setup') {
+    await performPrepareOnsiteSetup(jobId);
+  } else if (action === 'make-end-of-day') {
+    await openEndOfDayReview(jobId);
+  }
+}
+
 function bindJobDetailActions() {
   const importSchoolDataButton = jobDetailPanel.querySelector('[data-import-school-data]');
   if (importSchoolDataButton) {
@@ -3285,38 +3421,11 @@ function bindJobDetailActions() {
   const button = jobDetailPanel.querySelector('[data-prepare-laptop-package]');
   if (button) {
     button.addEventListener('click', async () => {
-      const jobId = Number(button.dataset.prepareLaptopPackage);
-      const status = jobDetailPanel.querySelector('[data-laptop-package-status]');
       const originalText = button.textContent;
-
       button.disabled = true;
       button.textContent = 'Preparing...';
-      jobsState.lastLaptopPackage = { jobId, status: 'working' };
-      if (status) {
-        status.textContent = renderLaptopPackageStatus(jobId);
-      }
-
       try {
-        const result = await trecsApi('prepareLaptopPackage').prepareLaptopPackage(jobId);
-        jobsState.lastLaptopPackage = {
-          jobId,
-          status: 'done',
-          packagePath: result.packagePath,
-          subjects: result.counts.subjects
-        };
-        if (status) {
-          status.textContent = renderLaptopPackageStatus(jobId);
-        }
-      } catch (error) {
-        jobsState.lastLaptopPackage = {
-          jobId,
-          status: 'error',
-          message: error.message || 'Package failed'
-        };
-        if (status) {
-          status.textContent = renderLaptopPackageStatus(jobId);
-        }
-        console.error(error);
+        await performPrepareOnsiteSetup(Number(button.dataset.prepareLaptopPackage));
       } finally {
         button.disabled = false;
         button.textContent = originalText;
@@ -3327,41 +3436,11 @@ function bindJobDetailActions() {
   const croppedSyncButton = jobDetailPanel.querySelector('[data-sync-cropped-images]');
   if (croppedSyncButton) {
     croppedSyncButton.addEventListener('click', async () => {
-      const jobId = Number(croppedSyncButton.dataset.syncCroppedImages);
-      const status = jobDetailPanel.querySelector('[data-cropped-image-sync-status]');
       const originalText = croppedSyncButton.textContent;
-
       croppedSyncButton.disabled = true;
       croppedSyncButton.textContent = 'Syncing...';
-      jobsState.lastCroppedImageSync = { jobId, status: 'working' };
-      if (status) {
-        status.textContent = renderCroppedImageSyncStatus(jobId);
-      }
-
       try {
-        const result = await trecsApi('syncCroppedImages').syncCroppedImages(jobId);
-        const folderCounts = Object.fromEntries(
-          result.folders.map((folder) => [folder.versionType, folder])
-        );
-        jobsState.lastCroppedImageSync = {
-          jobId,
-          status: 'done',
-          registered: result.registered,
-          croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
-          croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
-          unmatched: result.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
-        };
-        await reloadCurrentJobDetail();
-      } catch (error) {
-        jobsState.lastCroppedImageSync = {
-          jobId,
-          status: 'error',
-          message: error.message || 'Cropped image sync failed'
-        };
-        if (status) {
-          status.textContent = renderCroppedImageSyncStatus(jobId);
-        }
-        console.error(error);
+        await performSyncCroppedImages(Number(croppedSyncButton.dataset.syncCroppedImages));
       } finally {
         croppedSyncButton.disabled = false;
         croppedSyncButton.textContent = originalText;
@@ -4590,17 +4669,21 @@ workspaceStudentsButton.addEventListener('click', () => {
   setWorkspaceMode('students');
 });
 
-workspaceCaptureButton.addEventListener('click', () => {
-  setWorkspaceMode('capture');
-});
+if (workspaceCaptureButton) {
+  workspaceCaptureButton.addEventListener('click', () => {
+    setWorkspaceMode('capture');
+  });
+}
 
 workspaceEnvelopeButton.addEventListener('click', () => {
   setWorkspaceMode('envelope');
 });
 
-workspaceAdminItemsButton.addEventListener('click', () => {
-  setWorkspaceMode('admin');
-});
+if (workspaceAdminItemsButton) {
+  workspaceAdminItemsButton.addEventListener('click', () => {
+    setWorkspaceMode('admin');
+  });
+}
 
 adminOptionsForm.addEventListener('change', () => {
   const options = adminOutputOptions();
@@ -4609,9 +4692,11 @@ adminOptionsForm.addEventListener('change', () => {
   renderAdminItemsWorkspace();
 });
 
-workspaceAddBlankButton.addEventListener('click', () => {
-  setAddRecordsModalVisible(true);
-});
+if (workspaceAddBlankButton) {
+  workspaceAddBlankButton.addEventListener('click', () => {
+    setAddRecordsModalVisible(true);
+  });
+}
 
 cancelAddRecordsButton.addEventListener('click', () => {
   setAddRecordsModalVisible(false);
