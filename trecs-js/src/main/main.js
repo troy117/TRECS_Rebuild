@@ -6917,6 +6917,12 @@ function createApplicationMenu(window) {
     {
       label: 'TRECS',
       submenu: [
+        { label: 'New School', click: () => sendTrecsMenuAction(window, 'new-school') },
+        { label: 'New Job', click: () => sendTrecsMenuAction(window, 'new-job') },
+        { label: 'Import Previous Job', click: () => sendTrecsMenuAction(window, 'import-previous-job') },
+        { label: 'Load Onsite Setup', click: () => sendTrecsMenuAction(window, 'load-onsite-setup') },
+        { label: 'Load End of Day', click: () => sendTrecsMenuAction(window, 'load-end-of-day') },
+        { type: 'separator' },
         { label: 'Image Capture', click: () => sendTrecsMenuAction(window, 'image-capture') },
         { label: 'Admin Items', click: () => sendTrecsMenuAction(window, 'admin-items') },
         { label: 'Add Records', click: () => sendTrecsMenuAction(window, 'add-records') },

@@ -284,6 +284,7 @@ function setJobsWorkspaceMode(open) {
   document.querySelector('.jobs-toolbar').hidden = open;
   newSchoolPanel.hidden = open || !jobsState.showNewSchoolForm;
   newJobPanel.hidden = open || !jobsState.showNewJobForm;
+  importPreviousJobPanel.hidden = open || !jobsState.showImportPreviousJobForm;
   document.querySelector('.jobs-layout').hidden = open;
   document.getElementById('jobWorkflowPanel').hidden = true;
   jobStudentWorkspace.hidden = !open;
@@ -292,12 +293,14 @@ function setJobsWorkspaceMode(open) {
 function showJobsLoadError(error) {
   jobsScreenTableBody.innerHTML = '';
   jobsCountLabel.textContent = 'Load failed';
-  jobDetailPanel.innerHTML = `
-    <div class="panel-heading">
-      <h2>Job Detail</h2>
-    </div>
-    <div class="empty-state">${escapeHtml(error.message || 'Could not load jobs.')}</div>
-  `;
+  if (jobDetailPanel) {
+    jobDetailPanel.innerHTML = `
+      <div class="panel-heading">
+        <h2>Job Detail</h2>
+      </div>
+      <div class="empty-state">${escapeHtml(error.message || 'Could not load jobs.')}</div>
+    `;
+  }
   jobWorkflowContent.innerHTML = '<div class="empty-state">Jobs could not be loaded.</div>';
   console.error(error);
 }
@@ -347,7 +350,8 @@ function sortLabel(key) {
   const labels = {
     location: 'Location',
     job: 'Job',
-    type: 'Type'
+    type: 'Type',
+    packagePlan: 'Package Plan'
   };
   return labels[key] || key;
 }
@@ -389,6 +393,7 @@ function renderJobsScreen() {
         <td>${job.location}</td>
         <td>${job.job}</td>
         <td>${formatType(job.type)}</td>
+        <td>${job.packagePlan || 'No package plan'}</td>
         <td>${formatNumber(job.subjects)}</td>
         <td>${formatNumber(job.orders)}</td>
         <td>${formatNumber(job.images)}</td>
@@ -406,8 +411,6 @@ function renderJobsScreen() {
     });
   });
 
-  const selected = jobsState.jobs.find((job) => job.id === jobsState.selectedJobId) || null;
-  renderJobDetail(selected || null);
   renderJobTypeFilters();
   bindJobSortHeaders();
 }
@@ -421,8 +424,6 @@ function selectJobSummary(jobId) {
     row.classList.toggle('selected-row', Number(row.dataset.jobId) === jobId);
   });
 
-  const selected = jobsState.jobs.find((job) => job.id === jobId) || null;
-  renderJobDetail(selected);
   jobWorkflowContent.innerHTML = '<div class="empty-state">Double-click a job to open workflow data.</div>';
 }
 
@@ -3166,6 +3167,9 @@ function resetNewSchoolForm() {
 }
 
 function renderJobDetail(job) {
+  if (!jobDetailPanel) {
+    return;
+  }
   if (!job) {
     jobDetailPanel.innerHTML = `
       <div class="panel-heading">
@@ -3313,7 +3317,7 @@ async function ensureSelectedJobWorkspace(mode) {
 }
 
 async function performPrepareOnsiteSetup(jobId) {
-  const status = jobDetailPanel.querySelector('[data-laptop-package-status]');
+  const status = jobDetailPanel ? jobDetailPanel.querySelector('[data-laptop-package-status]') : null;
   jobsState.lastLaptopPackage = { jobId, status: 'working' };
   if (status) {
     status.textContent = renderLaptopPackageStatus(jobId);
@@ -3342,7 +3346,7 @@ async function performPrepareOnsiteSetup(jobId) {
 }
 
 async function performSyncCroppedImages(jobId) {
-  const status = jobDetailPanel.querySelector('[data-cropped-image-sync-status]');
+  const status = jobDetailPanel ? jobDetailPanel.querySelector('[data-cropped-image-sync-status]') : null;
   jobsState.lastCroppedImageSync = { jobId, status: 'working' };
   if (status) {
     status.textContent = renderCroppedImageSyncStatus(jobId);
@@ -3376,6 +3380,34 @@ async function performSyncCroppedImages(jobId) {
 }
 
 async function handleTrecsMenuAction(action) {
+  if (action === 'new-school') {
+    showJobsForAction();
+    setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
+    return;
+  }
+
+  if (action === 'new-job') {
+    showJobsForAction();
+    setNewJobFormVisible(!jobsState.showNewJobForm);
+    return;
+  }
+
+  if (action === 'import-previous-job') {
+    showJobsForAction();
+    setImportPreviousJobFormVisible(!jobsState.showImportPreviousJobForm);
+    return;
+  }
+
+  if (action === 'load-onsite-setup') {
+    await loadOnsiteSetup();
+    return;
+  }
+
+  if (action === 'load-end-of-day') {
+    await loadEndOfDayPackage();
+    return;
+  }
+
   if (action === 'image-capture') {
     await ensureSelectedJobWorkspace('capture');
     return;
@@ -3411,6 +3443,9 @@ async function handleTrecsMenuAction(action) {
 }
 
 function bindJobDetailActions() {
+  if (!jobDetailPanel) {
+    return;
+  }
   const importSchoolDataButton = jobDetailPanel.querySelector('[data-import-school-data]');
   if (importSchoolDataButton) {
     importSchoolDataButton.addEventListener('click', () => {
@@ -4548,8 +4583,10 @@ async function submitImportPreviousJob(event) {
 
 async function loadOnsiteSetup() {
   showJobsForAction();
-  loadOnsiteSetupButton.disabled = true;
-  loadOnsiteSetupButton.textContent = 'Choosing...';
+  if (loadOnsiteSetupButton) {
+    loadOnsiteSetupButton.disabled = true;
+    loadOnsiteSetupButton.textContent = 'Choosing...';
+  }
 
   try {
     const choice = await trecsApi('chooseOnsiteSetupFolder').chooseOnsiteSetupFolder();
@@ -4563,7 +4600,9 @@ async function loadOnsiteSetup() {
       throw new Error('Database\\job.db was not found in that folder.');
     }
 
-    loadOnsiteSetupButton.textContent = 'Loading...';
+    if (loadOnsiteSetupButton) {
+      loadOnsiteSetupButton.textContent = 'Loading...';
+    }
     const result = await trecsApi('loadOnsiteSetup').loadOnsiteSetup({
       setupFolder: choice.folderPath
     });
@@ -4582,15 +4621,19 @@ async function loadOnsiteSetup() {
     window.alert(error.message || 'Load onsite setup failed');
     console.error(error);
   } finally {
-    loadOnsiteSetupButton.disabled = false;
-    loadOnsiteSetupButton.textContent = 'Load Onsite Setup';
+    if (loadOnsiteSetupButton) {
+      loadOnsiteSetupButton.disabled = false;
+      loadOnsiteSetupButton.textContent = 'Load Onsite Setup';
+    }
   }
 }
 
 async function loadEndOfDayPackage() {
   showJobsForAction();
-  loadEndOfDayButton.disabled = true;
-  loadEndOfDayButton.textContent = 'Choosing...';
+  if (loadEndOfDayButton) {
+    loadEndOfDayButton.disabled = true;
+    loadEndOfDayButton.textContent = 'Choosing...';
+  }
 
   try {
     const choice = await trecsApi('chooseEndOfDayPackageFolder').chooseEndOfDayPackageFolder();
@@ -4612,8 +4655,10 @@ async function loadEndOfDayPackage() {
     window.alert(error.message || 'Load End of Day failed');
     console.error(error);
   } finally {
-    loadEndOfDayButton.disabled = false;
-    loadEndOfDayButton.textContent = 'Load End of Day';
+    if (loadEndOfDayButton) {
+      loadEndOfDayButton.disabled = false;
+      loadEndOfDayButton.textContent = 'Load End of Day';
+    }
   }
 }
 
@@ -4855,10 +4900,12 @@ if (window.trecs && typeof window.trecs.onCaptureImageImported === 'function') {
   window.trecs.onCaptureImageImported(handleCaptureImageImported);
 }
 
-newSchoolButton.addEventListener('click', () => {
-  showJobsForAction();
-  setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
-});
+if (newSchoolButton) {
+  newSchoolButton.addEventListener('click', () => {
+    showJobsForAction();
+    setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
+  });
+}
 
 cancelNewSchoolButton.addEventListener('click', () => {
   setNewSchoolFormVisible(false);
@@ -4866,10 +4913,12 @@ cancelNewSchoolButton.addEventListener('click', () => {
 
 newSchoolForm.addEventListener('submit', submitNewSchool);
 
-newJobButton.addEventListener('click', () => {
-  showJobsForAction();
-  setNewJobFormVisible(!jobsState.showNewJobForm);
-});
+if (newJobButton) {
+  newJobButton.addEventListener('click', () => {
+    showJobsForAction();
+    setNewJobFormVisible(!jobsState.showNewJobForm);
+  });
+}
 
 cancelNewJobButton.addEventListener('click', () => {
   setNewJobFormVisible(false);
@@ -4877,13 +4926,19 @@ cancelNewJobButton.addEventListener('click', () => {
 
 newJobForm.addEventListener('submit', submitNewJob);
 
-importPreviousJobButton.addEventListener('click', () => {
-  showJobsForAction();
-  setImportPreviousJobFormVisible(!jobsState.showImportPreviousJobForm);
-});
+if (importPreviousJobButton) {
+  importPreviousJobButton.addEventListener('click', () => {
+    showJobsForAction();
+    setImportPreviousJobFormVisible(!jobsState.showImportPreviousJobForm);
+  });
+}
 
-loadOnsiteSetupButton.addEventListener('click', loadOnsiteSetup);
-loadEndOfDayButton.addEventListener('click', loadEndOfDayPackage);
+if (loadOnsiteSetupButton) {
+  loadOnsiteSetupButton.addEventListener('click', loadOnsiteSetup);
+}
+if (loadEndOfDayButton) {
+  loadEndOfDayButton.addEventListener('click', loadEndOfDayPackage);
+}
 
 cancelImportPreviousJobButton.addEventListener('click', () => {
   setImportPreviousJobFormVisible(false);

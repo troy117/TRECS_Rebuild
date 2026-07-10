@@ -31,16 +31,6 @@
             <h1>Dashboard</h1>
             <p id="databasePath"></p>
           </div>
-          <details class="topbar-menu" id="jobActionsMenu">
-            <summary class="primary">Job Actions</summary>
-            <div class="topbar-menu-list">
-              <button id="newSchoolButton">New School</button>
-              <button id="newJobButton">New Job</button>
-              <button id="importPreviousJobButton">Import Previous Job</button>
-              <button id="loadOnsiteSetupButton">Load Onsite Setup</button>
-              <button id="loadEndOfDayButton">Load End of Day</button>
-            </div>
-          </details>
         </header>
 
         <section id="dashboardView" class="view active-view">
@@ -257,6 +247,7 @@
                     <th><button class="table-sort" data-job-sort="location" type="button">Location</button></th>
                     <th><button class="table-sort" data-job-sort="job" type="button">Job</button></th>
                     <th><button class="table-sort" data-job-sort="type" type="button">Type</button></th>
+                    <th><button class="table-sort" data-job-sort="packagePlan" type="button">Package Plan</button></th>
                     <th>Subjects</th>
                     <th>Orders</th>
                     <th>Images</th>
@@ -265,13 +256,6 @@
                 <tbody id="jobsScreenTableBody"></tbody>
               </table>
             </div>
-
-            <aside class="panel job-detail" id="jobDetailPanel">
-              <div class="panel-heading">
-                <h2>Job Detail</h2>
-              </div>
-              <div class="empty-state">Select a job</div>
-            </aside>
           </section>
 
           <section class="panel job-workflow" id="jobWorkflowPanel" hidden>

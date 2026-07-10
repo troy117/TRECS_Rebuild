@@ -343,9 +343,7 @@ h2 {
 
 .jobs-layout {
   align-items: start;
-  display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  display: block;
   margin-bottom: 16px;
 }
 
