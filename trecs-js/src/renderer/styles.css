@@ -1914,6 +1914,13 @@ dd {
   width: auto;
 }
 
+.workspace-photo img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: min(31vh, 300px);
+}
+
 .workspace-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));

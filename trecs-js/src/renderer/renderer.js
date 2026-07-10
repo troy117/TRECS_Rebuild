@@ -1438,6 +1438,10 @@ async function loadWorkspacePhoto(imageId) {
     }
 
     panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
+    const image = panel.querySelector('img');
+    image.addEventListener('load', () => {
+      image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
+    }, { once: true });
   } catch (error) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
