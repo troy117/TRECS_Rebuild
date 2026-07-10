@@ -68,6 +68,12 @@ const imageLightboxTitle = document.getElementById('imageLightboxTitle');
 const imageLightboxContent = document.getElementById('imageLightboxContent');
 const closeImageLightboxButton = document.getElementById('closeImageLightboxButton');
 const imageHoverPreview = document.getElementById('imageHoverPreview');
+const studentFieldSettingsModal = document.getElementById('studentFieldSettingsModal');
+const studentFieldSettingsForm = document.getElementById('studentFieldSettingsForm');
+const studentFieldSettingsList = document.getElementById('studentFieldSettingsList');
+const studentFieldSettingsStatus = document.getElementById('studentFieldSettingsStatus');
+const cancelStudentFieldSettingsButton = document.getElementById('cancelStudentFieldSettingsButton');
+const applyStudentFieldsToAllButton = document.getElementById('applyStudentFieldsToAllButton');
 const editOrderModal = document.getElementById('editOrderModal');
 const editOrderForm = document.getElementById('editOrderForm');
 const editOrderTitle = document.getElementById('editOrderTitle');
@@ -188,6 +194,8 @@ let jobsState = {
   lastCroppedImageSync: null,
   imagePreviewCache: new Map(),
   imageHoverToken: 0,
+  studentFieldSettings: null,
+  studentFieldSettingsScope: 'global',
   endOfDayReview: null,
   endOfDayCollapsed: {
     capturedImages: true,
@@ -213,6 +221,21 @@ if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
     });
   });
 }
+
+const STUDENT_FIELD_DEFINITIONS = [
+  { key: 'firstName', label: 'First Name', editOnly: true },
+  { key: 'lastName', label: 'Last Name', editOnly: true },
+  { key: 'externalId', label: 'Student ID' },
+  { key: 'grade', label: 'Grade' },
+  { key: 'homeroom', label: 'Homeroom' },
+  { key: 'track', label: 'Track' },
+  { key: 'team', label: 'Team' },
+  { key: 'subjectType', label: 'Type' },
+  { key: 'photographedStatus', label: 'Photo Status', editOnly: true }
+];
+const DEFAULT_STUDENT_VISIBLE_FIELDS = Object.fromEntries(
+  STUDENT_FIELD_DEFINITIONS.map((field) => [field.key, true])
+);
 
 function trecsApi(methodName) {
   if (!window.trecs) {
@@ -1193,11 +1216,60 @@ function renderStudentWorkspace() {
   updateWorkspaceNavButtons();
 }
 
+function normalizeStudentVisibleFields(fields = {}) {
+  return Object.fromEntries(
+    STUDENT_FIELD_DEFINITIONS.map((field) => [field.key, fields[field.key] !== false])
+  );
+}
+
+function defaultStudentFieldSettings() {
+  return {
+    global: { visibleFields: { ...DEFAULT_STUDENT_VISIBLE_FIELDS } },
+    jobTypes: {}
+  };
+}
+
+function effectiveStudentVisibleFields(jobType) {
+  const settings = jobsState.studentFieldSettings || defaultStudentFieldSettings();
+  const globalFields = normalizeStudentVisibleFields(settings.global && settings.global.visibleFields);
+  const jobTypeSettings = settings.jobTypes && settings.jobTypes[jobType];
+  if (jobTypeSettings && jobTypeSettings.inheritGlobal === false) {
+    return normalizeStudentVisibleFields(jobTypeSettings.visibleFields);
+  }
+  return globalFields;
+}
+
+function currentStudentVisibleFields() {
+  const jobType = jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary.type : '';
+  return effectiveStudentVisibleFields(jobType);
+}
+
+function studentFieldVisible(fields, key) {
+  return fields[key] !== false;
+}
+
+function studentDetailFieldRows(subject, fields) {
+  const rows = [
+    ['externalId', 'Student ID', subject.externalId || ''],
+    ['grade', 'Grade', subject.grade || ''],
+    ['homeroom', 'Homeroom', subject.homeroom || ''],
+    ['track', 'Track', subject.track || ''],
+    ['team', 'Team', subject.team || ''],
+    ['subjectType', 'Type', formatType(subject.subjectType || 'student')]
+  ];
+
+  return rows
+    .filter(([key]) => studentFieldVisible(fields, key))
+    .map(([_key, label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`)
+    .join('');
+}
+
 function renderWorkspaceStudentDetail(subject) {
   if (!subject) {
     workspaceStudentDetail.innerHTML = '<div class="empty-state">No student selected.</div>';
     return;
   }
+  const visibleFields = currentStudentVisibleFields();
 
   workspaceStudentDetail.innerHTML = `
     <div class="workspace-student-header">
@@ -1211,12 +1283,7 @@ function renderWorkspaceStudentDetail(subject) {
       <div class="empty-state">Loading photo...</div>
     </div>
     <dl class="workspace-fields">
-      <div><dt>Student ID</dt><dd>${subject.externalId || ''}</dd></div>
-      <div><dt>Grade</dt><dd>${subject.grade || ''}</dd></div>
-      <div><dt>Homeroom</dt><dd>${subject.homeroom || ''}</dd></div>
-      <div><dt>Track</dt><dd>${subject.track || ''}</dd></div>
-      <div><dt>Team</dt><dd>${subject.team || ''}</dd></div>
-      <div><dt>Type</dt><dd>${formatType(subject.subjectType || 'student')}</dd></div>
+      ${studentDetailFieldRows(subject, visibleFields) || '<div><dt>Student Info</dt><dd>No fields selected</dd></div>'}
     </dl>
     ${jobsState.showStudentEditForm ? renderStudentEditForm(subject) : ''}
     <form class="notes-form" data-note-form="subject" data-note-id="${subject.id}">
@@ -1237,6 +1304,68 @@ function renderWorkspaceStudentDetail(subject) {
 }
 
 function renderStudentEditForm(subject) {
+  const visibleFields = currentStudentVisibleFields();
+  const fieldHtml = [
+    studentFieldVisible(visibleFields, 'externalId') ? `
+      <label>
+        <span>Student ID</span>
+        <input name="externalId" value="${escapeHtml(subject.externalId || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'firstName') ? `
+      <label>
+        <span>First Name</span>
+        <input name="firstName" value="${escapeHtml(subject.firstName || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'lastName') ? `
+      <label>
+        <span>Last Name</span>
+        <input name="lastName" value="${escapeHtml(subject.lastName || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'grade') ? `
+      <label>
+        <span>Grade</span>
+        <input name="grade" value="${escapeHtml(subject.grade || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'homeroom') ? `
+      <label>
+        <span>Homeroom</span>
+        <input name="homeroom" value="${escapeHtml(subject.homeroom || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'track') ? `
+      <label>
+        <span>Track</span>
+        <input name="track" value="${escapeHtml(subject.track || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'team') ? `
+      <label>
+        <span>Team</span>
+        <input name="team" value="${escapeHtml(subject.team || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'subjectType') ? `
+      <label>
+        <span>Type</span>
+        <select name="subjectType">
+          ${studentTypeOptions(subject.subjectType)}
+        </select>
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'photographedStatus') ? `
+      <label>
+        <span>Photo Status</span>
+        <select name="photographedStatus">
+          ${photoStatusOptions(subject.photographedStatus)}
+        </select>
+      </label>
+    ` : ''
+  ].join('');
+
   return `
     <form class="student-edit-form" data-student-edit-form data-subject-id="${subject.id}">
       <div class="subheading">
@@ -1248,46 +1377,7 @@ function renderStudentEditForm(subject) {
           <span>Ref</span>
           <strong>${escapeHtml(subject.ref || '')}</strong>
         </div>
-        <label>
-          <span>Student ID</span>
-          <input name="externalId" value="${escapeHtml(subject.externalId || '')}">
-        </label>
-        <label>
-          <span>First Name</span>
-          <input name="firstName" value="${escapeHtml(subject.firstName || '')}">
-        </label>
-        <label>
-          <span>Last Name</span>
-          <input name="lastName" value="${escapeHtml(subject.lastName || '')}">
-        </label>
-        <label>
-          <span>Grade</span>
-          <input name="grade" value="${escapeHtml(subject.grade || '')}">
-        </label>
-        <label>
-          <span>Homeroom</span>
-          <input name="homeroom" value="${escapeHtml(subject.homeroom || '')}">
-        </label>
-        <label>
-          <span>Track</span>
-          <input name="track" value="${escapeHtml(subject.track || '')}">
-        </label>
-        <label>
-          <span>Team</span>
-          <input name="team" value="${escapeHtml(subject.team || '')}">
-        </label>
-        <label>
-          <span>Type</span>
-          <select name="subjectType">
-            ${studentTypeOptions(subject.subjectType)}
-          </select>
-        </label>
-        <label>
-          <span>Photo Status</span>
-          <select name="photographedStatus">
-            ${photoStatusOptions(subject.photographedStatus)}
-          </select>
-        </label>
+        ${fieldHtml}
       </div>
       <div class="form-actions">
         <button type="button" data-cancel-student-edit>Cancel</button>
@@ -1295,6 +1385,120 @@ function renderStudentEditForm(subject) {
       </div>
     </form>
   `;
+}
+
+function jobTypeOptionsForFieldSettings() {
+  const types = new Set(['fall', 'spring', 'sports', 'seniors', 'event', 'qr_event', 'league']);
+  jobsState.types.forEach((type) => types.add(type.type));
+  jobsState.jobs.forEach((job) => types.add(job.type));
+  return Array.from(types).sort();
+}
+
+function studentFieldSettingsConfigForScope(scope) {
+  const settings = jobsState.studentFieldSettings || defaultStudentFieldSettings();
+  if (scope === 'global') {
+    return {
+      inheritGlobal: false,
+      visibleFields: normalizeStudentVisibleFields(settings.global && settings.global.visibleFields)
+    };
+  }
+  const config = settings.jobTypes && settings.jobTypes[scope];
+  return {
+    inheritGlobal: !config || config.inheritGlobal !== false,
+    visibleFields: config && config.inheritGlobal === false
+      ? normalizeStudentVisibleFields(config.visibleFields)
+      : normalizeStudentVisibleFields(settings.global && settings.global.visibleFields)
+  };
+}
+
+function currentStudentFieldFormFields() {
+  const fields = {};
+  studentFieldSettingsList.querySelectorAll('[data-student-field-key]').forEach((input) => {
+    fields[input.dataset.studentFieldKey] = input.checked;
+  });
+  return normalizeStudentVisibleFields(fields);
+}
+
+function renderStudentFieldSettingsModal() {
+  const settings = jobsState.studentFieldSettings || defaultStudentFieldSettings();
+  const scope = jobsState.studentFieldSettingsScope || 'global';
+  const typeOptions = jobTypeOptionsForFieldSettings();
+  const config = studentFieldSettingsConfigForScope(scope);
+  const inheritWrap = studentFieldSettingsForm.querySelector('[data-student-field-inherit-wrap]');
+
+  studentFieldSettingsForm.elements.scope.innerHTML = [
+    '<option value="global">Global Defaults</option>',
+    ...typeOptions.map((type) => `<option value="${type}">${formatType(type)}</option>`)
+  ].join('');
+  studentFieldSettingsForm.elements.scope.value = scope;
+  inheritWrap.hidden = scope === 'global';
+  studentFieldSettingsForm.elements.inheritGlobal.checked = config.inheritGlobal;
+  studentFieldSettingsList.hidden = scope !== 'global' && config.inheritGlobal;
+  applyStudentFieldsToAllButton.hidden = scope !== 'global';
+
+  const visibleFields = config.visibleFields;
+  studentFieldSettingsList.innerHTML = STUDENT_FIELD_DEFINITIONS.map((field) => `
+    <label class="student-field-option">
+      <input data-student-field-key="${field.key}" type="checkbox" ${visibleFields[field.key] !== false ? 'checked' : ''}>
+      <span>${field.label}</span>
+    </label>
+  `).join('');
+
+  if (!settings.jobTypes) {
+    settings.jobTypes = {};
+  }
+}
+
+async function openStudentFieldSettings() {
+  studentFieldSettingsStatus.textContent = '';
+  studentFieldSettingsModal.hidden = false;
+  try {
+    jobsState.studentFieldSettings = await trecsApi('getStudentFieldSettings').getStudentFieldSettings();
+  } catch (error) {
+    jobsState.studentFieldSettings = defaultStudentFieldSettings();
+    studentFieldSettingsStatus.textContent = error.message || 'Could not load field settings';
+    console.error(error);
+  }
+  renderStudentFieldSettingsModal();
+}
+
+function closeStudentFieldSettings() {
+  studentFieldSettingsModal.hidden = true;
+  studentFieldSettingsStatus.textContent = '';
+}
+
+async function saveStudentFieldSettingsFromForm(applyToAll = false) {
+  const scope = jobsState.studentFieldSettingsScope || 'global';
+  const settings = structuredClone(jobsState.studentFieldSettings || defaultStudentFieldSettings());
+  const visibleFields = currentStudentFieldFormFields();
+
+  if (applyToAll) {
+    settings.global = { visibleFields };
+    settings.jobTypes = {};
+  } else if (scope === 'global') {
+    settings.global = { visibleFields };
+  } else {
+    settings.jobTypes = settings.jobTypes || {};
+    if (studentFieldSettingsForm.elements.inheritGlobal.checked) {
+      settings.jobTypes[scope] = {
+        inheritGlobal: true,
+        visibleFields: normalizeStudentVisibleFields(settings.global && settings.global.visibleFields)
+      };
+    } else {
+      settings.jobTypes[scope] = {
+        inheritGlobal: false,
+        visibleFields
+      };
+    }
+  }
+
+  studentFieldSettingsStatus.textContent = 'Saving...';
+  jobsState.studentFieldSettings = await trecsApi('saveStudentFieldSettings').saveStudentFieldSettings(settings);
+  studentFieldSettingsStatus.textContent = applyToAll ? 'Applied to all job types.' : 'Saved.';
+  renderStudentFieldSettingsModal();
+  if (jobsState.jobWorkspaceOpen) {
+    renderStudentWorkspace();
+  }
 }
 
 function studentTypeOptions(selectedType) {
@@ -1324,16 +1528,18 @@ function photoStatusOptions(selectedStatus) {
 }
 
 function subjectInputFromForm(form) {
+  const currentSubject = findById(jobsState.detail.subjects || [], Number(form.dataset.subjectId)) || {};
+  const valueFor = (name, fallback = '') => (form.elements[name] ? form.elements[name].value : (currentSubject[name] || fallback));
   return {
-    externalId: form.elements.externalId.value,
-    firstName: form.elements.firstName.value,
-    lastName: form.elements.lastName.value,
-    grade: form.elements.grade.value,
-    homeroom: form.elements.homeroom.value,
-    track: form.elements.track.value,
-    team: form.elements.team.value,
-    subjectType: form.elements.subjectType.value,
-    photographedStatus: form.elements.photographedStatus.value
+    externalId: valueFor('externalId'),
+    firstName: valueFor('firstName'),
+    lastName: valueFor('lastName'),
+    grade: valueFor('grade'),
+    homeroom: valueFor('homeroom'),
+    track: valueFor('track'),
+    team: valueFor('team'),
+    subjectType: valueFor('subjectType', 'student'),
+    photographedStatus: valueFor('photographedStatus', 'unknown')
   };
 }
 
@@ -3499,6 +3705,11 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'student-field-setup') {
+    await openStudentFieldSettings();
+    return;
+  }
+
   if (action === 'image-capture') {
     await ensureSelectedJobWorkspace('capture');
     return;
@@ -4527,11 +4738,15 @@ function bindImagePreviewLinkForm() {
 }
 
 async function loadJobs() {
-  const data = await trecsApi('getJobsData').getJobsData();
+  const [data, fieldSettings] = await Promise.all([
+    trecsApi('getJobsData').getJobsData(),
+    trecsApi('getStudentFieldSettings').getStudentFieldSettings()
+  ]);
   jobsState.jobs = data.jobs;
   jobsState.types = data.types;
   jobsState.clients = data.clients || [];
   jobsState.packagePlans = data.packagePlans || [];
+  jobsState.studentFieldSettings = fieldSettings || defaultStudentFieldSettings();
   renderNewSchoolForm();
   renderNewJobForm();
   renderImportPreviousJobForm();
@@ -4952,9 +5167,44 @@ imageLightboxModal.addEventListener('click', (event) => {
     closeImageLightbox();
   }
 });
+cancelStudentFieldSettingsButton.addEventListener('click', closeStudentFieldSettings);
+studentFieldSettingsModal.addEventListener('click', (event) => {
+  if (event.target === studentFieldSettingsModal) {
+    closeStudentFieldSettings();
+  }
+});
+studentFieldSettingsForm.elements.scope.addEventListener('change', () => {
+  jobsState.studentFieldSettingsScope = studentFieldSettingsForm.elements.scope.value;
+  studentFieldSettingsStatus.textContent = '';
+  renderStudentFieldSettingsModal();
+});
+studentFieldSettingsForm.elements.inheritGlobal.addEventListener('change', () => {
+  studentFieldSettingsStatus.textContent = '';
+  studentFieldSettingsList.hidden = studentFieldSettingsForm.elements.scope.value !== 'global'
+    && studentFieldSettingsForm.elements.inheritGlobal.checked;
+});
+studentFieldSettingsForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await saveStudentFieldSettingsFromForm(false);
+  } catch (error) {
+    studentFieldSettingsStatus.textContent = error.message || 'Save failed';
+    console.error(error);
+  }
+});
+applyStudentFieldsToAllButton.addEventListener('click', async () => {
+  try {
+    await saveStudentFieldSettingsFromForm(true);
+  } catch (error) {
+    studentFieldSettingsStatus.textContent = error.message || 'Apply failed';
+    console.error(error);
+  }
+});
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
     closeImageLightbox();
+  } else if (event.key === 'Escape' && studentFieldSettingsModal && !studentFieldSettingsModal.hidden) {
+    closeStudentFieldSettings();
   }
 });
 assignEnvelopeScanButton.addEventListener('click', assignViewedEnvelopeScan);

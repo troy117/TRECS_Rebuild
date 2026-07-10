@@ -535,6 +535,31 @@
               </div>
             </div>
 
+            <div class="modal-backdrop" id="studentFieldSettingsModal" hidden>
+              <form class="modal-card student-field-settings-card" id="studentFieldSettingsForm">
+                <div class="modal-heading">
+                  <h2>Student Field Setup</h2>
+                  <button id="cancelStudentFieldSettingsButton" type="button">Cancel</button>
+                </div>
+                <div class="student-field-settings-scope">
+                  <label>
+                    <span>Configure</span>
+                    <select name="scope"></select>
+                  </label>
+                  <label class="checkbox-line" data-student-field-inherit-wrap>
+                    <input name="inheritGlobal" type="checkbox">
+                    <span>Use global defaults for this job type</span>
+                  </label>
+                </div>
+                <div id="studentFieldSettingsList" class="student-field-settings-list"></div>
+                <p id="studentFieldSettingsStatus"></p>
+                <div class="form-actions">
+                  <button id="applyStudentFieldsToAllButton" type="button">Apply Current To All Job Types</button>
+                  <button class="primary" type="submit">Save Fields</button>
+                </div>
+              </form>
+            </div>
+
             <div class="modal-backdrop" id="editOrderModal" hidden>
               <form class="modal-card edit-order-card" id="editOrderForm">
                 <div class="modal-heading">

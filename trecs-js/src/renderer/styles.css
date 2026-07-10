@@ -677,6 +677,47 @@ dd {
   width: min(92vw, 980px);
 }
 
+.student-field-settings-card {
+  width: min(92vw, 560px);
+}
+
+.student-field-settings-scope {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.student-field-settings-list {
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.student-field-option,
+.checkbox-line {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.student-field-option {
+  border-bottom: 1px solid #e5ebf0;
+  padding: 10px 12px;
+}
+
+.student-field-option:nth-child(odd) {
+  border-right: 1px solid #e5ebf0;
+}
+
+.student-field-option input,
+.checkbox-line input {
+  height: auto;
+  width: auto;
+}
+
 .image-lightbox-content {
   align-items: center;
   background: #eef2f5;
@@ -766,7 +807,8 @@ dd {
   margin-bottom: 6px;
 }
 
-.modal-card input {
+.modal-card input,
+.modal-card select {
   border: 1px solid #cbd5df;
   border-radius: 6px;
   font: inherit;
@@ -872,6 +914,18 @@ dd {
   justify-content: space-between;
   padding: 0 12px;
   width: 100%;
+}
+
+.modal-card .student-field-option,
+.modal-card .checkbox-line {
+  align-items: center;
+  display: flex;
+}
+
+.modal-card .student-field-option input,
+.modal-card .checkbox-line input {
+  height: auto;
+  width: auto;
 }
 
 .end-of-day-section-heading span::before {

@@ -687,6 +687,12 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id
       ON envelope_scans(job_id, subject_id, status);
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
     `);
     changed = true;
 
@@ -761,6 +767,108 @@ function normalizePhotographedStatus(value) {
     throw new Error('Invalid photographed status');
   }
   return status;
+}
+
+const STUDENT_FIELD_SETTINGS_KEY = 'student_field_visibility';
+const STUDENT_FIELD_KEYS = [
+  'firstName',
+  'lastName',
+  'externalId',
+  'grade',
+  'homeroom',
+  'track',
+  'team',
+  'subjectType',
+  'photographedStatus'
+];
+const STUDENT_FIELD_LABELS = {
+  firstName: 'First Name',
+  lastName: 'Last Name',
+  externalId: 'Student ID',
+  grade: 'Grade',
+  homeroom: 'Homeroom',
+  track: 'Track',
+  team: 'Team',
+  subjectType: 'Type',
+  photographedStatus: 'Photo Status'
+};
+const DEFAULT_STUDENT_FIELD_VISIBILITY = STUDENT_FIELD_KEYS.reduce((fields, key) => {
+  fields[key] = true;
+  return fields;
+}, {});
+
+function normalizeVisibleStudentFields(fields = {}) {
+  return STUDENT_FIELD_KEYS.reduce((normalized, key) => {
+    normalized[key] = fields[key] !== false;
+    return normalized;
+  }, {});
+}
+
+function defaultStudentFieldSettings() {
+  return {
+    version: 1,
+    fields: STUDENT_FIELD_KEYS.map((key) => ({
+      key,
+      label: STUDENT_FIELD_LABELS[key]
+    })),
+    global: {
+      visibleFields: { ...DEFAULT_STUDENT_FIELD_VISIBILITY }
+    },
+    jobTypes: {}
+  };
+}
+
+function normalizeStudentFieldSettings(settings = {}) {
+  const normalized = defaultStudentFieldSettings();
+  normalized.global.visibleFields = normalizeVisibleStudentFields(settings.global && settings.global.visibleFields);
+  Object.entries(settings.jobTypes || {}).forEach(([type, config]) => {
+    normalized.jobTypes[type] = {
+      inheritGlobal: config && config.inheritGlobal !== false,
+      visibleFields: normalizeVisibleStudentFields(config && config.visibleFields)
+    };
+  });
+  return normalized;
+}
+
+async function getStudentFieldSettings() {
+  const rows = await querySql(`
+    SELECT value_json AS valueJson
+    FROM app_settings
+    WHERE key = '${STUDENT_FIELD_SETTINGS_KEY}';
+  `);
+
+  if (!rows.length) {
+    return defaultStudentFieldSettings();
+  }
+
+  try {
+    return normalizeStudentFieldSettings(JSON.parse(rows[0].valueJson));
+  } catch (_error) {
+    return defaultStudentFieldSettings();
+  }
+}
+
+async function saveStudentFieldSettings(_event, input = {}) {
+  const settings = normalizeStudentFieldSettings(input);
+  await writeSql((database) => {
+    const statement = database.prepare(`
+      INSERT OR REPLACE INTO app_settings (
+        key,
+        value_json,
+        updated_at
+      )
+      VALUES (?, ?, CURRENT_TIMESTAMP);
+    `);
+
+    try {
+      statement.run([STUDENT_FIELD_SETTINGS_KEY, JSON.stringify(settings)]);
+    } finally {
+      statement.free();
+    }
+
+    return settings;
+  });
+  return settings;
 }
 
 function displayNameForSubject(firstName, lastName, displayName) {
@@ -1479,6 +1587,8 @@ async function getDashboardData() {
 }
 
 ipcMain.handle('dashboard:get', getDashboardData);
+ipcMain.handle('settings:student-fields:get', getStudentFieldSettings);
+ipcMain.handle('settings:student-fields:save', saveStudentFieldSettings);
 
 async function getJobsData() {
   const jobs = await querySql(`
@@ -6922,6 +7032,8 @@ function createApplicationMenu(window) {
         { label: 'Import Previous Job', click: () => sendTrecsMenuAction(window, 'import-previous-job') },
         { label: 'Load Onsite Setup', click: () => sendTrecsMenuAction(window, 'load-onsite-setup') },
         { label: 'Load End of Day', click: () => sendTrecsMenuAction(window, 'load-end-of-day') },
+        { type: 'separator' },
+        { label: 'Student Field Setup', click: () => sendTrecsMenuAction(window, 'student-field-setup') },
         { type: 'separator' },
         { label: 'Image Capture', click: () => sendTrecsMenuAction(window, 'image-capture') },
         { label: 'Admin Items', click: () => sendTrecsMenuAction(window, 'admin-items') },

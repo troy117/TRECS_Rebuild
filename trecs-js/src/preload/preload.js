@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('trecs', {
   getDashboardData: () => ipcRenderer.invoke('dashboard:get'),
   getJobsData: () => ipcRenderer.invoke('jobs:list'),
   getJobDetail: (jobId) => ipcRenderer.invoke('job:detail', jobId),
+  getStudentFieldSettings: () => ipcRenderer.invoke('settings:student-fields:get'),
+  saveStudentFieldSettings: (input) => ipcRenderer.invoke('settings:student-fields:save', input),
   createClient: (input) => ipcRenderer.invoke('client:create', input),
   createJob: (input) => ipcRenderer.invoke('job:create', input),
   choosePreviousTrecsJobFolder: () => ipcRenderer.invoke('job:choose-previous-trecs-folder'),
