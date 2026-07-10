@@ -926,7 +926,7 @@ dd {
 .school-data-file-row {
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .school-data-file-row input,
