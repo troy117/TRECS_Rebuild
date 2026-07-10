@@ -595,6 +595,7 @@ dd {
   display: flex;
   justify-content: center;
   left: 0;
+  overflow: hidden;
   position: fixed;
   right: 0;
   top: 0;
@@ -660,8 +661,10 @@ dd {
 }
 
 .end-of-day-card {
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  height: min(88vh, 780px);
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 32px);
+  max-height: 780px;
   overflow: hidden;
   width: min(88vw, 920px);
 }
@@ -669,10 +672,19 @@ dd {
 .end-of-day-review {
   align-content: start;
   display: grid;
+  flex: 1 1 auto;
   gap: 14px;
   min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
+  overscroll-behavior: contain;
+  overflow-y: scroll;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
+}
+
+.end-of-day-card > .modal-heading,
+.end-of-day-card > .form-actions,
+.end-of-day-card > #endOfDayStatus {
+  flex: 0 0 auto;
 }
 
 .end-of-day-summary {
