@@ -4556,6 +4556,23 @@ cancelEndOfDayButton.addEventListener('click', () => {
   setEndOfDayModalVisible(false);
 });
 confirmEndOfDayButton.addEventListener('click', confirmEndOfDayPackage);
+endOfDayModal.addEventListener('wheel', (event) => {
+  if (endOfDayModal.hidden) {
+    return;
+  }
+
+  const target = event.target instanceof Element ? event.target : event.target.parentElement;
+  const scrollTarget = target ? target.closest('.end-of-day-section-body, .end-of-day-review') : null;
+  if (!scrollTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  scrollTarget.scrollTop += event.deltaY;
+}, { passive: false });
 cancelSchoolDataButton.addEventListener('click', () => {
   setSchoolDataModalVisible(false);
 });
