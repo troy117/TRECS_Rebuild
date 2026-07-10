@@ -660,15 +660,17 @@ dd {
 }
 
 .end-of-day-card {
-  max-height: min(88vh, 780px);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  height: min(88vh, 780px);
   overflow: hidden;
   width: min(88vw, 920px);
 }
 
 .end-of-day-review {
+  align-content: start;
   display: grid;
   gap: 14px;
-  max-height: min(62vh, 560px);
+  min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }
