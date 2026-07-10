@@ -102,6 +102,7 @@ const cancelNewJobButton = document.getElementById('cancelNewJobButton');
 const newJobStatus = document.getElementById('newJobStatus');
 const importPreviousJobButton = document.getElementById('importPreviousJobButton');
 const loadOnsiteSetupButton = document.getElementById('loadOnsiteSetupButton');
+const loadEndOfDayButton = document.getElementById('loadEndOfDayButton');
 const importPreviousJobPanel = document.getElementById('importPreviousJobPanel');
 const importPreviousJobForm = document.getElementById('importPreviousJobForm');
 const cancelImportPreviousJobButton = document.getElementById('cancelImportPreviousJobButton');
@@ -4354,6 +4355,78 @@ async function loadOnsiteSetup() {
   }
 }
 
+function endOfDayPackageSummary(manifest) {
+  const job = (manifest && manifest.job) || {};
+  const counts = (manifest && manifest.counts) || {};
+  const jobName = [job.trecsName || job.clientName, job.name].filter(Boolean).join(' / ') || 'Unknown job';
+  return [
+    `Approve End of Day package for ${jobName}?`,
+    '',
+    `Captured images: ${formatNumber(counts.capturedImages || 0)}`,
+    `CR3 files: ${formatNumber(counts.capturedRawFiles || 0)}`,
+    `New camera cards: ${formatNumber(counts.newSubjects || 0)}`,
+    `Student edits: ${formatNumber(counts.editedSubjects || 0)}`,
+    '',
+    'This will copy the image files and apply the approved student changes to the main database.'
+  ].join('\n');
+}
+
+async function loadEndOfDayPackage() {
+  loadEndOfDayButton.disabled = true;
+  loadEndOfDayButton.textContent = 'Choosing...';
+
+  try {
+    const choice = await trecsApi('chooseEndOfDayPackageFolder').chooseEndOfDayPackageFolder();
+    if (!choice || choice.canceled) {
+      return;
+    }
+    if (!choice.hasManifest) {
+      throw new Error('end-of-day-manifest.json was not found in that folder.');
+    }
+    if (!choice.hasDatabase) {
+      throw new Error('Database\\job.db was not found in that folder.');
+    }
+    if (!choice.manifest || choice.manifest.packageType !== 'end_of_day') {
+      throw new Error('That folder is not a TRECS End of Day package.');
+    }
+
+    const approved = window.confirm(endOfDayPackageSummary(choice.manifest));
+    if (!approved) {
+      return;
+    }
+
+    loadEndOfDayButton.textContent = 'Approving...';
+    const result = await trecsApi('approveEndOfDayPackage').approveEndOfDayPackage({
+      packageFolder: choice.folderPath
+    });
+
+    jobsState.selectedJobId = result.id;
+    jobsState.selectedType = 'all';
+    jobsState.search = '';
+    jobsState.detail = null;
+    jobSearchInput.value = '';
+    await loadDashboard();
+    await loadJobs();
+    await loadJobDetail(result.id);
+
+    const counts = result.counts || {};
+    window.alert([
+      'End of Day package approved.',
+      '',
+      `Files copied: ${formatNumber(counts.copiedFiles || 0)}`,
+      `Images imported: ${formatNumber(counts.images || 0)}`,
+      `New camera cards: ${formatNumber(counts.newSubjects || 0)}`,
+      `Student edits: ${formatNumber(counts.editedSubjects || 0)}`
+    ].join('\n'));
+  } catch (error) {
+    window.alert(error.message || 'Load End of Day failed');
+    console.error(error);
+  } finally {
+    loadEndOfDayButton.disabled = false;
+    loadEndOfDayButton.textContent = 'Load End of Day';
+  }
+}
+
 async function loadDashboard() {
   try {
     const dashboard = await trecsApi('getDashboardData').getDashboardData();
@@ -4611,6 +4684,7 @@ importPreviousJobButton.addEventListener('click', () => {
 });
 
 loadOnsiteSetupButton.addEventListener('click', loadOnsiteSetup);
+loadEndOfDayButton.addEventListener('click', loadEndOfDayPackage);
 
 cancelImportPreviousJobButton.addEventListener('click', () => {
   setImportPreviousJobFormVisible(false);

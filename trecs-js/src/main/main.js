@@ -3112,6 +3112,259 @@ function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
   return copied;
 }
 
+function readEndOfDayPackage(packageFolder) {
+  const manifestPath = path.join(packageFolder, 'end-of-day-manifest.json');
+  if (!fs.existsSync(packageFolder) || !fs.statSync(packageFolder).isDirectory()) {
+    throw new Error('End of Day package folder was not found');
+  }
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error('end-of-day-manifest.json was not found in that folder');
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  if (manifest.packageType !== 'end_of_day') {
+    throw new Error('That folder is not a TRECS End of Day package');
+  }
+
+  const databasePath = path.join(packageFolder, manifest.paths && manifest.paths.database ? manifest.paths.database : 'Database/job.db');
+  if (!fs.existsSync(databasePath)) {
+    throw new Error('Database\\job.db was not found in that folder');
+  }
+
+  return {
+    manifest,
+    manifestPath,
+    databasePath,
+    imagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images')
+  };
+}
+
+async function chooseEndOfDayPackageFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose End of Day Package Folder',
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const folderPath = result.filePaths[0];
+  const manifestPath = path.join(folderPath, 'end-of-day-manifest.json');
+  const databasePath = path.join(folderPath, 'Database', 'job.db');
+  let manifest = null;
+  if (fs.existsSync(manifestPath)) {
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (_error) {
+      manifest = null;
+    }
+  }
+
+  return {
+    canceled: false,
+    folderPath,
+    manifestPath,
+    databasePath,
+    hasManifest: fs.existsSync(manifestPath),
+    hasDatabase: fs.existsSync(databasePath),
+    manifest
+  };
+}
+
+const END_OF_DAY_SUBJECT_FIELD_COLUMNS = {
+  ref: 'legacy_ref_num',
+  type: 'subject_type',
+  firstName: 'first_name',
+  lastName: 'last_name',
+  displayName: 'display_name',
+  externalId: 'external_id',
+  grade: 'grade',
+  homeroom: 'homeroom',
+  track: 'track',
+  team: 'team',
+  notes: 'notes'
+};
+
+function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
+  const copiedByImageId = new Map((packageInfo.manifest.copiedImages || []).map((image) => [Number(image.imageAssetId), image]));
+  const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'Images');
+  let copied = 0;
+
+  fs.mkdirSync(destinationFolder, { recursive: true });
+
+  const rows = imageRows.map((row) => {
+    const copiedImage = copiedByImageId.get(Number(row.id));
+    if (!copiedImage) {
+      return row;
+    }
+
+    let currentPath = row.current_path;
+    let metadata = parseImageMetadata(row.metadata_json);
+    const jpgSource = copiedImage.jpgPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.jpgPath)) : null;
+    const rawSource = copiedImage.rawPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.rawPath)) : null;
+
+    if (jpgSource && fs.existsSync(jpgSource) && fs.statSync(jpgSource).isFile()) {
+      const destinationPath = uniquePath(destinationFolder, path.basename(jpgSource));
+      fs.copyFileSync(jpgSource, destinationPath);
+      currentPath = path.relative(projectRoot, destinationPath);
+      copied += 1;
+    }
+
+    if (rawSource && fs.existsSync(rawSource) && fs.statSync(rawSource).isFile()) {
+      const destinationPath = uniquePath(destinationFolder, path.basename(rawSource));
+      fs.copyFileSync(rawSource, destinationPath);
+      metadata = {
+        ...metadata,
+        rawPath: path.relative(projectRoot, destinationPath)
+      };
+      copied += 1;
+    }
+
+    return {
+      ...row,
+      current_path: currentPath,
+      metadata_json: Object.keys(metadata).length ? JSON.stringify(metadata) : row.metadata_json
+    };
+  });
+
+  return { rows, copied };
+}
+
+function endOfDayIncludedNewSubjectIds(manifest) {
+  return new Set(((manifest.subjectChanges && manifest.subjectChanges.newSubjects) || []).map((subject) => Number(subject.id)));
+}
+
+function endOfDayEditedSubjects(manifest) {
+  return (manifest.subjectChanges && manifest.subjectChanges.editedSubjects) || [];
+}
+
+async function approveEndOfDayPackage(_event, input = {}) {
+  const packageFolder = normalizeText(input.packageFolder, 'End of Day package folder', 1000);
+  const packageInfo = {
+    packageFolder,
+    ...readEndOfDayPackage(packageFolder)
+  };
+  const jobId = numericId(packageInfo.manifest.job && packageInfo.manifest.job.id);
+  const imageIds = new Set((packageInfo.manifest.copiedImages || []).map((image) => Number(image.imageAssetId)).filter(Boolean));
+  const newSubjectIds = endOfDayIncludedNewSubjectIds(packageInfo.manifest);
+  const editedSubjects = endOfDayEditedSubjects(packageInfo.manifest);
+
+  const SQL = await getSqlModule();
+  const packageDatabase = new SQL.Database(fs.readFileSync(packageInfo.databasePath));
+  let result;
+
+  try {
+    const packageTables = {
+      subjects: rowsFromOptionalTable(packageDatabase, 'subjects'),
+      subject_codes: rowsFromOptionalTable(packageDatabase, 'subject_codes'),
+      image_assets: rowsFromOptionalTable(packageDatabase, 'image_assets').filter((row) => imageIds.has(Number(row.id))),
+      image_versions: rowsFromOptionalTable(packageDatabase, 'image_versions').filter((row) => imageIds.has(Number(row.image_asset_id))),
+      subject_images: rowsFromOptionalTable(packageDatabase, 'subject_images').filter((row) => imageIds.has(Number(row.image_asset_id)))
+    };
+    const packageSubjectsById = new Map(packageTables.subjects.map((row) => [Number(row.id), row]));
+    const changedSubjectIds = new Set([
+      ...newSubjectIds,
+      ...editedSubjects.map((subject) => Number(subject.id)),
+      ...packageTables.subject_images.map((row) => Number(row.subject_id)).filter(Boolean)
+    ]);
+    const subjectRowsToImport = Array.from(changedSubjectIds)
+      .map((id) => packageSubjectsById.get(Number(id)))
+      .filter(Boolean);
+
+    result = await writeSql((database) => {
+      const jobRows = rowsFromDatabase(database, `
+        SELECT id, root_path AS rootPath
+        FROM jobs
+        WHERE id = ${jobId}
+        LIMIT 1;
+      `);
+      if (!jobRows.length) {
+        throw new Error('The matching job is not loaded on this computer');
+      }
+
+      ensureJobFolders(jobRows[0].rootPath);
+      const imageCopyResult = copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, jobRows[0].rootPath);
+      const imageRows = imageCopyResult.rows;
+      const copiedFiles = imageCopyResult.copied;
+
+      const newSubjectRows = subjectRowsToImport
+        .filter((row) => newSubjectIds.has(Number(row.id)))
+        .map((row) => {
+          const manifestSubject = ((packageInfo.manifest.subjectChanges && packageInfo.manifest.subjectChanges.newSubjects) || [])
+            .find((subject) => Number(subject.id) === Number(row.id));
+          return {
+            ...row,
+            display_name: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'name') ? manifestSubject.name : row.display_name,
+            grade: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'grade') ? manifestSubject.grade : row.grade,
+            homeroom: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'homeroom') ? manifestSubject.homeroom : row.homeroom
+          };
+        });
+      insertImportedRows(database, 'subjects', newSubjectRows);
+      insertImportedRows(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
+
+      editedSubjects.forEach((subject) => {
+        const updates = [];
+        const values = [];
+        (subject.changes || []).forEach((change) => {
+          const column = END_OF_DAY_SUBJECT_FIELD_COLUMNS[change.field];
+          if (!column) {
+            return;
+          }
+          updates.push(`${column} = ?`);
+          values.push(change.after || null);
+        });
+        if (!updates.length) {
+          return;
+        }
+        values.push(Number(subject.id));
+        database.run(`
+          UPDATE subjects
+          SET ${updates.join(', ')}
+          WHERE id = ?;
+        `, values);
+      });
+
+      insertImportedRows(database, 'image_assets', imageRows);
+      insertImportedRows(database, 'image_versions', packageTables.image_versions);
+      insertImportedRows(database, 'subject_images', packageTables.subject_images);
+
+      subjectRowsToImport
+        .filter((row) => !newSubjectIds.has(Number(row.id)))
+        .forEach((row) => {
+          database.run(`
+            UPDATE subjects
+            SET primary_image_asset_id = ?,
+                photographed_status = ?
+            WHERE id = ?;
+          `, [
+            row.primary_image_asset_id || null,
+            row.photographed_status || null,
+            row.id
+          ]);
+        });
+
+      return {
+        id: jobId,
+        packageFolder,
+        counts: {
+          copiedFiles,
+          images: imageRows.length,
+          newSubjects: newSubjectRows.length,
+          editedSubjects: editedSubjects.length,
+          subjectImageLinks: packageTables.subject_images.length
+        }
+      };
+    });
+  } finally {
+    packageDatabase.close();
+  }
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
 async function loadOnsiteSetup(_event, input = {}) {
   const setupFolder = normalizeText(input.setupFolder, 'Onsite setup folder', 1000);
   const manifestPath = path.join(setupFolder, 'onsite-setup.json');
@@ -3657,6 +3910,8 @@ ipcMain.handle('job:choose-previous-trecs-folder', choosePreviousTrecsJobFolder)
 ipcMain.handle('job:import-previous-trecs', importPreviousTrecsJob);
 ipcMain.handle('job:choose-onsite-setup-folder', chooseOnsiteSetupFolder);
 ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
+ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
+ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
 function parseCsvRows(text) {
   const rows = [];

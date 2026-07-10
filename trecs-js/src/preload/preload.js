@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('trecs', {
   importPreviousTrecsJob: (input) => ipcRenderer.invoke('job:import-previous-trecs', input),
   chooseOnsiteSetupFolder: () => ipcRenderer.invoke('job:choose-onsite-setup-folder'),
   loadOnsiteSetup: (input) => ipcRenderer.invoke('job:load-onsite-setup', input),
+  chooseEndOfDayPackageFolder: () => ipcRenderer.invoke('end-of-day:choose-package-folder'),
+  approveEndOfDayPackage: (input) => ipcRenderer.invoke('end-of-day:approve-package', input),
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
   importSchoolData: (jobId, input) => ipcRenderer.invoke('school-data:import', jobId, input),
   getAdminItems: (jobId, stage) => ipcRenderer.invoke('admin-items:get', jobId, stage),
