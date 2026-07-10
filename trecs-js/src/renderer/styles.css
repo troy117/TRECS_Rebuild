@@ -673,6 +673,78 @@ dd {
   width: 360px;
 }
 
+.image-lightbox-card {
+  width: min(92vw, 980px);
+}
+
+.image-lightbox-content {
+  align-items: center;
+  background: #eef2f5;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: flex;
+  justify-content: center;
+  min-height: 520px;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.image-lightbox-content img {
+  background: #fff;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  max-height: 76vh;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.image-lightbox-content img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: min(76vh, 760px);
+}
+
+.image-hover-preview {
+  background: #fff;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.22);
+  left: 0;
+  max-width: 260px;
+  padding: 8px;
+  pointer-events: none;
+  position: fixed;
+  top: 0;
+  width: 260px;
+  z-index: 80;
+}
+
+.image-hover-preview img {
+  background: #eef2f5;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: block;
+  height: 260px;
+  max-width: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.image-hover-preview img.rotate-landscape-ccw {
+  transform: rotate(-90deg);
+}
+
+.image-hover-preview span {
+  color: #44566c;
+  display: block;
+  font-size: 12px;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .modal-heading {
   align-items: center;
   display: flex;
@@ -1906,6 +1978,7 @@ dd {
   background: #fff;
   border: 1px solid #d7e0e8;
   border-radius: 6px;
+  cursor: zoom-in;
   max-height: 100%;
   max-width: 100%;
   object-fit: contain;
@@ -1917,6 +1990,11 @@ dd {
   max-width: none;
   transform: rotate(-90deg);
   width: min(31vh, 300px);
+}
+
+.linked-image-row,
+[data-hover-image-id] {
+  cursor: zoom-in;
 }
 
 .workspace-fields {

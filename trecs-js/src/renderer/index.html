@@ -523,6 +523,18 @@
               </div>
             </div>
 
+            <div class="modal-backdrop" id="imageLightboxModal" hidden>
+              <div class="modal-card image-lightbox-card">
+                <div class="modal-heading">
+                  <h2 id="imageLightboxTitle">Image Preview</h2>
+                  <button id="closeImageLightboxButton" type="button">Close</button>
+                </div>
+                <div id="imageLightboxContent" class="image-lightbox-content">
+                  <div class="empty-state">Loading image...</div>
+                </div>
+              </div>
+            </div>
+
             <div class="modal-backdrop" id="editOrderModal" hidden>
               <form class="modal-card edit-order-card" id="editOrderForm">
                 <div class="modal-heading">
@@ -577,6 +589,7 @@
         </section>
       </main>
     </div>
+    <div id="imageHoverPreview" class="image-hover-preview" hidden></div>
 
     <script src="./renderer.js"></script>
   </body>

@@ -63,6 +63,11 @@ const closeOrderEnvelopeButton = document.getElementById('closeOrderEnvelopeButt
 const orderEnvelopeActions = document.getElementById('orderEnvelopeActions');
 const assignEnvelopeScanButton = document.getElementById('assignEnvelopeScanButton');
 const deleteEnvelopeScanButton = document.getElementById('deleteEnvelopeScanButton');
+const imageLightboxModal = document.getElementById('imageLightboxModal');
+const imageLightboxTitle = document.getElementById('imageLightboxTitle');
+const imageLightboxContent = document.getElementById('imageLightboxContent');
+const closeImageLightboxButton = document.getElementById('closeImageLightboxButton');
+const imageHoverPreview = document.getElementById('imageHoverPreview');
 const editOrderModal = document.getElementById('editOrderModal');
 const editOrderForm = document.getElementById('editOrderForm');
 const editOrderTitle = document.getElementById('editOrderTitle');
@@ -181,6 +186,8 @@ let jobsState = {
   lastLaptopPackage: null,
   lastEndOfDayPackage: null,
   lastCroppedImageSync: null,
+  imagePreviewCache: new Map(),
+  imageHoverToken: 0,
   endOfDayReview: null,
   endOfDayCollapsed: {
     capturedImages: true,
@@ -1210,15 +1217,8 @@ function renderWorkspaceStudentDetail(subject) {
       <div><dt>Track</dt><dd>${subject.track || ''}</dd></div>
       <div><dt>Team</dt><dd>${subject.team || ''}</dd></div>
       <div><dt>Type</dt><dd>${formatType(subject.subjectType || 'student')}</dd></div>
-      <div><dt>Photographed</dt><dd>${formatStatusLabel(subject.photographedStatus || '')}</dd></div>
     </dl>
     ${jobsState.showStudentEditForm ? renderStudentEditForm(subject) : ''}
-    <div class="student-render-actions">
-      <button class="primary" type="button" data-render-current-id-card="${subject.id}" ${subject.imageAssetId ? '' : 'disabled'}>
-        Render ID Card
-      </button>
-      <span data-current-id-card-status>${subject.imageAssetId ? '' : 'Photo required'}</span>
-    </div>
     <form class="notes-form" data-note-form="subject" data-note-id="${subject.id}">
       <label>
         <span>Notes</span>
@@ -1232,42 +1232,8 @@ function renderWorkspaceStudentDetail(subject) {
   `;
 
   bindStudentEditForm();
-  bindCurrentStudentIdCardAction();
   bindNoteForms(workspaceStudentDetail);
   loadWorkspacePhoto(subject.imageAssetId);
-}
-
-function bindCurrentStudentIdCardAction() {
-  const button = workspaceStudentDetail.querySelector('[data-render-current-id-card]');
-  if (!button) {
-    return;
-  }
-
-  button.addEventListener('click', async () => {
-    const status = workspaceStudentDetail.querySelector('[data-current-id-card-status]');
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = 'Rendering...';
-    status.textContent = '';
-
-    try {
-      const result = await trecsApi('renderSubjectIdCard').renderSubjectIdCard(
-        jobsState.selectedJobId,
-        Number(button.dataset.renderCurrentIdCard),
-        {
-          idCardLayout: jobsState.idCardLayout,
-          idCardReason: 'replacement_request'
-        }
-      );
-      status.textContent = `Saved ${result.outputPath}`;
-    } catch (error) {
-      status.textContent = error.message || 'Render failed';
-      console.error(error);
-    } finally {
-      button.disabled = false;
-      button.textContent = originalText;
-    }
-  });
 }
 
 function renderStudentEditForm(subject) {
@@ -1436,6 +1402,130 @@ async function submitAddRecords(event) {
   }
 }
 
+async function imagePreviewForId(imageId) {
+  if (!imageId) {
+    return null;
+  }
+  if (!jobsState.imagePreviewCache.has(imageId)) {
+    jobsState.imagePreviewCache.set(imageId, trecsApi('getImagePreview').getImagePreview(imageId));
+  }
+  return jobsState.imagePreviewCache.get(imageId);
+}
+
+function setLandscapeRotation(image) {
+  image.addEventListener('load', () => {
+    image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
+  }, { once: true });
+}
+
+async function openImageLightbox(imageId) {
+  if (!imageId || !imageLightboxModal) {
+    return;
+  }
+
+  imageLightboxModal.hidden = false;
+  imageLightboxTitle.textContent = 'Image Preview';
+  imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
+
+  try {
+    const preview = await imagePreviewForId(imageId);
+    if (!preview || preview.missing || !preview.dataUrl) {
+      imageLightboxContent.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+      return;
+    }
+
+    imageLightboxTitle.textContent = preview.filename || 'Image Preview';
+    imageLightboxContent.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Image preview')}">`;
+    setLandscapeRotation(imageLightboxContent.querySelector('img'));
+  } catch (error) {
+    imageLightboxContent.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+    console.error(error);
+  }
+}
+
+function closeImageLightbox() {
+  if (imageLightboxModal) {
+    imageLightboxModal.hidden = true;
+    imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
+  }
+}
+
+function moveImageHoverPreview(event) {
+  if (!imageHoverPreview || imageHoverPreview.hidden) {
+    return;
+  }
+  const padding = 18;
+  const width = imageHoverPreview.offsetWidth || 240;
+  const height = imageHoverPreview.offsetHeight || 280;
+  let left = event.clientX + padding;
+  let top = event.clientY + padding;
+
+  if (left + width > window.innerWidth - padding) {
+    left = event.clientX - width - padding;
+  }
+  if (top + height > window.innerHeight - padding) {
+    top = event.clientY - height - padding;
+  }
+
+  imageHoverPreview.style.left = `${Math.max(padding, left)}px`;
+  imageHoverPreview.style.top = `${Math.max(padding, top)}px`;
+}
+
+function hideImageHoverPreview() {
+  jobsState.imageHoverToken += 1;
+  if (imageHoverPreview) {
+    imageHoverPreview.hidden = true;
+    imageHoverPreview.innerHTML = '';
+  }
+}
+
+function bindHoverImagePreviews(root = document) {
+  if (!imageHoverPreview) {
+    return;
+  }
+
+  root.querySelectorAll('[data-hover-image-id]').forEach((element) => {
+    element.addEventListener('mouseenter', async (event) => {
+      const imageId = Number(element.dataset.hoverImageId);
+      const token = jobsState.imageHoverToken + 1;
+      jobsState.imageHoverToken = token;
+      imageHoverPreview.hidden = false;
+      imageHoverPreview.innerHTML = '<div class="empty-state">Loading...</div>';
+      moveImageHoverPreview(event);
+
+      try {
+        const preview = await imagePreviewForId(imageId);
+        if (token !== jobsState.imageHoverToken) {
+          return;
+        }
+        if (!preview || preview.missing || !preview.dataUrl) {
+          imageHoverPreview.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+          return;
+        }
+        imageHoverPreview.innerHTML = `
+          <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Image preview')}">
+          <span>${escapeHtml(preview.filename || '')}</span>
+        `;
+        setLandscapeRotation(imageHoverPreview.querySelector('img'));
+      } catch (error) {
+        if (token === jobsState.imageHoverToken) {
+          imageHoverPreview.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
+        }
+        console.error(error);
+      }
+    });
+
+    element.addEventListener('mousemove', moveImageHoverPreview);
+    element.addEventListener('mouseleave', hideImageHoverPreview);
+    element.addEventListener('dblclick', (event) => {
+      if (event.target.closest('button') && event.target.closest('button') !== element) {
+        return;
+      }
+      openImageLightbox(Number(element.dataset.hoverImageId));
+    });
+  });
+}
+
 async function loadWorkspacePhoto(imageId) {
   const panel = document.getElementById('workspacePhotoPanel');
   if (!panel) {
@@ -1448,17 +1538,17 @@ async function loadWorkspacePhoto(imageId) {
   }
 
   try {
-    const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+    const preview = await imagePreviewForId(imageId);
     if (!preview || preview.missing || !preview.dataUrl) {
       panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
       return;
     }
 
-    panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
+    panel.innerHTML = `<img data-hover-image-id="${imageId}" src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
     const image = panel.querySelector('img');
-    image.addEventListener('load', () => {
-      image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
-    }, { once: true });
+    setLandscapeRotation(image);
+    image.addEventListener('dblclick', () => openImageLightbox(imageId));
+    bindHoverImagePreviews(panel);
   } catch (error) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
@@ -1522,7 +1612,7 @@ function renderWorkspaceOrderDetail(subject) {
     ${renderMiniSection(
       'Linked Images',
       images.map((image) => `
-        <div>
+        <div class="linked-image-row" data-hover-image-id="${image.imageAssetId}">
           <span>${image.role}${image.selected ? ' / selected' : ''}</span>
           <strong>${image.filename}</strong>
         </div>
@@ -1546,6 +1636,7 @@ function renderWorkspaceOrderDetail(subject) {
       deleteWorkspaceOrder(Number(button.dataset.workspaceOrderDelete));
     });
   });
+  bindHoverImagePreviews(workspaceOrderDetail);
 }
 
 async function showOrderEnvelope(orderId) {
@@ -3623,7 +3714,7 @@ function renderSubjectsTab(subjects) {
     <div class="detail-browser">
       <div class="detail-list">
         ${tableHtml(
-          ['Ref', 'Name', 'ID', 'Grade', 'Homeroom', 'Photo', 'Image'],
+          ['Ref', 'Name', 'ID', 'Grade', 'Homeroom', 'Image'],
           filteredSubjects.map((subject) => `
             <tr class="${subject.id === jobsState.selectedSubjectId ? 'selected-row' : ''}" data-subject-id="${subject.id}">
               <td>${subject.ref || ''}</td>
@@ -3631,7 +3722,6 @@ function renderSubjectsTab(subjects) {
               <td>${subject.externalId || ''}</td>
               <td>${subject.grade || ''}</td>
               <td>${subject.homeroom || ''}</td>
-              <td>${subject.photographedStatus || ''}</td>
               <td>${subject.imagePath ? 'Linked' : ''}</td>
             </tr>
           `),
@@ -3668,6 +3758,7 @@ function renderSubjectsTab(subjects) {
 
   bindNoteForms();
   bindImageLinkActions();
+  bindHoverImagePreviews(jobWorkflowContent);
 }
 
 function renderOrdersTab(orders) {
@@ -3750,6 +3841,7 @@ function renderOrdersTab(orders) {
 
   bindNoteForms();
   bindOrderStatusActions();
+  bindHoverImagePreviews(jobWorkflowContent);
 }
 
 function filteredOrdersForQueue(orders) {
@@ -3824,10 +3916,6 @@ function renderSubjectDetail(subject) {
         <dd>${subject.track || ''}${subject.team ? ` / ${subject.team}` : ''}</dd>
       </div>
       <div>
-        <dt>Photographed</dt>
-        <dd>${subject.photographedStatus || ''}</dd>
-      </div>
-      <div>
         <dt>Primary Image</dt>
         <dd>${subject.imageFilename || ''}</dd>
       </div>
@@ -3842,7 +3930,7 @@ function renderSubjectDetail(subject) {
         <button type="submit">Save Notes</button>
       </div>
     </form>
-    ${subject.imageAssetId ? `<button class="detail-action" data-open-subject-image="${subject.imageAssetId}">Open Image</button>` : ''}
+    ${subject.imageAssetId ? `<button class="detail-action" data-open-subject-image="${subject.imageAssetId}" data-hover-image-id="${subject.imageAssetId}">Open Image</button>` : ''}
     ${renderMiniSection(
       'Codes',
       codes.map((code) => `<div><span>${code.codeType}</span><strong>${code.code}</strong></div>`),
@@ -3856,7 +3944,7 @@ function renderSubjectDetail(subject) {
     ${renderMiniSection(
       'Linked Images',
       images.map((image) => `
-        <div>
+        <div class="linked-image-row" data-hover-image-id="${image.imageAssetId}">
           <span>${image.role}${image.selected ? ' / selected' : ''}</span>
           <strong>${image.filename}</strong>
           <button data-link-subject-id="${subject.id}" data-link-image-id="${image.imageAssetId}">Set Primary</button>
@@ -3939,7 +4027,7 @@ function renderOrderDetail(order) {
             <td>${item.packageCode || item.rawCode || ''}</td>
             <td>${item.productName || ''}</td>
             <td>${formatNumber(item.quantity)}</td>
-            <td>${item.imageAssetId ? `<button data-open-order-image="${item.imageAssetId}">${item.imageFilename}</button>` : ''}</td>
+            <td>${item.imageAssetId ? `<button data-open-order-image="${item.imageAssetId}" data-hover-image-id="${item.imageAssetId}">${item.imageFilename}</button>` : ''}</td>
           </tr>
         `),
         'No order items.'
@@ -4115,7 +4203,7 @@ function renderImagesTab(images) {
         ${tableHtml(
           ['Filename', 'Source', 'Versions', 'Size', 'Types', 'Subjects'],
           filteredImages.map((image) => `
-            <tr class="${image.id === jobsState.selectedImageId ? 'selected-row' : ''}" data-image-id="${image.id}">
+            <tr class="${image.id === jobsState.selectedImageId ? 'selected-row' : ''}" data-image-id="${image.id}" data-hover-image-id="${image.id}">
               <td>${image.filename}</td>
               <td>${image.source}</td>
               <td>${formatNumber(image.versions)}</td>
@@ -4146,6 +4234,7 @@ function renderImagesTab(images) {
     });
   });
 
+  bindHoverImagePreviews(jobWorkflowContent);
   loadImagePreview(jobsState.selectedImageId);
 }
 
@@ -4220,7 +4309,7 @@ function renderCaptureTab(capture) {
           ${tableHtml(
             ['Filename', 'Size', 'Links', 'Refs'],
             recentImages.map((image) => `
-              <tr class="${image.id === jobsState.selectedImageId ? 'selected-row' : ''}" data-capture-image-id="${image.id}">
+              <tr class="${image.id === jobsState.selectedImageId ? 'selected-row' : ''}" data-capture-image-id="${image.id}" data-hover-image-id="${image.id}">
                 <td>${image.filename}</td>
                 <td>${image.width || 0} x ${image.height || 0}</td>
                 <td>${formatNumber(image.linkedSubjects)}</td>
@@ -4248,7 +4337,7 @@ function renderCaptureTab(capture) {
         ${tableHtml(
           ['Filename', 'Reason', 'Source', 'Size', 'Links'],
           reviewCandidates.map((image) => `
-            <tr data-capture-image-id="${image.id}">
+            <tr data-capture-image-id="${image.id}" data-hover-image-id="${image.id}">
               <td>${image.filename}</td>
               <td>${image.reason}</td>
               <td>${image.source}</td>
@@ -4269,6 +4358,7 @@ function renderCaptureTab(capture) {
     });
   });
 
+  bindHoverImagePreviews(jobWorkflowContent);
   loadImagePreview(jobsState.selectedImageId);
 }
 
@@ -4298,6 +4388,7 @@ async function loadJobDetail(jobId) {
   jobsState.subjectSearch = '';
   jobsState.imageSearch = '';
   jobsState.imageLinkSubjectSearch = '';
+  jobsState.imagePreviewCache.clear();
   jobsState.workspaceStudentSearch = '';
   jobsState.captureSubject = null;
   jobsState.captureImages = [];
@@ -4855,6 +4946,17 @@ cancelEnvelopeConfirmButton.addEventListener('click', () => {
   respondEnvelopeConfirm(false);
 });
 closeOrderEnvelopeButton.addEventListener('click', closeOrderEnvelope);
+closeImageLightboxButton.addEventListener('click', closeImageLightbox);
+imageLightboxModal.addEventListener('click', (event) => {
+  if (event.target === imageLightboxModal) {
+    closeImageLightbox();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
+    closeImageLightbox();
+  }
+});
 assignEnvelopeScanButton.addEventListener('click', assignViewedEnvelopeScan);
 deleteEnvelopeScanButton.addEventListener('click', deleteViewedEnvelopeScan);
 cancelEditOrderButton.addEventListener('click', closeEditOrder);
