@@ -1317,6 +1317,7 @@ dd {
   display: grid;
   gap: 14px;
   grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(220px, 32vh);
   height: 100%;
   min-height: 0;
 }
@@ -1330,10 +1331,17 @@ dd {
 }
 
 .capture-entry-panel,
-.capture-compare-panel {
+.capture-compare-panel,
+.capture-review-workspace {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.capture-review-workspace {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .job-student-workspace.capture-mode .capture-entry-panel .panel-heading,
@@ -2679,4 +2687,28 @@ dd {
 .capture-preview dd {
   font-size: 14px;
   overflow-wrap: anywhere;
+}
+
+.capture-review-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(360px, 1.2fr) minmax(280px, 0.8fr);
+  min-height: 0;
+  padding: 12px;
+}
+
+.capture-review-list,
+.capture-review-preview {
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.capture-review-list table {
+  min-width: 0;
+}
+
+.capture-review-preview {
+  padding-bottom: 10px;
 }

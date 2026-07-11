@@ -46,6 +46,7 @@ const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
 const captureFileModeToggle = document.getElementById('captureFileModeToggle');
 const captureShootStageSelect = document.getElementById('captureShootStageSelect');
+const captureReviewWorkspace = document.getElementById('captureReviewWorkspace');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -2194,6 +2195,7 @@ function renderCaptureWorkspace() {
   renderCaptureShootStage();
   renderCaptureFileModeToggle();
   renderCaptureSubject();
+  renderCaptureReviewWorkspace();
   loadCaptureImages();
 
   setTimeout(() => {
@@ -2264,6 +2266,65 @@ async function setCaptureShootStage(stage) {
       console.error(error);
     }
   }
+}
+
+function captureReviewImages() {
+  const capture = jobsState.detail && jobsState.detail.capture ? jobsState.detail.capture : {};
+  const reviewCandidates = capture.reviewCandidates || [];
+  return reviewCandidates.length ? reviewCandidates : (capture.recentImages || []);
+}
+
+function renderCaptureReviewWorkspace() {
+  if (!captureReviewWorkspace) {
+    return;
+  }
+
+  const capture = jobsState.detail && jobsState.detail.capture ? jobsState.detail.capture : null;
+  if (!capture || !capture.summary) {
+    captureReviewWorkspace.innerHTML = '<div class="empty-state">No image review data found.</div>';
+    return;
+  }
+
+  const reviewImages = captureReviewImages();
+  if (!jobsState.selectedImageId || !reviewImages.some((image) => Number(image.id) === Number(jobsState.selectedImageId))) {
+    jobsState.selectedImageId = reviewImages.length ? Number(reviewImages[0].id) : null;
+  }
+
+  captureReviewWorkspace.innerHTML = `
+    <div class="panel-heading">
+      <h2>Unlinked / Review Images</h2>
+      <span>${formatNumber((capture.reviewCandidates || []).length)} review / ${formatNumber(capture.summary.unlinkedImages || 0)} unlinked</span>
+    </div>
+    <div class="capture-review-layout">
+      <section class="capture-review-list">
+        ${tableHtml(
+          ['Filename', 'Reason', 'Links', 'Refs'],
+          reviewImages.map((image) => `
+            <tr class="${Number(image.id) === Number(jobsState.selectedImageId) ? 'selected-row' : ''}" data-capture-review-image-id="${image.id}" data-hover-image-id="${image.id}">
+              <td>${escapeHtml(image.filename || '')}</td>
+              <td>${escapeHtml(image.reason || (Number(image.linkedSubjects) === 0 ? 'Unlinked image' : 'Review'))}</td>
+              <td>${formatNumber(image.linkedSubjects || 0)}</td>
+              <td>${escapeHtml(image.refs || '')}</td>
+            </tr>
+          `),
+          'No unlinked or review images found.'
+        )}
+      </section>
+      <aside class="capture-preview capture-review-preview" id="imagePreviewPanel">
+        <div class="empty-state">Select an image to review.</div>
+      </aside>
+    </div>
+  `;
+
+  captureReviewWorkspace.querySelectorAll('[data-capture-review-image-id]').forEach((row) => {
+    row.addEventListener('click', () => {
+      jobsState.selectedImageId = Number(row.dataset.captureReviewImageId);
+      renderCaptureReviewWorkspace();
+    });
+  });
+
+  bindHoverImagePreviews(captureReviewWorkspace);
+  loadImagePreview(jobsState.selectedImageId);
 }
 
 function renderCaptureSubject() {
