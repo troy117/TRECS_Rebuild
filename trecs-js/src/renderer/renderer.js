@@ -286,6 +286,23 @@ function formatImageSource(source) {
   return sourceText ? formatType(sourceText) : 'Unknown Source';
 }
 
+function imageFolderName(imagePath) {
+  const parts = String(imagePath || '').split(/[\\/]/).filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 2] : '';
+}
+
+function linkedImageFolderLine(image) {
+  const displayFolder = imageFolderName(image.displayPath || image.currentPath);
+  const originalFolder = imageFolderName(image.currentPath);
+  if (displayFolder && originalFolder && displayFolder !== originalFolder) {
+    return `Using ${displayFolder}, original ${originalFolder}`;
+  }
+  if (displayFolder) {
+    return `Folder ${displayFolder}`;
+  }
+  return '';
+}
+
 function linkedImageMetaLine(image) {
   const addedDate = formatShortDateTime(image.importedAt || image.capturedAt);
   const capturedDate = image.capturedAt && image.importedAt && image.importedAt !== image.capturedAt
@@ -299,6 +316,7 @@ function linkedImageMetaLine(image) {
     parts.push(`Captured ${capturedDate}`);
   }
   parts.push(image.shootStageLabel || formatImageSource(image.source));
+  parts.push(linkedImageFolderLine(image));
   return parts.filter(Boolean).join(' / ');
 }
 

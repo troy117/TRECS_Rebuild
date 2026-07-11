@@ -4854,12 +4854,20 @@ async function getJobDetail(_event, jobIdValue) {
       si.subject_id AS subjectId,
       ia.id AS imageAssetId,
       ia.filename,
+      ia.current_path AS currentPath,
       ia.source,
       ia.status,
       ia.captured_at AS capturedAt,
       ia.imported_at AS importedAt,
       si.role,
       si.selected,
+      COALESCE(
+        MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
+        ia.current_path
+      ) AS displayPath,
       CASE
         WHEN ia.captured_at IS NOT NULL
           AND j.retake_date IS NOT NULL
