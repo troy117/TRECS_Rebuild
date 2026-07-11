@@ -7036,6 +7036,7 @@ function createApplicationMenu(window) {
         { label: 'Student Field Setup', click: () => sendTrecsMenuAction(window, 'student-field-setup') },
         { type: 'separator' },
         { label: 'Image Capture', click: () => sendTrecsMenuAction(window, 'image-capture') },
+        { label: 'Envelope Entry', click: () => sendTrecsMenuAction(window, 'envelope-entry') },
         { label: 'Admin Items', click: () => sendTrecsMenuAction(window, 'admin-items') },
         { label: 'Add Records', click: () => sendTrecsMenuAction(window, 'add-records') },
         { type: 'separator' },

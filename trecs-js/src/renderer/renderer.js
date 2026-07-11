@@ -481,11 +481,16 @@ function setWorkspaceMode(mode) {
   captureWorkspace.hidden = !captureOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
-  workspaceStudentsButton.classList.toggle('active', studentsOpen);
+  backToJobsButton.textContent = envelopeOpen ? 'Back to Students' : 'Back to Jobs';
+  if (workspaceStudentsButton) {
+    workspaceStudentsButton.classList.toggle('active', studentsOpen);
+  }
   if (workspaceCaptureButton) {
     workspaceCaptureButton.classList.toggle('active', captureOpen);
   }
-  workspaceEnvelopeButton.classList.toggle('active', envelopeOpen);
+  if (workspaceEnvelopeButton) {
+    workspaceEnvelopeButton.classList.toggle('active', envelopeOpen);
+  }
   if (workspaceAdminItemsButton) {
     workspaceAdminItemsButton.classList.toggle('active', adminOpen);
   }
@@ -3715,6 +3720,11 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'envelope-entry') {
+    await ensureSelectedJobWorkspace('envelope');
+    return;
+  }
+
   if (action === 'admin-items') {
     await ensureSelectedJobWorkspace('admin');
     return;
@@ -5014,11 +5024,19 @@ jobSearchInput.addEventListener('input', () => {
   renderJobsScreen();
 });
 
-backToJobsButton.addEventListener('click', closeJobWorkspace);
-
-workspaceStudentsButton.addEventListener('click', () => {
-  setWorkspaceMode('students');
+backToJobsButton.addEventListener('click', () => {
+  if (jobsState.workspaceMode === 'envelope') {
+    setWorkspaceMode('students');
+  } else {
+    closeJobWorkspace();
+  }
 });
+
+if (workspaceStudentsButton) {
+  workspaceStudentsButton.addEventListener('click', () => {
+    setWorkspaceMode('students');
+  });
+}
 
 if (workspaceCaptureButton) {
   workspaceCaptureButton.addEventListener('click', () => {
@@ -5026,9 +5044,11 @@ if (workspaceCaptureButton) {
   });
 }
 
-workspaceEnvelopeButton.addEventListener('click', () => {
-  setWorkspaceMode('envelope');
-});
+if (workspaceEnvelopeButton) {
+  workspaceEnvelopeButton.addEventListener('click', () => {
+    setWorkspaceMode('envelope');
+  });
+}
 
 if (workspaceAdminItemsButton) {
   workspaceAdminItemsButton.addEventListener('click', () => {
