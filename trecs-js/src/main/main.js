@@ -4975,8 +4975,13 @@ async function getJobDetail(_event, jobIdValue) {
       cs.session_type AS captureSessionType,
       cs.workstation_name AS captureWorkstation,
       cs.file_mode AS captureFileMode,
-      si.role,
-      si.selected,
+      GROUP_CONCAT(DISTINCT si.role) AS roles,
+      CASE
+        WHEN MAX(si.selected) = 1 THEN 'selected'
+        WHEN SUM(CASE WHEN si.role = 'primary' THEN 1 ELSE 0 END) > 0 THEN 'primary'
+        ELSE MIN(si.role)
+      END AS role,
+      MAX(si.selected) AS selected,
       COALESCE(
         MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
         MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
@@ -5000,8 +5005,8 @@ async function getJobDetail(_event, jobIdValue) {
     JOIN subjects s ON s.id = si.subject_id
     JOIN jobs j ON j.id = s.job_id
     WHERE s.job_id = ${jobId}
-    GROUP BY si.id
-    ORDER BY si.selected DESC, si.sort_order, ia.filename;
+    GROUP BY si.subject_id, ia.id
+    ORDER BY MAX(si.selected) DESC, MIN(si.sort_order), ia.filename;
   `);
 
   const orderItems = await querySql(`
@@ -7306,16 +7311,42 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE subject_id = ?;
     `, [subjectId]);
 
-    database.run(`
-      INSERT OR IGNORE INTO subject_images (
-        subject_id,
-        image_asset_id,
-        role,
-        selected,
-        sort_order
-      )
-      VALUES (?, ?, 'primary', 1, 0);
-    `, [subjectId, imageId]);
+    const existingLinkRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM subject_images
+      WHERE subject_id = ${subjectId}
+        AND image_asset_id = ${imageId}
+      ORDER BY selected DESC, sort_order, id
+      LIMIT 1;
+    `);
+
+    if (existingLinkRows.length) {
+      const keepLinkId = existingLinkRows[0].id;
+      database.run(`
+        DELETE FROM subject_images
+        WHERE subject_id = ?
+          AND image_asset_id = ?
+          AND id != ?;
+      `, [subjectId, imageId, keepLinkId]);
+      database.run(`
+        UPDATE subject_images
+        SET role = CASE WHEN role = 'capture' THEN role ELSE 'primary' END,
+            selected = 1,
+            sort_order = 0
+        WHERE id = ?;
+      `, [keepLinkId]);
+    } else {
+      database.run(`
+        INSERT INTO subject_images (
+          subject_id,
+          image_asset_id,
+          role,
+          selected,
+          sort_order
+        )
+        VALUES (?, ?, 'primary', 1, 0);
+      `, [subjectId, imageId]);
+    }
 
     database.run(`
       UPDATE subject_images
