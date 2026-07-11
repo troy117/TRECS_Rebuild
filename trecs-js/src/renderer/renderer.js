@@ -46,7 +46,7 @@ const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
 const captureFileModeToggle = document.getElementById('captureFileModeToggle');
 const captureShootStageSelect = document.getElementById('captureShootStageSelect');
-const captureReviewWorkspace = document.getElementById('captureReviewWorkspace');
+const imageReviewWorkspace = document.getElementById('imageReviewWorkspace');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -558,12 +558,14 @@ function setWorkspaceMode(mode) {
   const captureOpen = mode === 'capture';
   const envelopeOpen = mode === 'envelope';
   const adminOpen = mode === 'admin';
+  const imageReviewOpen = mode === 'imageReview';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
   jobStudentWorkspace.classList.toggle('capture-mode', captureOpen);
   captureWorkspace.hidden = !captureOpen;
+  imageReviewWorkspace.hidden = !imageReviewOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
-  backToJobsButton.textContent = envelopeOpen ? 'Back to Students' : 'Back to Jobs';
+  backToJobsButton.textContent = (envelopeOpen || imageReviewOpen) ? 'Back to Students' : 'Back to Jobs';
   if (workspaceStudentsButton) {
     workspaceStudentsButton.classList.toggle('active', studentsOpen);
   }
@@ -594,6 +596,8 @@ function setWorkspaceMode(mode) {
     renderStudentWorkspace();
   } else if (captureOpen) {
     renderCaptureWorkspace();
+  } else if (imageReviewOpen) {
+    renderImageReviewWorkspace();
   } else if (envelopeOpen) {
     renderEnvelopeWorkspace();
   } else {
@@ -1291,7 +1295,14 @@ function renderStudentWorkspace() {
   const currentSubject = currentWorkspaceSubject();
   title.textContent = job.job;
   workspaceJobTitle.textContent = `${job.location} / ${job.job}`;
-  workspaceJobMeta.textContent = `${formatType(job.type)} / ${job.packagePlan || 'No package plan'} / ${formatNumber(job.subjects)} subjects`;
+  const unlinkedImageCount = Number(jobsState.detail.capture && jobsState.detail.capture.summary
+    ? jobsState.detail.capture.summary.unlinkedImages
+    : 0);
+  workspaceJobMeta.innerHTML = `
+    <span>${escapeHtml(formatType(job.type))} / ${escapeHtml(job.packagePlan || 'No package plan')} / ${formatNumber(job.subjects)} subjects</span>
+    <span class="workspace-unlinked-count">${formatNumber(unlinkedImageCount)} unlinked image${unlinkedImageCount === 1 ? '' : 's'}</span>
+    ${unlinkedImageCount > 0 ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Review Images</button>' : ''}
+  `;
   workspaceStudentCount.textContent = `${formatNumber(subjects.length)} shown`;
   workspaceStudentSearch.value = jobsState.workspaceStudentSearch;
   workspaceEditStudentButton.disabled = !currentSubject;
@@ -1317,6 +1328,12 @@ function renderStudentWorkspace() {
   renderWorkspaceStudentDetail(currentSubject);
   renderWorkspaceOrderDetail(currentSubject);
   updateWorkspaceNavButtons();
+  const imageReviewButton = document.getElementById('openImageReviewButton');
+  if (imageReviewButton) {
+    imageReviewButton.addEventListener('click', () => {
+      setWorkspaceMode('imageReview');
+    });
+  }
 }
 
 function normalizeStudentVisibleFields(fields = {}) {
@@ -2195,7 +2212,6 @@ function renderCaptureWorkspace() {
   renderCaptureShootStage();
   renderCaptureFileModeToggle();
   renderCaptureSubject();
-  renderCaptureReviewWorkspace();
   loadCaptureImages();
 
   setTimeout(() => {
@@ -2274,14 +2290,14 @@ function captureReviewImages() {
   return reviewCandidates.length ? reviewCandidates : (capture.recentImages || []);
 }
 
-function renderCaptureReviewWorkspace() {
-  if (!captureReviewWorkspace) {
+function renderImageReviewWorkspace() {
+  if (!imageReviewWorkspace) {
     return;
   }
 
   const capture = jobsState.detail && jobsState.detail.capture ? jobsState.detail.capture : null;
   if (!capture || !capture.summary) {
-    captureReviewWorkspace.innerHTML = '<div class="empty-state">No image review data found.</div>';
+    imageReviewWorkspace.innerHTML = '<div class="empty-state">No image review data found.</div>';
     return;
   }
 
@@ -2290,7 +2306,7 @@ function renderCaptureReviewWorkspace() {
     jobsState.selectedImageId = reviewImages.length ? Number(reviewImages[0].id) : null;
   }
 
-  captureReviewWorkspace.innerHTML = `
+  imageReviewWorkspace.innerHTML = `
     <div class="panel-heading">
       <h2>Unlinked / Review Images</h2>
       <span>${formatNumber((capture.reviewCandidates || []).length)} review / ${formatNumber(capture.summary.unlinkedImages || 0)} unlinked</span>
@@ -2316,14 +2332,14 @@ function renderCaptureReviewWorkspace() {
     </div>
   `;
 
-  captureReviewWorkspace.querySelectorAll('[data-capture-review-image-id]').forEach((row) => {
+  imageReviewWorkspace.querySelectorAll('[data-capture-review-image-id]').forEach((row) => {
     row.addEventListener('click', () => {
       jobsState.selectedImageId = Number(row.dataset.captureReviewImageId);
-      renderCaptureReviewWorkspace();
+      renderImageReviewWorkspace();
     });
   });
 
-  bindHoverImagePreviews(captureReviewWorkspace);
+  bindHoverImagePreviews(imageReviewWorkspace);
   loadImagePreview(jobsState.selectedImageId);
 }
 
@@ -5045,6 +5061,10 @@ async function loadImagePreview(imageId) {
     </dl>
     ${renderImageLinkPanel(imageId)}
   `;
+  const previewImage = panel.querySelector('img');
+  if (previewImage) {
+    setLandscapeRotation(previewImage);
+  }
 
   bindImagePreviewLinkForm();
 }
@@ -5397,7 +5417,7 @@ jobSearchInput.addEventListener('input', () => {
 });
 
 backToJobsButton.addEventListener('click', () => {
-  if (jobsState.workspaceMode === 'envelope') {
+  if (jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
     setWorkspaceMode('students');
   } else {
     closeJobWorkspace();

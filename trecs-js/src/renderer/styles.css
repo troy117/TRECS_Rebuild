@@ -621,10 +621,30 @@ dd {
 }
 
 .workspace-header p {
+  align-items: center;
   color: #617488;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
   font-size: 12px;
   line-height: 1.2;
   margin-top: 2px;
+}
+
+.workspace-unlinked-count {
+  color: #8a4b4b;
+}
+
+.review-alert-button {
+  background: #fff0f0;
+  border-color: #e8a6a6;
+  color: #8a1f1f;
+  min-height: 26px;
+  padding: 0 10px;
+}
+
+.review-alert-button:hover {
+  background: #ffe4e4;
 }
 
 .workspace-actions {
@@ -1317,7 +1337,6 @@ dd {
   display: grid;
   gap: 14px;
   grid-template-columns: 300px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) minmax(220px, 32vh);
   height: 100%;
   min-height: 0;
 }
@@ -1331,17 +1350,18 @@ dd {
 }
 
 .capture-entry-panel,
-.capture-compare-panel,
-.capture-review-workspace {
+.capture-compare-panel {
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.capture-review-workspace {
+.image-review-workspace {
   display: grid;
-  grid-column: 1 / -1;
+  height: 100%;
+  min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .job-student-workspace.capture-mode .capture-entry-panel .panel-heading,
