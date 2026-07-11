@@ -4856,14 +4856,28 @@ async function getJobDetail(_event, jobIdValue) {
       ia.filename,
       ia.source,
       ia.status,
+      ia.captured_at AS capturedAt,
+      ia.imported_at AS importedAt,
       si.role,
       si.selected,
+      CASE
+        WHEN ia.captured_at IS NOT NULL
+          AND j.retake_date IS NOT NULL
+          AND DATE(ia.captured_at) >= DATE(j.retake_date)
+        THEN 'Makeup Day'
+        WHEN ia.captured_at IS NOT NULL
+          AND j.shoot_date IS NOT NULL
+          AND DATE(ia.captured_at) >= DATE(j.shoot_date)
+        THEN 'Main Picture Day'
+        ELSE ''
+      END AS shootStageLabel,
       MAX(iv.width) AS width,
       MAX(iv.height) AS height
     FROM subject_images si
     JOIN image_assets ia ON ia.id = si.image_asset_id
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     JOIN subjects s ON s.id = si.subject_id
+    JOIN jobs j ON j.id = s.job_id
     WHERE s.job_id = ${jobId}
     GROUP BY si.id
     ORDER BY si.selected DESC, si.sort_order, ia.filename;

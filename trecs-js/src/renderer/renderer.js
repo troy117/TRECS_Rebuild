@@ -264,6 +264,44 @@ function formatType(type) {
     .join(' ');
 }
 
+function formatShortDateTime(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
+function formatImageSource(source) {
+  const sourceText = String(source || '').replace(/_/g, ' ').trim();
+  return sourceText ? formatType(sourceText) : 'Unknown Source';
+}
+
+function linkedImageMetaLine(image) {
+  const addedDate = formatShortDateTime(image.importedAt || image.capturedAt);
+  const capturedDate = image.capturedAt && image.importedAt && image.importedAt !== image.capturedAt
+    ? formatShortDateTime(image.capturedAt)
+    : '';
+  const parts = [];
+  if (addedDate) {
+    parts.push(`Added ${addedDate}`);
+  }
+  if (capturedDate) {
+    parts.push(`Captured ${capturedDate}`);
+  }
+  parts.push(image.shootStageLabel || formatImageSource(image.source));
+  return parts.filter(Boolean).join(' / ');
+}
+
 function renderMetrics(counts) {
   metricGrid.innerHTML = counts
     .map((count) => `
@@ -1908,6 +1946,7 @@ function renderWorkspaceOrderDetail(subject) {
         <div class="linked-image-row ${image.selected ? 'selected-linked-image' : ''}" data-hover-image-id="${image.imageAssetId}">
           <span>${image.role}${image.selected ? ' / selected' : ''}</span>
           <strong>${image.filename}</strong>
+          <em>${escapeHtml(linkedImageMetaLine(image))}</em>
           <button data-workspace-select-image="${image.imageAssetId}" type="button" ${image.selected ? 'disabled' : ''}>
             ${image.selected ? 'Selected' : 'Set Selected'}
           </button>
@@ -4258,6 +4297,7 @@ function renderSubjectDetail(subject) {
         <div class="linked-image-row" data-hover-image-id="${image.imageAssetId}">
           <span>${image.role}${image.selected ? ' / selected' : ''}</span>
           <strong>${image.filename}</strong>
+          <em>${escapeHtml(linkedImageMetaLine(image))}</em>
           <button data-link-subject-id="${subject.id}" data-link-image-id="${image.imageAssetId}">Set Primary</button>
         </div>
       `),
