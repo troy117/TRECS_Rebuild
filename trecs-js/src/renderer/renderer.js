@@ -5096,27 +5096,39 @@ function renderImageLinkPanel(imageId, options = {}) {
     jobsState.selectedImageSubjectId = selectableSubjects[0].id;
   }
 
+  const reviewResults = options.mode === 'review' ? imageReviewSubjectResults() : [];
+
   return `
     <form class="image-link-form ${options.mode === 'review' ? 'image-review-form' : ''}" data-image-link-form data-form-mode="${escapeHtml(options.mode || '')}">
       <div class="subheading compact-subheading">
         <h3>Assign Selected Image</h3>
         <span>${escapeHtml(jobsState.detail.summary ? jobsState.detail.summary.job : '')}</span>
       </div>
-      <label>
-        <span>Find Subject</span>
-        <input name="subjectSearch" type="search" value="${escapeHtml(jobsState.imageLinkSubjectSearch)}" placeholder="Ref, name, ID, grade">
-      </label>
-      <label>
-        <span>Link To Subject</span>
-        <select name="subjectId">
-          ${selectableSubjects.map((subject) => `
-            <option value="${subject.id}" ${subject.id === jobsState.selectedImageSubjectId ? 'selected' : ''}>
-              ${subject.ref || ''} ${subject.name || ''}
-            </option>
-          `).join('')}
-        </select>
-      </label>
-      ${options.mode === 'review' ? '<div class="image-review-subject-preview" id="imageReviewSubjectPreview"><div class="empty-state">Select a student to preview their current photo.</div></div>' : ''}
+      ${options.mode === 'review' ? `
+        <label class="image-review-subject-search-field">
+          <span>Student Name Search</span>
+          <input name="subjectSearch" type="search" value="${escapeHtml(jobsState.imageLinkSubjectSearch)}" placeholder="Ref, name, ID, grade" autocomplete="off">
+          <div class="student-search-results image-review-search-results" ${reviewResults.length ? '' : 'hidden'}>
+            ${imageReviewSubjectResultHtml(reviewResults)}
+          </div>
+        </label>
+        <div class="image-review-subject-preview" id="imageReviewSubjectPreview"><div class="empty-state">Select a student to preview their current photo.</div></div>
+      ` : `
+        <label>
+          <span>Find Subject</span>
+          <input name="subjectSearch" type="search" value="${escapeHtml(jobsState.imageLinkSubjectSearch)}" placeholder="Ref, name, ID, grade">
+        </label>
+        <label>
+          <span>Link To Subject</span>
+          <select name="subjectId">
+            ${selectableSubjects.map((subject) => `
+              <option value="${subject.id}" ${subject.id === jobsState.selectedImageSubjectId ? 'selected' : ''}>
+                ${subject.ref || ''} ${subject.name || ''}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+      `}
       <div class="form-actions">
         <span data-image-link-status></span>
         <button type="submit" data-link-image-id="${imageId}">Assign Image</button>
@@ -5128,6 +5140,47 @@ function renderImageLinkPanel(imageId, options = {}) {
 function selectedImageReviewSubject() {
   const subjects = jobsState.detail ? jobsState.detail.subjects : [];
   return subjects.find((subject) => Number(subject.id) === Number(jobsState.selectedImageSubjectId)) || null;
+}
+
+function imageReviewSubjectResults() {
+  const search = jobsState.imageLinkSubjectSearch.trim();
+  if (!search || !jobsState.detail) {
+    return [];
+  }
+  return (jobsState.detail.subjects || [])
+    .filter((subject) => textIncludes(subject, ['ref', 'name', 'externalId', 'grade', 'homeroom'], search))
+    .slice(0, 12);
+}
+
+function imageReviewSubjectResultHtml(subjects) {
+  return subjects.map((subject) => `
+    <button data-image-review-subject-id="${subject.id}" type="button">
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade ? `Grade ${subject.grade}` : '', subject.homeroom ? `HR ${subject.homeroom}` : ''].filter(Boolean).join(' / '))}</span>
+    </button>
+  `).join('');
+}
+
+function bindImageReviewSubjectButtons(form) {
+  form.querySelectorAll('[data-image-review-subject-id]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener('click', () => {
+      const subject = findById(jobsState.detail.subjects || [], Number(button.dataset.imageReviewSubjectId));
+      if (!subject) {
+        return;
+      }
+      jobsState.selectedImageSubjectId = subject.id;
+      jobsState.imageLinkSubjectSearch = subject.name || subject.ref || '';
+      form.elements.subjectSearch.value = jobsState.imageLinkSubjectSearch;
+      const results = form.querySelector('.image-review-search-results');
+      if (results) {
+        results.hidden = true;
+      }
+      loadReviewSubjectPreview();
+    });
+  });
 }
 
 async function loadReviewSubjectPreview() {
@@ -5176,29 +5229,49 @@ function bindImagePreviewLinkForm(options = {}) {
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const subjectId = Number(form.elements.subjectId.value);
+    const subjectId = mode === 'review'
+      ? Number(jobsState.selectedImageSubjectId)
+      : Number(form.elements.subjectId.value);
     const button = form.querySelector('button[type="submit"]');
     const status = form.querySelector('[data-image-link-status]');
+    if (!subjectId) {
+      status.textContent = 'Choose a student first.';
+      return;
+    }
     jobsState.selectedImageSubjectId = subjectId;
     status.textContent = '';
     await saveSubjectImageLink(subjectId, Number(button.dataset.linkImageId), button);
   });
 
-  form.elements.subjectId.addEventListener('change', () => {
-    jobsState.selectedImageSubjectId = Number(form.elements.subjectId.value);
-    if (mode === 'review') {
-      loadReviewSubjectPreview();
-    }
-  });
+  if (form.elements.subjectId) {
+    form.elements.subjectId.addEventListener('change', () => {
+      jobsState.selectedImageSubjectId = Number(form.elements.subjectId.value);
+      if (mode === 'review') {
+        loadReviewSubjectPreview();
+      }
+    });
+  }
 
   form.elements.subjectSearch.addEventListener('input', () => {
     jobsState.imageLinkSubjectSearch = form.elements.subjectSearch.value;
     if (mode === 'review') {
-      renderImageReviewWorkspace();
+      const resultsPanel = form.querySelector('.image-review-search-results');
+      const results = imageReviewSubjectResults();
+      if (resultsPanel) {
+        resultsPanel.innerHTML = imageReviewSubjectResultHtml(results);
+        resultsPanel.hidden = !results.length;
+        bindImageReviewSubjectButtons(form);
+      }
+      if (results.length) {
+        jobsState.selectedImageSubjectId = results[0].id;
+        loadReviewSubjectPreview();
+      }
     } else {
       loadImagePreview(jobsState.selectedImageId);
     }
   });
+
+  bindImageReviewSubjectButtons(form);
 }
 
 async function loadJobs() {
