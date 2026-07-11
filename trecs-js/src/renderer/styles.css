@@ -2699,6 +2699,13 @@ dd {
   width: calc(100% - 28px);
 }
 
+.capture-preview img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: min(240px, 70%);
+}
+
 .capture-preview dl {
   padding-left: 14px;
   padding-right: 14px;
@@ -2709,26 +2716,92 @@ dd {
   overflow-wrap: anywhere;
 }
 
-.capture-review-layout {
+.image-review-layout {
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(360px, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(280px, 0.8fr) minmax(460px, 1.4fr);
   min-height: 0;
   padding: 12px;
 }
 
-.capture-review-list,
-.capture-review-preview {
+.image-review-assign,
+.image-review-main,
+.image-review-list,
+.image-review-preview {
   border: 1px solid #d7e0e8;
   border-radius: 6px;
   min-height: 0;
   overflow: auto;
 }
 
-.capture-review-list table {
+.image-review-assign {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.image-review-form {
+  align-content: start;
+  display: grid;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.image-review-form > label,
+.image-review-form > .form-actions {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.image-review-subject-preview {
+  border-top: 1px solid #d7e0e8;
+  display: grid;
+  gap: 10px;
+  min-height: 180px;
+  padding: 12px;
+}
+
+.image-review-subject-meta strong,
+.image-review-subject-meta span {
+  display: block;
+}
+
+.image-review-subject-meta span {
+  color: #617488;
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.image-review-subject-preview img {
+  background: #eef2f5;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: block;
+  margin: 0 auto;
+  max-height: 260px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.image-review-subject-preview img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: min(250px, 75%);
+}
+
+.image-review-main {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: minmax(260px, 0.95fr) minmax(180px, 1fr);
+  overflow: hidden;
+  padding: 12px;
+}
+
+.image-review-list table {
   min-width: 0;
 }
 
-.capture-review-preview {
+.image-review-preview {
   padding-bottom: 10px;
 }

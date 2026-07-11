@@ -2311,24 +2311,29 @@ function renderImageReviewWorkspace() {
       <h2>Unlinked / Review Images</h2>
       <span>${formatNumber((capture.reviewCandidates || []).length)} review / ${formatNumber(capture.summary.unlinkedImages || 0)} unlinked</span>
     </div>
-    <div class="capture-review-layout">
-      <section class="capture-review-list">
-        ${tableHtml(
-          ['Filename', 'Reason', 'Links', 'Refs'],
-          reviewImages.map((image) => `
-            <tr class="${Number(image.id) === Number(jobsState.selectedImageId) ? 'selected-row' : ''}" data-capture-review-image-id="${image.id}" data-hover-image-id="${image.id}">
-              <td>${escapeHtml(image.filename || '')}</td>
-              <td>${escapeHtml(image.reason || (Number(image.linkedSubjects) === 0 ? 'Unlinked image' : 'Review'))}</td>
-              <td>${formatNumber(image.linkedSubjects || 0)}</td>
-              <td>${escapeHtml(image.refs || '')}</td>
-            </tr>
-          `),
-          'No unlinked or review images found.'
-        )}
+    <div class="image-review-layout">
+      <section class="image-review-assign">
+        ${renderImageLinkPanel(jobsState.selectedImageId, { mode: 'review' })}
       </section>
-      <aside class="capture-preview capture-review-preview" id="imagePreviewPanel">
-        <div class="empty-state">Select an image to review.</div>
-      </aside>
+      <section class="image-review-main">
+        <aside class="capture-preview image-review-preview" id="imagePreviewPanel">
+          <div class="empty-state">Select an image to review.</div>
+        </aside>
+        <div class="image-review-list">
+          ${tableHtml(
+            ['Filename', 'Reason', 'Links', 'Refs'],
+            reviewImages.map((image) => `
+              <tr class="${Number(image.id) === Number(jobsState.selectedImageId) ? 'selected-row' : ''}" data-capture-review-image-id="${image.id}" data-hover-image-id="${image.id}">
+                <td>${escapeHtml(image.filename || '')}</td>
+                <td>${escapeHtml(image.reason || (Number(image.linkedSubjects) === 0 ? 'Unlinked image' : 'Review'))}</td>
+                <td>${formatNumber(image.linkedSubjects || 0)}</td>
+                <td>${escapeHtml(image.refs || '')}</td>
+              </tr>
+            `),
+            'No unlinked or review images found.'
+          )}
+        </div>
+      </section>
     </div>
   `;
 
@@ -2340,7 +2345,9 @@ function renderImageReviewWorkspace() {
   });
 
   bindHoverImagePreviews(imageReviewWorkspace);
-  loadImagePreview(jobsState.selectedImageId);
+  bindImagePreviewLinkForm({ mode: 'review' });
+  loadReviewSubjectPreview();
+  loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false });
 }
 
 function renderCaptureSubject() {
@@ -5021,6 +5028,8 @@ async function reloadCurrentJobDetail() {
       renderAdminItemsWorkspace();
     } else if (jobsState.workspaceMode === 'capture') {
       renderCaptureWorkspace();
+    } else if (jobsState.workspaceMode === 'imageReview') {
+      renderImageReviewWorkspace();
     } else if (jobsState.workspaceMode === 'envelope') {
       renderEnvelopeWorkspace();
     } else {
@@ -5031,8 +5040,8 @@ async function reloadCurrentJobDetail() {
   }
 }
 
-async function loadImagePreview(imageId) {
-  const panel = document.getElementById('imagePreviewPanel');
+async function loadImagePreview(imageId, options = {}) {
+  const panel = document.getElementById(options.panelId || 'imagePreviewPanel');
   if (!panel || !imageId) {
     return;
   }
@@ -5059,17 +5068,19 @@ async function loadImagePreview(imageId) {
         <dd>${preview.width} x ${preview.height}</dd>
       </div>
     </dl>
-    ${renderImageLinkPanel(imageId)}
+    ${options.includeLinkPanel === false ? '' : renderImageLinkPanel(imageId)}
   `;
   const previewImage = panel.querySelector('img');
   if (previewImage) {
     setLandscapeRotation(previewImage);
   }
 
-  bindImagePreviewLinkForm();
+  if (options.includeLinkPanel !== false) {
+    bindImagePreviewLinkForm();
+  }
 }
 
-function renderImageLinkPanel(imageId) {
+function renderImageLinkPanel(imageId, options = {}) {
   const subjects = jobsState.detail ? jobsState.detail.subjects : [];
   if (!subjects.length) {
     return '';
@@ -5086,7 +5097,7 @@ function renderImageLinkPanel(imageId) {
   }
 
   return `
-    <form class="image-link-form" data-image-link-form>
+    <form class="image-link-form ${options.mode === 'review' ? 'image-review-form' : ''}" data-image-link-form data-form-mode="${escapeHtml(options.mode || '')}">
       <div class="subheading compact-subheading">
         <h3>Assign Selected Image</h3>
         <span>${escapeHtml(jobsState.detail.summary ? jobsState.detail.summary.job : '')}</span>
@@ -5105,6 +5116,7 @@ function renderImageLinkPanel(imageId) {
           `).join('')}
         </select>
       </label>
+      ${options.mode === 'review' ? '<div class="image-review-subject-preview" id="imageReviewSubjectPreview"><div class="empty-state">Select a student to preview their current photo.</div></div>' : ''}
       <div class="form-actions">
         <span data-image-link-status></span>
         <button type="submit" data-link-image-id="${imageId}">Assign Image</button>
@@ -5113,11 +5125,54 @@ function renderImageLinkPanel(imageId) {
   `;
 }
 
-function bindImagePreviewLinkForm() {
+function selectedImageReviewSubject() {
+  const subjects = jobsState.detail ? jobsState.detail.subjects : [];
+  return subjects.find((subject) => Number(subject.id) === Number(jobsState.selectedImageSubjectId)) || null;
+}
+
+async function loadReviewSubjectPreview() {
+  const panel = document.getElementById('imageReviewSubjectPreview');
+  if (!panel) {
+    return;
+  }
+  const subject = selectedImageReviewSubject();
+  if (!subject) {
+    panel.innerHTML = '<div class="empty-state">Select a student to preview their current photo.</div>';
+    return;
+  }
+
+  const detail = `
+    <strong>${escapeHtml(subject.ref || '')} ${escapeHtml(subject.name || 'Unnamed student')}</strong>
+    <span>${escapeHtml([subject.grade, subject.homeroom, subject.externalId].filter(Boolean).join(' / '))}</span>
+  `;
+  if (!subject.imageAssetId) {
+    panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">No current photo linked.</div>`;
+    return;
+  }
+
+  try {
+    const preview = await imagePreviewForId(subject.imageAssetId);
+    if (!preview || preview.missing || !preview.dataUrl) {
+      panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">Preview unavailable.</div>`;
+      return;
+    }
+    panel.innerHTML = `
+      <div class="image-review-subject-meta">${detail}</div>
+      <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Current student photo')}">
+    `;
+    setLandscapeRotation(panel.querySelector('img'));
+  } catch (error) {
+    panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">Preview unavailable.</div>`;
+    console.error(error);
+  }
+}
+
+function bindImagePreviewLinkForm(options = {}) {
   const form = document.querySelector('[data-image-link-form]');
   if (!form) {
     return;
   }
+  const mode = options.mode || form.dataset.formMode || '';
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -5131,11 +5186,18 @@ function bindImagePreviewLinkForm() {
 
   form.elements.subjectId.addEventListener('change', () => {
     jobsState.selectedImageSubjectId = Number(form.elements.subjectId.value);
+    if (mode === 'review') {
+      loadReviewSubjectPreview();
+    }
   });
 
   form.elements.subjectSearch.addEventListener('input', () => {
     jobsState.imageLinkSubjectSearch = form.elements.subjectSearch.value;
-    loadImagePreview(jobsState.selectedImageId);
+    if (mode === 'review') {
+      renderImageReviewWorkspace();
+    } else {
+      loadImagePreview(jobsState.selectedImageId);
+    }
   });
 }
 
