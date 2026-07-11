@@ -1332,7 +1332,13 @@ dd {
 .envelope-entry-form select,
 .capture-entry-form input,
 .capture-entry-form select {
-  height: 38px;
+  height: 42px;
+  line-height: 1.35;
+}
+
+.capture-entry-form select {
+  padding-bottom: 8px;
+  padding-top: 8px;
 }
 
 .envelope-search-field,

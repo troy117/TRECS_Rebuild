@@ -1207,7 +1207,12 @@ async function confirmSchoolDataImport() {
     schoolDataStatus.textContent = `Imported ${formatNumber(result.created)} new and updated ${formatNumber(result.updated)} records.`;
     await loadDashboard();
     await loadJobs();
-    await loadJobDetail(state.jobId);
+    jobsState.selectedJobId = state.jobId;
+    if (jobsState.jobWorkspaceOpen) {
+      await reloadCurrentJobDetail();
+    } else {
+      await loadJobDetail(state.jobId);
+    }
     setSchoolDataModalVisible(false);
   } catch (error) {
     schoolDataStatus.textContent = error.message || 'School data import failed';
@@ -4840,7 +4845,7 @@ function renderCaptureTab(capture) {
 
       <section class="capture-review">
         <div class="subheading">
-          <h3>Review Candidates</h3>
+          <h3>Unlinked / Review Images</h3>
           <span>${formatNumber(reviewCandidates.length)} shown</span>
         </div>
         ${tableHtml(
@@ -4987,6 +4992,10 @@ function renderImageLinkPanel(imageId) {
 
   return `
     <form class="image-link-form" data-image-link-form>
+      <div class="subheading compact-subheading">
+        <h3>Assign Selected Image</h3>
+        <span>${escapeHtml(jobsState.detail.summary ? jobsState.detail.summary.job : '')}</span>
+      </div>
       <label>
         <span>Find Subject</span>
         <input name="subjectSearch" type="search" value="${escapeHtml(jobsState.imageLinkSubjectSearch)}" placeholder="Ref, name, ID, grade">
@@ -5003,7 +5012,7 @@ function renderImageLinkPanel(imageId) {
       </label>
       <div class="form-actions">
         <span data-image-link-status></span>
-        <button type="submit" data-link-image-id="${imageId}">Make Primary</button>
+        <button type="submit" data-link-image-id="${imageId}">Assign Image</button>
       </div>
     </form>
   `;

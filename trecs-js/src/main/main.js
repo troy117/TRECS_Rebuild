@@ -6788,20 +6788,13 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       versionStatement.free();
     }
 
-    const previousPrimaryImageId = row.previousPrimaryImageId ? Number(row.previousPrimaryImageId) : null;
-    database.run(`
-      DELETE FROM subject_images
-      WHERE subject_id = ?
-        AND selected = 0
-        AND image_asset_id != ?;
-    `, [subjectId, previousPrimaryImageId || -1]);
-
     database.run(`
       UPDATE subject_images
       SET selected = 0
       WHERE subject_id = ?;
     `, [subjectId]);
 
+    const previousPrimaryImageId = row.previousPrimaryImageId ? Number(row.previousPrimaryImageId) : null;
     if (previousPrimaryImageId) {
       database.run(`
         INSERT OR IGNORE INTO subject_images (
@@ -7368,21 +7361,20 @@ async function getImagePreview(_event, imageIdValue) {
   const rows = await querySql(`
     SELECT
       ia.filename,
-      iv.path,
-      iv.width,
-      iv.height,
-      iv.version_type AS versionType
+      COALESCE(
+        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
+        ia.current_path
+      ) AS path,
+      MAX(CASE WHEN iv.version_type = 'original' THEN iv.width ELSE NULL END) AS width,
+      MAX(CASE WHEN iv.version_type = 'original' THEN iv.height ELSE NULL END) AS height,
+      CASE
+        WHEN MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'original'
+        ELSE 'current'
+      END AS versionType
     FROM image_assets ia
-    JOIN image_versions iv ON iv.image_asset_id = ia.id
+    LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     WHERE ia.id = ${imageId}
-    ORDER BY
-      CASE iv.version_type
-        WHEN 'chosen' THEN 1
-        WHEN 'cropped_med' THEN 2
-        WHEN 'cropped_large' THEN 3
-        WHEN 'original' THEN 4
-        ELSE 5
-      END
+    GROUP BY ia.id
     LIMIT 1;
   `);
 
