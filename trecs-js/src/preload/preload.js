@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld('trecs', {
   },
   createEnvelopeOrder: (jobId, subjectId, input) => ipcRenderer.invoke('envelope:create-order', jobId, subjectId, input),
   linkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:link-subject', subjectId, imageId),
+  setImageRejected: (imageId, rejected, reason) => ipcRenderer.invoke('image:set-rejected', imageId, rejected, reason),
+  unlinkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:unlink-subject', subjectId, imageId),
   getImagePreview: (imageId) => ipcRenderer.invoke('image:preview', imageId),
   prepareLaptopPackage: (jobId) => ipcRenderer.invoke('laptop-package:prepare', jobId),
   getEndOfDayPreview: (jobId) => ipcRenderer.invoke('end-of-day:preview', jobId),

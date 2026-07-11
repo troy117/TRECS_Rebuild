@@ -45,6 +45,7 @@ const captureCompareGrid = document.getElementById('captureCompareGrid');
 const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
 const captureFileModeToggle = document.getElementById('captureFileModeToggle');
+const captureShootStageSelect = document.getElementById('captureShootStageSelect');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -151,6 +152,7 @@ let jobsState = {
   captureSearchActiveIndex: -1,
   captureSearchTimer: null,
   captureFileMode: 'jpg_raw',
+  captureShootStage: 'main',
   envelopeSubject: null,
   envelopeScan: null,
   envelopePending: null,
@@ -286,6 +288,15 @@ function formatImageSource(source) {
   return sourceText ? formatType(sourceText) : 'Unknown Source';
 }
 
+function formatShootStage(stage) {
+  return {
+    main: 'Main Picture Day',
+    makeup: 'Makeup Day',
+    retake: 'Retake',
+    other: 'Other'
+  }[stage] || formatType(stage || 'other');
+}
+
 function imageFolderName(imagePath) {
   const parts = String(imagePath || '').split(/[\\/]/).filter(Boolean);
   return parts.length > 1 ? parts[parts.length - 2] : '';
@@ -315,7 +326,13 @@ function linkedImageMetaLine(image) {
   if (capturedDate) {
     parts.push(`Captured ${capturedDate}`);
   }
-  parts.push(image.shootStageLabel || formatImageSource(image.source));
+  parts.push(image.shootStageLabel || (image.shootStage ? formatShootStage(image.shootStage) : formatImageSource(image.source)));
+  if (image.captureFileMode) {
+    parts.push(image.captureFileMode === 'jpg_only' ? 'JPG only' : 'JPG + CR3');
+  }
+  if (image.captureWorkstation) {
+    parts.push(image.captureWorkstation);
+  }
   parts.push(linkedImageFolderLine(image));
   return parts.filter(Boolean).join(' / ');
 }
@@ -1714,8 +1731,10 @@ function renderImageLightboxActions() {
   if (canSelect) {
     const linkedImage = linkedImagesForSubject(jobsState.lightboxSubjectId)
       .find((image) => Number(image.imageAssetId) === Number(jobsState.lightboxImageId));
-    selectLightboxImageButton.disabled = Boolean(linkedImage && linkedImage.selected);
-    selectLightboxImageButton.textContent = linkedImage && linkedImage.selected
+    selectLightboxImageButton.disabled = Boolean(linkedImage && (linkedImage.selected || linkedImage.status === 'rejected'));
+    selectLightboxImageButton.textContent = linkedImage && linkedImage.status === 'rejected'
+      ? 'Rejected Image'
+      : linkedImage && linkedImage.selected
       ? 'Selected Image'
       : 'Use As Selected Image';
   }
@@ -1961,13 +1980,20 @@ function renderWorkspaceOrderDetail(subject) {
     ${renderMiniSection(
       'Linked Images',
       images.map((image) => `
-        <div class="linked-image-row ${image.selected ? 'selected-linked-image' : ''}" data-hover-image-id="${image.imageAssetId}">
-          <span>${image.role}${image.selected ? ' / selected' : ''}</span>
+        <div class="linked-image-row ${image.selected ? 'selected-linked-image' : ''} ${image.status === 'rejected' ? 'rejected-linked-image' : ''}" data-hover-image-id="${image.imageAssetId}">
+          <span>${image.role}${image.selected ? ' / selected' : ''}${image.status === 'rejected' ? ' / rejected' : ''}</span>
           <strong>${image.filename}</strong>
           <em>${escapeHtml(linkedImageMetaLine(image))}</em>
-          <button data-workspace-select-image="${image.imageAssetId}" type="button" ${image.selected ? 'disabled' : ''}>
-            ${image.selected ? 'Selected' : 'Set Selected'}
-          </button>
+          <div class="linked-image-actions">
+            <button data-open-linked-image="${image.imageAssetId}" type="button">Open</button>
+            <button data-workspace-select-image="${image.imageAssetId}" type="button" ${image.selected || image.status === 'rejected' ? 'disabled' : ''}>
+              ${image.selected ? 'Selected' : 'Set Selected'}
+            </button>
+            <button data-workspace-reject-image="${image.imageAssetId}" data-rejected="${image.status === 'rejected' ? '1' : '0'}" type="button">
+              ${image.status === 'rejected' ? 'Restore' : 'Reject'}
+            </button>
+            <button data-workspace-unlink-image="${image.imageAssetId}" type="button">Unlink</button>
+          </div>
         </div>
       `),
       'No linked images.'
@@ -1992,6 +2018,23 @@ function renderWorkspaceOrderDetail(subject) {
   workspaceOrderDetail.querySelectorAll('[data-workspace-select-image]').forEach((button) => {
     button.addEventListener('click', async () => {
       await saveSubjectImageLink(subject.id, Number(button.dataset.workspaceSelectImage), button);
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-open-linked-image]').forEach((button) => {
+    button.addEventListener('click', () => {
+      openImageLightbox(Number(button.dataset.openLinkedImage), { subjectId: subject.id });
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-workspace-reject-image]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const imageId = Number(button.dataset.workspaceRejectImage);
+      const currentlyRejected = button.dataset.rejected === '1';
+      await setLinkedImageRejected(imageId, !currentlyRejected, button);
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-workspace-unlink-image]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await unlinkLinkedImage(subject.id, Number(button.dataset.workspaceUnlinkImage), button);
     });
   });
   bindHoverImagePreviews(workspaceOrderDetail);
@@ -2130,6 +2173,7 @@ function renderCaptureWorkspace() {
   title.textContent = `${job.job} Image Capture`;
   workspaceJobTitle.textContent = `${job.location} / ${job.job}`;
   workspaceJobMeta.textContent = `${formatType(job.type)} / Image capture`;
+  renderCaptureShootStage();
   renderCaptureFileModeToggle();
   renderCaptureSubject();
   loadCaptureImages();
@@ -2142,6 +2186,16 @@ function renderCaptureWorkspace() {
 
 function captureFileModeLabel(mode = jobsState.captureFileMode) {
   return mode === 'jpg_only' ? 'JPG Only' : 'JPG + CR3';
+}
+
+function captureShootStageLabel(stage = jobsState.captureShootStage) {
+  return formatShootStage(stage);
+}
+
+function renderCaptureShootStage() {
+  if (captureShootStageSelect) {
+    captureShootStageSelect.value = jobsState.captureShootStage;
+  }
 }
 
 function renderCaptureFileModeToggle() {
@@ -2162,7 +2216,27 @@ async function setCaptureFileMode(fileMode) {
 
   jobsState.captureFileMode = nextMode;
   renderCaptureFileModeToggle();
-  setCapturePairStatus({ ready: true, message: `Ready (${captureFileModeLabel()})` });
+  setCapturePairStatus({ ready: true, message: `Ready (${captureShootStageLabel()} / ${captureFileModeLabel()})` });
+
+  if (jobsState.captureSubject) {
+    try {
+      await startCaptureWatcherForCurrentSubject();
+    } catch (error) {
+      captureEntryStatus.textContent = error.message || 'Could not restart capture watcher';
+      console.error(error);
+    }
+  }
+}
+
+async function setCaptureShootStage(stage) {
+  const nextStage = ['main', 'makeup', 'retake', 'other'].includes(stage) ? stage : 'main';
+  if (jobsState.captureShootStage === nextStage) {
+    return;
+  }
+
+  jobsState.captureShootStage = nextStage;
+  renderCaptureShootStage();
+  setCapturePairStatus({ ready: true, message: `Ready (${captureShootStageLabel()})` });
 
   if (jobsState.captureSubject) {
     try {
@@ -2503,7 +2577,10 @@ async function startCaptureWatcherForCurrentSubject() {
   return trecsApi('startCaptureWatcher').startCaptureWatcher(
     jobsState.selectedJobId,
     jobsState.captureSubject.id,
-    { fileMode: jobsState.captureFileMode }
+    {
+      fileMode: jobsState.captureFileMode,
+      shootStage: jobsState.captureShootStage
+    }
   );
 }
 
@@ -4521,6 +4598,69 @@ async function saveSubjectImageLink(subjectId, imageId, control) {
   }
 }
 
+async function setLinkedImageRejected(imageId, rejected, control) {
+  if (!imageId) {
+    return;
+  }
+  const originalText = control ? control.textContent : '';
+  if (control) {
+    control.disabled = true;
+    control.textContent = rejected ? 'Rejecting...' : 'Restoring...';
+  }
+
+  try {
+    await trecsApi('setImageRejected').setImageRejected(imageId, rejected, rejected ? 'Rejected during linked image review' : null);
+    jobsState.imagePreviewCache.delete(imageId);
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    if (control) {
+      control.textContent = 'Failed';
+    }
+    console.error(error);
+  } finally {
+    if (control) {
+      control.disabled = false;
+      if (control.textContent === 'Rejecting...' || control.textContent === 'Restoring...') {
+        control.textContent = originalText;
+      }
+    }
+  }
+}
+
+async function unlinkLinkedImage(subjectId, imageId, control) {
+  if (!subjectId || !imageId) {
+    return;
+  }
+  const image = linkedImagesForSubject(subjectId).find((item) => Number(item.imageAssetId) === Number(imageId));
+  const label = image && image.filename ? image.filename : `image #${imageId}`;
+  if (!confirm(`Unlink ${label} from this student? The image file will stay on disk.`)) {
+    return;
+  }
+
+  const originalText = control ? control.textContent : '';
+  if (control) {
+    control.disabled = true;
+    control.textContent = 'Unlinking...';
+  }
+
+  try {
+    await trecsApi('unlinkSubjectImage').unlinkSubjectImage(subjectId, imageId);
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    if (control) {
+      control.textContent = 'Failed';
+    }
+    console.error(error);
+  } finally {
+    if (control) {
+      control.disabled = false;
+      if (control.textContent === 'Unlinking...') {
+        control.textContent = originalText;
+      }
+    }
+  }
+}
+
 function renderMiniSection(label, rows, emptyText) {
   return `
     <section class="mini-section">
@@ -5264,6 +5404,12 @@ if (captureFileModeToggle) {
       return;
     }
     setCaptureFileMode(button.dataset.captureFileMode);
+  });
+}
+
+if (captureShootStageSelect) {
+  captureShootStageSelect.addEventListener('change', () => {
+    setCaptureShootStage(captureShootStageSelect.value);
   });
 }
 

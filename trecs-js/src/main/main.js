@@ -103,6 +103,9 @@ function createLocalCaptureSchema(database) {
       job_id INTEGER NOT NULL,
       subject_id INTEGER NOT NULL,
       image_asset_id INTEGER,
+      capture_session_id INTEGER,
+      shoot_stage TEXT NOT NULL DEFAULT 'main',
+      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
       ref TEXT,
       jpg_path TEXT,
       cr3_path TEXT,
@@ -113,6 +116,9 @@ function createLocalCaptureSchema(database) {
       notes TEXT
     );
   `);
+  ensureColumn(database, 'capture_events', 'capture_session_id', 'INTEGER');
+  ensureColumn(database, 'capture_events', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(database, 'capture_events', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
 }
 
 async function appendLocalCaptureEvent(input) {
@@ -130,6 +136,9 @@ async function appendLocalCaptureEvent(input) {
         job_id,
         subject_id,
         image_asset_id,
+        capture_session_id,
+        shoot_stage,
+        file_mode,
         ref,
         jpg_path,
         cr3_path,
@@ -137,7 +146,7 @@ async function appendLocalCaptureEvent(input) {
         selected,
         notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?);
     `);
 
     try {
@@ -145,6 +154,9 @@ async function appendLocalCaptureEvent(input) {
         input.jobId,
         input.subjectId,
         input.imageAssetId,
+        input.captureSessionId || null,
+        normalizeShootStage(input.shootStage),
+        normalizeCaptureFileMode(input.fileMode),
         input.ref || null,
         input.jpgPath || null,
         input.cr3Path || null,
@@ -260,15 +272,40 @@ function createJobDatabaseSchema(database) {
     CREATE TABLE IF NOT EXISTS image_assets (
       id INTEGER PRIMARY KEY,
       job_id INTEGER NOT NULL,
+      capture_session_id INTEGER,
+      shoot_stage TEXT NOT NULL DEFAULT 'main',
       original_path TEXT,
       current_path TEXT NOT NULL,
       filename TEXT NOT NULL,
       source TEXT NOT NULL DEFAULT 'import',
       status TEXT NOT NULL DEFAULT 'imported',
+      rejected_at TEXT,
+      rejected_reason TEXT,
       captured_at TEXT,
       imported_at TEXT,
       metadata_json TEXT,
       UNIQUE(job_id, current_path)
+    );
+
+    CREATE TABLE IF NOT EXISTS capture_sessions (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      session_type TEXT NOT NULL,
+      shoot_stage TEXT NOT NULL DEFAULT 'main',
+      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
+      workstation_name TEXT NOT NULL,
+      user_name TEXT,
+      hot_folder_path TEXT,
+      local_database_path TEXT,
+      storage_root_path TEXT,
+      active_subject_id INTEGER,
+      latest_image_asset_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'open',
+      sync_status TEXT NOT NULL DEFAULT 'local_only',
+      started_at TEXT,
+      last_seen_at TEXT,
+      ended_at TEXT,
+      notes TEXT
     );
 
     CREATE TABLE IF NOT EXISTS image_versions (
@@ -357,6 +394,9 @@ function createJobDatabaseSchema(database) {
       job_id INTEGER NOT NULL,
       subject_id INTEGER NOT NULL,
       image_asset_id INTEGER,
+      capture_session_id INTEGER,
+      shoot_stage TEXT NOT NULL DEFAULT 'main',
+      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
       ref TEXT,
       jpg_path TEXT,
       cr3_path TEXT,
@@ -533,6 +573,7 @@ async function writeJobDatabaseSnapshot(jobId) {
     const imageRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_assets WHERE job_id = ${jobId};`);
     const imageIds = imageRows.map((row) => row.id);
     const imageIdList = imageIds.length ? imageIds.join(', ') : '0';
+    const captureSessionRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_sessions WHERE job_id = ${jobId};`);
     const orderRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM orders WHERE job_id = ${jobId};`);
     const orderIds = orderRows.map((row) => row.id);
     const orderIdList = orderIds.length ? orderIds.join(', ') : '0';
@@ -548,6 +589,7 @@ async function writeJobDatabaseSnapshot(jobId) {
     const subjectGroupMemberRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subject_group_members WHERE group_id IN (${subjectGroupIdList});`);
     insertRows(jobDatabase, 'subject_group_members', Object.keys(subjectGroupMemberRows[0] || {}), subjectGroupMemberRows);
     insertRows(jobDatabase, 'image_assets', Object.keys(imageRows[0] || {}), imageRows);
+    insertRows(jobDatabase, 'capture_sessions', Object.keys(captureSessionRows[0] || {}), captureSessionRows);
     const imageVersionRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_versions WHERE image_asset_id IN (${imageIdList});`);
     insertRows(jobDatabase, 'image_versions', Object.keys(imageVersionRows[0] || {}), imageVersionRows);
     const subjectImageRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subject_images WHERE subject_id IN (${subjectIdList});`);
@@ -651,6 +693,33 @@ async function ensurePrototypeDatabaseShape() {
     }
 
     database.run(`
+      CREATE TABLE IF NOT EXISTS capture_sessions (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        session_type TEXT NOT NULL,
+        shoot_stage TEXT NOT NULL DEFAULT 'main',
+        file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
+        workstation_name TEXT NOT NULL,
+        user_name TEXT,
+        hot_folder_path TEXT,
+        local_database_path TEXT,
+        storage_root_path TEXT,
+        active_subject_id INTEGER,
+        latest_image_asset_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'open',
+        sync_status TEXT NOT NULL DEFAULT 'local_only',
+        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ended_at TEXT,
+        notes TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id
+      ON capture_sessions(job_id);
+
+      CREATE INDEX IF NOT EXISTS idx_capture_sessions_status
+      ON capture_sessions(status, sync_status);
+
       CREATE TABLE IF NOT EXISTS admin_item_batches (
         id INTEGER PRIMARY KEY,
         job_id INTEGER NOT NULL,
@@ -693,8 +762,24 @@ async function ensurePrototypeDatabaseShape() {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
+
     `);
     changed = true;
+
+    changed = ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
+    changed = ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'") || changed;
+    changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
+    changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
+    changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
+    changed = ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT') || changed;
+
+    database.run(`
+      CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
+      ON image_assets(capture_session_id);
+
+      CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
+      ON image_assets(job_id, shoot_stage);
+    `);
 
     if (changed) {
       fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
@@ -1298,13 +1383,20 @@ async function buildEndOfDayPreview(jobId) {
         ia.id,
         ia.filename,
         ia.current_path AS currentPath,
+        ia.capture_session_id AS captureSessionId,
+        ia.shoot_stage AS shootStage,
+        ia.status,
+        ia.rejected_at AS rejectedAt,
         ia.metadata_json AS metadataJson,
         ia.captured_at AS capturedAt,
+        cs.workstation_name AS captureWorkstation,
+        cs.file_mode AS captureFileMode,
         s.id AS subjectId,
         s.legacy_ref_num AS ref,
         s.display_name AS studentName,
         si.selected
       FROM image_assets ia
+      LEFT JOIN capture_sessions cs ON cs.id = ia.capture_session_id
       LEFT JOIN subject_images si ON si.image_asset_id = ia.id
       LEFT JOIN subjects s ON s.id = si.subject_id
       WHERE ia.job_id = ${jobId}
@@ -1469,6 +1561,11 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     const rawPath = copyPackageFile(image.rawPath, imagesFolder);
     copiedImages.push({
       imageAssetId: image.id,
+      captureSessionId: image.captureSessionId,
+      shootStage: image.shootStage || 'main',
+      shootStageLabel: shootStageLabel(image.shootStage),
+      captureWorkstation: image.captureWorkstation || null,
+      captureFileMode: image.captureFileMode || null,
       ref: image.ref,
       studentName: image.studentName,
       filename: image.filename,
@@ -3378,6 +3475,14 @@ function tableColumnNames(database, tableName) {
   return rowsFromDatabase(database, `PRAGMA table_info(${tableName});`).map((row) => row.name);
 }
 
+function ensureColumn(database, tableName, columnName, columnSql) {
+  if (tableColumnNames(database, tableName).includes(columnName)) {
+    return false;
+  }
+  database.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnSql};`);
+  return true;
+}
+
 function insertImportedRows(database, tableName, rows) {
   if (!rows.length) {
     return;
@@ -3606,6 +3711,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
     const packageTables = {
       subjects: rowsFromOptionalTable(packageDatabase, 'subjects'),
       subject_codes: rowsFromOptionalTable(packageDatabase, 'subject_codes'),
+      capture_sessions: rowsFromOptionalTable(packageDatabase, 'capture_sessions'),
       image_assets: rowsFromOptionalTable(packageDatabase, 'image_assets').filter((row) => imageIds.has(Number(row.id))),
       image_versions: rowsFromOptionalTable(packageDatabase, 'image_versions').filter((row) => imageIds.has(Number(row.image_asset_id))),
       subject_images: rowsFromOptionalTable(packageDatabase, 'subject_images').filter((row) => imageIds.has(Number(row.image_asset_id)))
@@ -3650,6 +3756,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
         });
       insertImportedRows(database, 'subjects', newSubjectRows);
       insertImportedRows(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
+      upsertImportedRowsById(database, 'capture_sessions', packageTables.capture_sessions);
 
       editedSubjects.forEach((subject) => {
         const updates = [];
@@ -3758,6 +3865,7 @@ async function loadOnsiteSetup(_event, input = {}) {
       subject_groups: rowsFromOptionalTable(setupDatabase, 'subject_groups'),
       subject_group_members: rowsFromOptionalTable(setupDatabase, 'subject_group_members'),
       image_assets: rowsFromOptionalTable(setupDatabase, 'image_assets'),
+      capture_sessions: rowsFromOptionalTable(setupDatabase, 'capture_sessions'),
       image_versions: rowsFromOptionalTable(setupDatabase, 'image_versions'),
       subject_images: rowsFromOptionalTable(setupDatabase, 'subject_images'),
       orders: rowsFromOptionalTable(setupDatabase, 'orders'),
@@ -3852,6 +3960,7 @@ async function loadOnsiteSetup(_event, input = {}) {
         'subject_groups',
         'subject_group_members',
         'image_assets',
+        'capture_sessions',
         'image_versions',
         'subject_images',
         'orders',
@@ -4855,10 +4964,17 @@ async function getJobDetail(_event, jobIdValue) {
       ia.id AS imageAssetId,
       ia.filename,
       ia.current_path AS currentPath,
+      ia.capture_session_id AS captureSessionId,
       ia.source,
       ia.status,
+      ia.shoot_stage AS shootStage,
+      ia.rejected_at AS rejectedAt,
+      ia.rejected_reason AS rejectedReason,
       ia.captured_at AS capturedAt,
       ia.imported_at AS importedAt,
+      cs.session_type AS captureSessionType,
+      cs.workstation_name AS captureWorkstation,
+      cs.file_mode AS captureFileMode,
       si.role,
       si.selected,
       COALESCE(
@@ -4868,21 +4984,18 @@ async function getJobDetail(_event, jobIdValue) {
         MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
         ia.current_path
       ) AS displayPath,
-      CASE
-        WHEN ia.captured_at IS NOT NULL
-          AND j.retake_date IS NOT NULL
-          AND DATE(ia.captured_at) >= DATE(j.retake_date)
-        THEN 'Makeup Day'
-        WHEN ia.captured_at IS NOT NULL
-          AND j.shoot_date IS NOT NULL
-          AND DATE(ia.captured_at) >= DATE(j.shoot_date)
-        THEN 'Main Picture Day'
+      CASE ia.shoot_stage
+        WHEN 'main' THEN 'Main Picture Day'
+        WHEN 'makeup' THEN 'Makeup Day'
+        WHEN 'retake' THEN 'Retake'
+        WHEN 'other' THEN 'Other'
         ELSE ''
       END AS shootStageLabel,
       MAX(iv.width) AS width,
       MAX(iv.height) AS height
     FROM subject_images si
     JOIN image_assets ia ON ia.id = si.image_asset_id
+    LEFT JOIN capture_sessions cs ON cs.id = ia.capture_session_id
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     JOIN subjects s ON s.id = si.subject_id
     JOIN jobs j ON j.id = s.job_id
@@ -5744,6 +5857,30 @@ function normalizeCaptureFileMode(value) {
   return value === 'jpg_only' ? 'jpg_only' : 'jpg_raw';
 }
 
+function normalizeShootStage(value) {
+  const stage = String(value || 'main').trim().toLowerCase();
+  if (['main', 'makeup', 'retake', 'other'].includes(stage)) {
+    return stage;
+  }
+  if (['original_picture_day', 'original', 'fall_main', 'picture_day'].includes(stage)) {
+    return 'main';
+  }
+  if (['makeup_day', 'retakes', 'retake_day'].includes(stage)) {
+    return 'makeup';
+  }
+  return 'other';
+}
+
+function shootStageLabel(value) {
+  const stage = normalizeShootStage(value);
+  return {
+    main: 'Main Picture Day',
+    makeup: 'Makeup Day',
+    retake: 'Retake',
+    other: 'Other'
+  }[stage];
+}
+
 function latestCapturePairInFolder(folderPath, options = {}) {
   const fileMode = normalizeCaptureFileMode(options.fileMode);
   const imagePath = latestImageInFolder(folderPath);
@@ -6461,6 +6598,79 @@ function captureDestinationName(ref, sourcePath) {
   return envelopeDestinationName(ref, sourcePath);
 }
 
+function getOrCreateCaptureSession(database, input) {
+  const jobId = numericId(input.jobId);
+  const shootStage = normalizeShootStage(input.shootStage);
+  const fileMode = normalizeCaptureFileMode(input.fileMode);
+  const workstation = process.env.COMPUTERNAME || os.hostname() || 'workstation';
+  const userName = process.env.USERNAME || os.userInfo().username || null;
+  const hotFolderPath = input.hotFolder ? path.relative(projectRoot, input.hotFolder) : null;
+  const localDatabasePath = localCaptureDatabasePath(jobId);
+
+  const rows = rowsFromDatabase(database, `
+    SELECT id
+    FROM capture_sessions
+    WHERE job_id = ${jobId}
+      AND session_type = 'onsite_laptop'
+      AND status = 'open'
+      AND shoot_stage = ${sqlLiteral(shootStage)}
+      AND file_mode = ${sqlLiteral(fileMode)}
+      AND workstation_name = ${sqlLiteral(workstation)}
+    ORDER BY started_at DESC, id DESC
+    LIMIT 1;
+  `);
+
+  if (rows.length) {
+    const sessionId = rows[0].id;
+    database.run(`
+      UPDATE capture_sessions
+      SET hot_folder_path = ?,
+          local_database_path = ?,
+          active_subject_id = ?,
+          last_seen_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `, [
+      hotFolderPath,
+      localDatabasePath,
+      input.subjectId || null,
+      sessionId
+    ]);
+    return sessionId;
+  }
+
+  database.run(`
+    INSERT INTO capture_sessions (
+      job_id,
+      session_type,
+      shoot_stage,
+      file_mode,
+      workstation_name,
+      user_name,
+      hot_folder_path,
+      local_database_path,
+      storage_root_path,
+      active_subject_id,
+      status,
+      sync_status,
+      notes
+    )
+    VALUES (?, 'onsite_laptop', ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending_sync', ?);
+  `, [
+    jobId,
+    shootStage,
+    fileMode,
+    workstation,
+    userName,
+    hotFolderPath,
+    localDatabasePath,
+    input.storageRootPath || null,
+    input.subjectId || null,
+    input.notes || null
+  ]);
+
+  return rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+}
+
 function closeCaptureWatcher(webContentsId) {
   const watcherState = captureWatchers.get(webContentsId);
   if (!watcherState) {
@@ -6515,10 +6725,23 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
     }
 
+    const fileMode = normalizeCaptureFileMode(options.fileMode);
+    const shootStage = normalizeShootStage(options.shootStage);
+    const captureSessionId = getOrCreateCaptureSession(database, {
+      jobId,
+      subjectId,
+      hotFolder,
+      shootStage,
+      fileMode,
+      storageRootPath: row.rootPath
+    });
+
     let imageId = null;
     const imageStatement = database.prepare(`
       INSERT INTO image_assets (
         job_id,
+        capture_session_id,
+        shoot_stage,
         original_path,
         current_path,
         filename,
@@ -6527,17 +6750,22 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         captured_at,
         metadata_json
       )
-      VALUES (?, ?, ?, ?, 'capture_hot_folder', 'imported', CURRENT_TIMESTAMP, ?);
+      VALUES (?, ?, ?, ?, ?, ?, 'capture_hot_folder', 'imported', CURRENT_TIMESTAMP, ?);
     `);
 
     try {
       imageStatement.run([
         jobId,
+        captureSessionId,
+        shootStage,
         relativeDestination,
         relativeDestination,
         path.basename(destinationPath),
         JSON.stringify({
-          rawPath: relativeRawDestination
+          rawPath: relativeRawDestination,
+          fileMode,
+          shootStage,
+          captureSessionId
         })
       ]);
       imageId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
@@ -6621,9 +6849,18 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       WHERE id = ?;
     `, [imageId, subjectId]);
 
+    database.run(`
+      UPDATE capture_sessions
+      SET active_subject_id = ?,
+          latest_image_asset_id = ?,
+          last_seen_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `, [subjectId, imageId, captureSessionId]);
+
     return {
       image: {
         id: imageId,
+        captureSessionId,
         subjectId,
         ref: row.ref,
         filename: path.basename(destinationPath),
@@ -6631,7 +6868,10 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         path: relativeDestination,
         dataUrl: imageDataUrl(destinationPath),
         rotationDegrees: 0,
-        selected: true
+        selected: true,
+        shootStage,
+        shootStageLabel: shootStageLabel(shootStage),
+        fileMode
       }
     };
   });
@@ -6640,6 +6880,9 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     jobId,
     subjectId,
     imageAssetId: result.image.id,
+    captureSessionId: result.image.captureSessionId,
+    shootStage: result.image.shootStage,
+    fileMode: result.image.fileMode,
     ref: result.image.ref,
     jpgPath: result.image.path,
     cr3Path: result.image.rawPath,
@@ -6653,10 +6896,23 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
   const fileMode = normalizeCaptureFileMode(options.fileMode);
+  const shootStage = normalizeShootStage(options.shootStage);
   const hotFolder = resolveWorkspacePath('CaptureHotFolder');
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
   }
+
+  let captureSessionId = null;
+  await writeSql((database) => {
+    captureSessionId = getOrCreateCaptureSession(database, {
+      jobId,
+      subjectId,
+      hotFolder,
+      shootStage,
+      fileMode
+    });
+    return { captureSessionId };
+  });
 
   const webContentsId = event.sender.id;
   closeCaptureWatcher(webContentsId);
@@ -6670,6 +6926,8 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     lastImportAt: 0,
     lastSourcePath: null,
     fileMode,
+    shootStage,
+    captureSessionId,
     watcher: null
   };
 
@@ -6704,7 +6962,8 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
           return;
         }
         const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
-          fileMode: watcherState.fileMode
+          fileMode: watcherState.fileMode,
+          shootStage: watcherState.shootStage
         });
         watcherState.lastSourcePath = sourcePath;
         watcherState.lastImportAt = Date.now();
@@ -6758,6 +7017,10 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     subjectId,
     hotFolder,
     fileMode
+    ,
+    shootStage,
+    shootStageLabel: shootStageLabel(shootStage),
+    captureSessionId
   };
 }
 
@@ -6790,6 +7053,7 @@ async function getCaptureSubjectImages(_event, subjectIdValue) {
     JOIN image_assets ia ON ia.id = si.image_asset_id
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     WHERE si.subject_id = ${subjectId}
+      AND ia.status != 'rejected'
     GROUP BY ia.id
     ORDER BY ia.id DESC
     LIMIT 2;
@@ -6820,7 +7084,7 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
 
   const result = await writeSql((database) => {
     const match = database.exec(`
-      SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId
+      SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
@@ -6829,6 +7093,9 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
 
     if (!match.length || !match[0].values.length) {
       throw new Error('Student and image must belong to the same job');
+    }
+    if (match[0].values[0][4] === 'rejected') {
+      throw new Error('Rejected images cannot be selected');
     }
 
     database.run(`
@@ -6883,13 +7150,150 @@ ipcMain.handle('capture:stop-watcher', stopCaptureWatcher);
 ipcMain.handle('capture:subject-images', getCaptureSubjectImages);
 ipcMain.handle('capture:select-image', selectCaptureImage);
 
+async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue = null) {
+  const imageId = numericId(imageIdValue);
+  const rejected = Boolean(rejectedValue);
+  const reason = rejected ? (optionalText(reasonValue, 500) || 'Rejected in linked image manager') : null;
+
+  const result = await writeSql((database) => {
+    const rows = rowsFromDatabase(database, `
+      SELECT ia.id, ia.job_id AS jobId
+      FROM image_assets ia
+      WHERE ia.id = ${imageId}
+      LIMIT 1;
+    `);
+    if (!rows.length) {
+      throw new Error('Image not found');
+    }
+
+    database.run(`
+      UPDATE image_assets
+      SET status = ?,
+          rejected_at = ${rejected ? 'CURRENT_TIMESTAMP' : 'NULL'},
+          rejected_reason = ?
+      WHERE id = ?;
+    `, [
+      rejected ? 'rejected' : 'imported',
+      reason,
+      imageId
+    ]);
+
+    if (rejected) {
+      const selectedRows = rowsFromDatabase(database, `
+        SELECT subject_id AS subjectId
+        FROM subject_images
+        WHERE image_asset_id = ${imageId}
+          AND selected = 1;
+      `);
+
+      selectedRows.forEach((selectedRow) => {
+        database.run(`
+          UPDATE subject_images
+          SET selected = 0
+          WHERE subject_id = ?;
+        `, [selectedRow.subjectId]);
+
+        const replacementRows = rowsFromDatabase(database, `
+          SELECT si.image_asset_id AS imageId
+          FROM subject_images si
+          JOIN image_assets ia ON ia.id = si.image_asset_id
+          WHERE si.subject_id = ${Number(selectedRow.subjectId)}
+            AND si.image_asset_id != ${imageId}
+            AND ia.status != 'rejected'
+          ORDER BY si.sort_order, ia.id DESC
+          LIMIT 1;
+        `);
+        const replacementId = replacementRows.length ? replacementRows[0].imageId : null;
+        if (replacementId) {
+          database.run(`
+            UPDATE subject_images
+            SET selected = 1,
+                sort_order = 0
+            WHERE subject_id = ?
+              AND image_asset_id = ?;
+          `, [selectedRow.subjectId, replacementId]);
+        }
+        database.run(`
+          UPDATE subjects
+          SET primary_image_asset_id = ?,
+              photographed_status = CASE WHEN ? IS NULL THEN 'unknown' ELSE 'photographed' END,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?;
+        `, [replacementId, replacementId, selectedRow.subjectId]);
+      });
+    }
+
+    return { imageId, jobId: rows[0].jobId, rejected };
+  });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  return result;
+}
+
+async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
+  const subjectId = numericId(subjectIdValue);
+  const imageId = numericId(imageIdValue);
+
+  const result = await writeSql((database) => {
+    const rows = rowsFromDatabase(database, `
+      SELECT s.job_id AS jobId, si.selected
+      FROM subjects s
+      JOIN subject_images si ON si.subject_id = s.id
+      WHERE s.id = ${subjectId}
+        AND si.image_asset_id = ${imageId}
+      LIMIT 1;
+    `);
+    if (!rows.length) {
+      throw new Error('Image is not linked to this student');
+    }
+
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [subjectId, imageId]);
+
+    const replacementRows = rowsFromDatabase(database, `
+      SELECT si.image_asset_id AS imageId
+      FROM subject_images si
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      WHERE si.subject_id = ${subjectId}
+        AND ia.status != 'rejected'
+      ORDER BY si.selected DESC, si.sort_order, ia.id DESC
+      LIMIT 1;
+    `);
+    const replacementId = replacementRows.length ? replacementRows[0].imageId : null;
+    if (replacementId) {
+      database.run(`
+        UPDATE subject_images
+        SET selected = CASE WHEN image_asset_id = ? THEN 1 ELSE 0 END,
+            sort_order = CASE WHEN image_asset_id = ? THEN 0 ELSE sort_order END
+        WHERE subject_id = ?;
+      `, [replacementId, replacementId, subjectId]);
+    }
+
+    database.run(`
+      UPDATE subjects
+      SET primary_image_asset_id = ?,
+          photographed_status = CASE WHEN ? IS NULL THEN 'unknown' ELSE 'photographed' END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `, [replacementId, replacementId, subjectId]);
+
+    return { subjectId, imageId, jobId: rows[0].jobId };
+  });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  return result;
+}
+
 async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
   return writeSql((database) => {
     const match = database.exec(`
-      SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId
+      SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
@@ -6898,6 +7302,9 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
 
     if (!match.length || !match[0].values.length) {
       throw new Error('Subject and image must belong to the same job');
+    }
+    if (match[0].values[0][4] === 'rejected') {
+      throw new Error('Rejected images cannot be selected');
     }
 
     database.run(`
@@ -6937,6 +7344,8 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
 }
 
 ipcMain.handle('image:link-subject', linkSubjectImage);
+ipcMain.handle('image:set-rejected', setImageRejected);
+ipcMain.handle('image:unlink-subject', unlinkSubjectImage);
 
 function resolveProjectPath(filePath) {
   if (!filePath) {

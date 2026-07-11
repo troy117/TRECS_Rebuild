@@ -160,6 +160,8 @@ CREATE TABLE IF NOT EXISTS capture_sessions (
   id INTEGER PRIMARY KEY,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   session_type TEXT NOT NULL CHECK (session_type IN ('onsite_laptop', 'server_envelope_scan', 'manual_import')),
+  shoot_stage TEXT NOT NULL DEFAULT 'main' CHECK (shoot_stage IN ('main', 'makeup', 'retake', 'other')),
+  file_mode TEXT NOT NULL DEFAULT 'jpg_raw' CHECK (file_mode IN ('jpg_raw', 'jpg_only')),
   workstation_name TEXT NOT NULL,
   user_name TEXT,
   hot_folder_path TEXT,
@@ -244,11 +246,15 @@ CREATE TABLE IF NOT EXISTS subject_codes (
 CREATE TABLE IF NOT EXISTS image_assets (
   id INTEGER PRIMARY KEY,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  capture_session_id INTEGER REFERENCES capture_sessions(id) ON DELETE SET NULL,
+  shoot_stage TEXT NOT NULL DEFAULT 'main' CHECK (shoot_stage IN ('main', 'makeup', 'retake', 'other')),
   original_path TEXT,
   current_path TEXT NOT NULL,
   filename TEXT NOT NULL,
   source TEXT NOT NULL DEFAULT 'import',
   status TEXT NOT NULL DEFAULT 'imported',
+  rejected_at TEXT,
+  rejected_reason TEXT,
   captured_at TEXT,
   imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   metadata_json TEXT,
@@ -474,6 +480,8 @@ CREATE INDEX IF NOT EXISTS idx_subjects_external_id ON subjects(external_id);
 CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id ON capture_sessions(job_id);
 CREATE INDEX IF NOT EXISTS idx_capture_sessions_status ON capture_sessions(status, sync_status);
 CREATE INDEX IF NOT EXISTS idx_image_assets_job_id ON image_assets(job_id);
+CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id ON image_assets(capture_session_id);
+CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage ON image_assets(job_id, shoot_stage);
 CREATE INDEX IF NOT EXISTS idx_image_import_events_job_id ON image_import_events(job_id);
 CREATE INDEX IF NOT EXISTS idx_image_import_events_status ON image_import_events(status);
 CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id ON envelope_scans(job_id);

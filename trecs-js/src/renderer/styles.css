@@ -1319,7 +1319,8 @@ dd {
 .envelope-entry-form input,
 .envelope-entry-form select,
 .envelope-entry-form textarea,
-.capture-entry-form input {
+.capture-entry-form input,
+.capture-entry-form select {
   border: 1px solid #cbd5df;
   border-radius: 6px;
   font: inherit;
@@ -1329,7 +1330,8 @@ dd {
 
 .envelope-entry-form input,
 .envelope-entry-form select,
-.capture-entry-form input {
+.capture-entry-form input,
+.capture-entry-form select {
   height: 38px;
 }
 
@@ -2069,6 +2071,25 @@ dd {
 .selected-linked-image {
   background: #eef9f3;
   border-color: #9bd8b6;
+}
+
+.rejected-linked-image {
+  background: #fff7f4;
+  border-color: #e8b6a8;
+  opacity: 0.82;
+}
+
+.linked-image-actions {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
+.linked-image-actions button {
+  cursor: pointer;
+  min-height: 30px;
+  padding: 5px 8px;
 }
 
 .workspace-fields {
