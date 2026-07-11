@@ -97,6 +97,7 @@ const schoolDataFilePath = document.getElementById('schoolDataFilePath');
 const schoolDataMapping = document.getElementById('schoolDataMapping');
 const schoolDataPreview = document.getElementById('schoolDataPreview');
 const schoolDataStatus = document.getElementById('schoolDataStatus');
+const schoolDataBlankCount = document.getElementById('schoolDataBlankCount');
 const cancelSchoolDataButton = document.getElementById('cancelSchoolDataButton');
 const browseSchoolDataButton = document.getElementById('browseSchoolDataButton');
 const confirmSchoolDataButton = document.getElementById('confirmSchoolDataButton');
@@ -557,6 +558,7 @@ function setWorkspaceMode(mode) {
   const envelopeOpen = mode === 'envelope';
   const adminOpen = mode === 'admin';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
+  jobStudentWorkspace.classList.toggle('capture-mode', captureOpen);
   captureWorkspace.hidden = !captureOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
@@ -1057,6 +1059,9 @@ function setSchoolDataModalVisible(visible) {
     jobsState.schoolDataImport = null;
     schoolDataFilePath.value = '';
     schoolDataStatus.textContent = '';
+    if (schoolDataBlankCount) {
+      schoolDataBlankCount.value = '0';
+    }
     schoolDataMapping.innerHTML = '<div class="empty-state">Choose a file to preview and map columns.</div>';
     schoolDataPreview.innerHTML = '';
     confirmSchoolDataButton.disabled = true;
@@ -1072,6 +1077,9 @@ function openSchoolDataImport(jobId) {
   };
   schoolDataFilePath.value = '';
   schoolDataStatus.textContent = '';
+  if (schoolDataBlankCount) {
+    schoolDataBlankCount.value = '0';
+  }
   schoolDataMapping.innerHTML = '<div class="empty-state">Choose a file to preview and map columns.</div>';
   schoolDataPreview.innerHTML = '';
   confirmSchoolDataButton.disabled = true;
@@ -1204,7 +1212,12 @@ async function confirmSchoolDataImport() {
       hasHeader: state.preview.hasHeader,
       mapping: state.mapping
     });
-    schoolDataStatus.textContent = `Imported ${formatNumber(result.created)} new and updated ${formatNumber(result.updated)} records.`;
+    const blankCount = Math.max(0, Math.floor(Number(schoolDataBlankCount ? schoolDataBlankCount.value : 0) || 0));
+    let blankResult = null;
+    if (blankCount > 0) {
+      blankResult = await trecsApi('createBlankSubjects').createBlankSubjects(state.jobId, blankCount);
+    }
+    schoolDataStatus.textContent = `Imported ${formatNumber(result.created)} new, updated ${formatNumber(result.updated)}, and added ${formatNumber(blankResult ? blankResult.count : 0)} blank records.`;
     await loadDashboard();
     await loadJobs();
     jobsState.selectedJobId = state.jobId;
@@ -3862,6 +3875,7 @@ async function performPrepareOnsiteSetup(jobId) {
       packagePath: result.packagePath,
       subjects: result.counts.subjects
     };
+    alert(`Onsite setup created.\n\n${result.packagePath}`);
   } catch (error) {
     jobsState.lastLaptopPackage = {
       jobId,
