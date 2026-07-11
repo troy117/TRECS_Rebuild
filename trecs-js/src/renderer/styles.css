@@ -730,6 +730,16 @@ dd {
   padding: 14px;
 }
 
+.image-lightbox-actions {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr auto 1fr;
+}
+
+.image-lightbox-actions button:last-child {
+  justify-self: end;
+}
+
 .image-lightbox-content img {
   background: #fff;
   border: 1px solid #d7e0e8;
@@ -2023,8 +2033,8 @@ dd {
   border-bottom: 1px solid #d7e0e8;
   display: flex;
   justify-content: center;
-  height: min(36vh, 320px);
-  min-height: 210px;
+  height: min(45vh, 400px);
+  min-height: 260px;
   padding: 10px;
 }
 
@@ -2043,12 +2053,22 @@ dd {
   max-height: none;
   max-width: none;
   transform: rotate(-90deg);
-  width: min(31vh, 300px);
+  width: min(39vh, 375px);
 }
 
 .linked-image-row,
 [data-hover-image-id] {
   cursor: zoom-in;
+}
+
+.linked-image-row {
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.selected-linked-image {
+  background: #eef9f3;
+  border-color: #9bd8b6;
 }
 
 .workspace-fields {

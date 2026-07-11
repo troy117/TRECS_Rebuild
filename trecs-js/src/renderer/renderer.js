@@ -67,6 +67,9 @@ const imageLightboxModal = document.getElementById('imageLightboxModal');
 const imageLightboxTitle = document.getElementById('imageLightboxTitle');
 const imageLightboxContent = document.getElementById('imageLightboxContent');
 const closeImageLightboxButton = document.getElementById('closeImageLightboxButton');
+const previousLightboxImageButton = document.getElementById('previousLightboxImageButton');
+const nextLightboxImageButton = document.getElementById('nextLightboxImageButton');
+const selectLightboxImageButton = document.getElementById('selectLightboxImageButton');
 const imageHoverPreview = document.getElementById('imageHoverPreview');
 const studentFieldSettingsModal = document.getElementById('studentFieldSettingsModal');
 const studentFieldSettingsForm = document.getElementById('studentFieldSettingsForm');
@@ -194,6 +197,9 @@ let jobsState = {
   lastCroppedImageSync: null,
   imagePreviewCache: new Map(),
   imageHoverToken: 0,
+  lightboxImageIds: [],
+  lightboxImageId: null,
+  lightboxSubjectId: null,
   studentFieldSettings: null,
   studentFieldSettingsScope: 'global',
   endOfDayReview: null,
@@ -1629,14 +1635,52 @@ function setLandscapeRotation(image) {
   }, { once: true });
 }
 
-async function openImageLightbox(imageId) {
+function linkedImagesForSubject(subjectId) {
+  return rowsFor(jobsState.detail && jobsState.detail.subjectImages ? jobsState.detail.subjectImages : [], 'subjectId', subjectId);
+}
+
+function lightboxImagesForSubject(subjectId, fallbackImageId) {
+  const linkedImages = linkedImagesForSubject(subjectId);
+  const ids = linkedImages.map((image) => Number(image.imageAssetId)).filter(Boolean);
+  if (fallbackImageId && !ids.includes(Number(fallbackImageId))) {
+    ids.unshift(Number(fallbackImageId));
+  }
+  return ids;
+}
+
+function renderImageLightboxActions() {
+  const hasList = jobsState.lightboxImageIds.length > 1;
+  const canSelect = Boolean(jobsState.lightboxSubjectId && jobsState.lightboxImageId);
+  previousLightboxImageButton.disabled = !hasList;
+  nextLightboxImageButton.disabled = !hasList;
+  selectLightboxImageButton.hidden = !canSelect;
+
+  if (canSelect) {
+    const linkedImage = linkedImagesForSubject(jobsState.lightboxSubjectId)
+      .find((image) => Number(image.imageAssetId) === Number(jobsState.lightboxImageId));
+    selectLightboxImageButton.disabled = Boolean(linkedImage && linkedImage.selected);
+    selectLightboxImageButton.textContent = linkedImage && linkedImage.selected
+      ? 'Selected Image'
+      : 'Use As Selected Image';
+  }
+}
+
+async function openImageLightbox(imageId, options = {}) {
   if (!imageId || !imageLightboxModal) {
     return;
   }
 
+  const subjectId = options.subjectId || jobsState.selectedSubjectId || null;
+  jobsState.lightboxSubjectId = subjectId;
+  jobsState.lightboxImageId = Number(imageId);
+  jobsState.lightboxImageIds = options.imageIds && options.imageIds.length
+    ? options.imageIds.map(Number)
+    : lightboxImagesForSubject(subjectId, imageId);
+
   imageLightboxModal.hidden = false;
   imageLightboxTitle.textContent = 'Image Preview';
   imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
+  renderImageLightboxActions();
 
   try {
     const preview = await imagePreviewForId(imageId);
@@ -1648,6 +1692,7 @@ async function openImageLightbox(imageId) {
     imageLightboxTitle.textContent = preview.filename || 'Image Preview';
     imageLightboxContent.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Image preview')}">`;
     setLandscapeRotation(imageLightboxContent.querySelector('img'));
+    renderImageLightboxActions();
   } catch (error) {
     imageLightboxContent.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
@@ -1657,7 +1702,43 @@ async function openImageLightbox(imageId) {
 function closeImageLightbox() {
   if (imageLightboxModal) {
     imageLightboxModal.hidden = true;
+    jobsState.lightboxImageIds = [];
+    jobsState.lightboxImageId = null;
+    jobsState.lightboxSubjectId = null;
     imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
+  }
+}
+
+function moveLightboxImage(offset) {
+  const ids = jobsState.lightboxImageIds;
+  if (!ids.length || !jobsState.lightboxImageId) {
+    return;
+  }
+  const currentIndex = Math.max(0, ids.findIndex((id) => id === Number(jobsState.lightboxImageId)));
+  const nextIndex = (currentIndex + offset + ids.length) % ids.length;
+  openImageLightbox(ids[nextIndex], {
+    subjectId: jobsState.lightboxSubjectId,
+    imageIds: ids
+  });
+}
+
+async function selectCurrentLightboxImage() {
+  if (!jobsState.lightboxSubjectId || !jobsState.lightboxImageId) {
+    return;
+  }
+  const originalText = selectLightboxImageButton.textContent;
+  selectLightboxImageButton.disabled = true;
+  selectLightboxImageButton.textContent = 'Saving...';
+  try {
+    await saveSubjectImageLink(jobsState.lightboxSubjectId, jobsState.lightboxImageId, null);
+    await openImageLightbox(jobsState.lightboxImageId, { subjectId: jobsState.lightboxSubjectId });
+  } catch (error) {
+    selectLightboxImageButton.textContent = 'Failed';
+    console.error(error);
+  } finally {
+    if (selectLightboxImageButton.textContent === 'Saving...') {
+      selectLightboxImageButton.textContent = originalText;
+    }
   }
 }
 
@@ -1755,11 +1836,12 @@ async function loadWorkspacePhoto(imageId) {
       return;
     }
 
-    panel.innerHTML = `<img data-hover-image-id="${imageId}" src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
+    panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
     const image = panel.querySelector('img');
     setLandscapeRotation(image);
-    image.addEventListener('dblclick', () => openImageLightbox(imageId));
-    bindHoverImagePreviews(panel);
+    image.addEventListener('dblclick', () => openImageLightbox(imageId, {
+      subjectId: jobsState.selectedSubjectId
+    }));
   } catch (error) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
@@ -1823,9 +1905,12 @@ function renderWorkspaceOrderDetail(subject) {
     ${renderMiniSection(
       'Linked Images',
       images.map((image) => `
-        <div class="linked-image-row" data-hover-image-id="${image.imageAssetId}">
+        <div class="linked-image-row ${image.selected ? 'selected-linked-image' : ''}" data-hover-image-id="${image.imageAssetId}">
           <span>${image.role}${image.selected ? ' / selected' : ''}</span>
           <strong>${image.filename}</strong>
+          <button data-workspace-select-image="${image.imageAssetId}" type="button" ${image.selected ? 'disabled' : ''}>
+            ${image.selected ? 'Selected' : 'Set Selected'}
+          </button>
         </div>
       `),
       'No linked images.'
@@ -1845,6 +1930,11 @@ function renderWorkspaceOrderDetail(subject) {
   workspaceOrderDetail.querySelectorAll('[data-workspace-order-delete]').forEach((button) => {
     button.addEventListener('click', () => {
       deleteWorkspaceOrder(Number(button.dataset.workspaceOrderDelete));
+    });
+  });
+  workspaceOrderDetail.querySelectorAll('[data-workspace-select-image]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await saveSubjectImageLink(subject.id, Number(button.dataset.workspaceSelectImage), button);
     });
   });
   bindHoverImagePreviews(workspaceOrderDetail);
@@ -5182,6 +5272,9 @@ cancelEnvelopeConfirmButton.addEventListener('click', () => {
 });
 closeOrderEnvelopeButton.addEventListener('click', closeOrderEnvelope);
 closeImageLightboxButton.addEventListener('click', closeImageLightbox);
+previousLightboxImageButton.addEventListener('click', () => moveLightboxImage(-1));
+nextLightboxImageButton.addEventListener('click', () => moveLightboxImage(1));
+selectLightboxImageButton.addEventListener('click', selectCurrentLightboxImage);
 imageLightboxModal.addEventListener('click', (event) => {
   if (event.target === imageLightboxModal) {
     closeImageLightbox();
@@ -5223,6 +5316,10 @@ applyStudentFieldsToAllButton.addEventListener('click', async () => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
     closeImageLightbox();
+  } else if (event.key === 'ArrowLeft' && imageLightboxModal && !imageLightboxModal.hidden) {
+    moveLightboxImage(-1);
+  } else if (event.key === 'ArrowRight' && imageLightboxModal && !imageLightboxModal.hidden) {
+    moveLightboxImage(1);
   } else if (event.key === 'Escape' && studentFieldSettingsModal && !studentFieldSettingsModal.hidden) {
     closeStudentFieldSettings();
   }
