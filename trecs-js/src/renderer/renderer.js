@@ -4027,6 +4027,7 @@ async function performGenerateCroppedMedium(jobId) {
 
   try {
     const result = await trecsApi('generateCroppedMediumImages').generateCroppedMediumImages(jobId);
+    jobsState.imagePreviewCache.clear();
     jobsState.lastCroppedMediumGeneration = {
       jobId,
       status: 'done',
@@ -4164,6 +4165,7 @@ async function performSyncCroppedImages(jobId) {
 
   try {
     const result = await trecsApi('syncCroppedImages').syncCroppedImages(jobId);
+    jobsState.imagePreviewCache.clear();
     const folderCounts = Object.fromEntries(
       result.folders.map((folder) => [folder.versionType, folder])
     );

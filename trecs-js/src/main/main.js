@@ -3314,7 +3314,9 @@ function scanCroppedImageFolder(jobRoot, folder, versionType, imageRows) {
     entries.push({
       imageAssetId: image.id,
       versionType,
-      path: path.relative(projectRoot, sourcePath)
+      path: path.relative(projectRoot, sourcePath),
+      width: versionType === 'cropped_med' ? 480 : null,
+      height: versionType === 'cropped_med' ? 600 : null
     });
     summary.matched += 1;
   });
@@ -3350,15 +3352,17 @@ async function syncCroppedImages(_event, jobIdValue) {
         image_asset_id,
         version_type,
         path,
+        width,
+        height,
         created_at
       )
-      VALUES (?, ?, ?, CURRENT_TIMESTAMP);
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
     `);
 
     try {
       entries.forEach((entry) => {
         deleteStatement.run([entry.imageAssetId, entry.versionType]);
-        insertStatement.run([entry.imageAssetId, entry.versionType, entry.path]);
+        insertStatement.run([entry.imageAssetId, entry.versionType, entry.path, entry.width, entry.height]);
       });
     } finally {
       deleteStatement.free();
@@ -7743,12 +7747,24 @@ async function getImagePreview(_event, imageIdValue) {
     SELECT
       ia.filename,
       COALESCE(
+        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
         MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
         ia.current_path
       ) AS path,
-      MAX(CASE WHEN iv.version_type = 'original' THEN iv.width ELSE NULL END) AS width,
-      MAX(CASE WHEN iv.version_type = 'original' THEN iv.height ELSE NULL END) AS height,
+      COALESCE(
+        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.width ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.width ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'original' THEN iv.width ELSE NULL END)
+      ) AS width,
+      COALESCE(
+        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.height ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.height ELSE NULL END),
+        MAX(CASE WHEN iv.version_type = 'original' THEN iv.height ELSE NULL END)
+      ) AS height,
       CASE
+        WHEN MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_med'
+        WHEN MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_large'
         WHEN MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'original'
         ELSE 'current'
       END AS versionType
