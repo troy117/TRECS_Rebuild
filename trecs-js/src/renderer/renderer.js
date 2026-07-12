@@ -1430,7 +1430,8 @@ function studentDetailFieldRows(subject, fields) {
     ['homeroom', 'Homeroom', subject.homeroom || ''],
     ['track', 'Track', subject.track || ''],
     ['team', 'Team', subject.team || ''],
-    ['subjectType', 'Type', formatType(subject.subjectType || 'student')]
+    ['subjectType', 'Type', formatType(subject.subjectType || 'student')],
+    ['photographedStatus', 'Photo Status', formatStatusLabel(subject.photographedStatus || 'unknown')]
   ];
 
   return rows
