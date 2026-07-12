@@ -2323,7 +2323,7 @@ function renderImageReviewWorkspace() {
           ${tableHtml(
             ['Filename', 'Reason', 'Links', 'Refs'],
             reviewImages.map((image) => `
-              <tr class="${Number(image.id) === Number(jobsState.selectedImageId) ? 'selected-row' : ''}" data-capture-review-image-id="${image.id}" data-hover-image-id="${image.id}">
+              <tr class="${Number(image.id) === Number(jobsState.selectedImageId) ? 'selected-row' : ''}" data-capture-review-image-id="${image.id}">
                 <td>${escapeHtml(image.filename || '')}</td>
                 <td>${escapeHtml(image.reason || (Number(image.linkedSubjects) === 0 ? 'Unlinked image' : 'Review'))}</td>
                 <td>${formatNumber(image.linkedSubjects || 0)}</td>
@@ -2344,7 +2344,6 @@ function renderImageReviewWorkspace() {
     });
   });
 
-  bindHoverImagePreviews(imageReviewWorkspace);
   bindImagePreviewLinkForm({ mode: 'review' });
   loadReviewSubjectPreview();
   loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false, layout: 'review' });
@@ -5088,6 +5087,11 @@ async function loadImagePreview(imageId, options = {}) {
   const previewImage = panel.querySelector('img');
   if (previewImage) {
     setLandscapeRotation(previewImage);
+    if (options.layout === 'review') {
+      previewImage.addEventListener('dblclick', () => {
+        openImageLightbox(imageId);
+      });
+    }
   }
 
   if (options.includeLinkPanel !== false) {
