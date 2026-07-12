@@ -1758,18 +1758,26 @@ function fitRotatedImageToFrame(image) {
 }
 
 function setLandscapeRotation(image, options = {}) {
+  if (!image) {
+    return;
+  }
+  image.classList.add('orientation-pending');
   const apply = () => {
     const isLandscape = image.naturalWidth > image.naturalHeight;
     image.classList.toggle('rotate-landscape-ccw', isLandscape);
     if (options.fitRotatedToFrame) {
       fitRotatedImageToFrame(image);
     }
+    image.classList.remove('orientation-pending');
   };
 
   if (image.complete && image.naturalWidth) {
     apply();
   } else {
     image.addEventListener('load', apply, { once: true });
+    image.addEventListener('error', () => {
+      image.classList.remove('orientation-pending');
+    }, { once: true });
   }
 }
 
@@ -2507,10 +2515,7 @@ async function loadCaptureSubjectPhoto(imageId) {
     }
 
     panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Student photo')}">`;
-    const image = panel.querySelector('img');
-    image.addEventListener('load', () => {
-      image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
-    }, { once: true });
+    setLandscapeRotation(panel.querySelector('img'));
   } catch (error) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);

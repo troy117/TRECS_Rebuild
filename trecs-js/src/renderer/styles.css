@@ -13,6 +13,10 @@
   display: none !important;
 }
 
+img.orientation-pending {
+  opacity: 0;
+}
+
 body {
   margin: 0;
   min-width: 980px;
