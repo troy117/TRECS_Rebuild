@@ -209,6 +209,7 @@ let jobsState = {
   subjectSearch: '',
   imageSearch: '',
   imageLinkSubjectSearch: '',
+  imageReviewSearchTimer: null,
   lastLaptopPackage: null,
   lastEndOfDayPackage: null,
   lastCroppedImageSync: null,
@@ -5532,7 +5533,7 @@ function selectedImageReviewSubject() {
 
 function imageReviewSubjectResults() {
   const search = jobsState.imageLinkSubjectSearch.trim();
-  if (!search || !jobsState.detail) {
+  if (search.length < 2 || !jobsState.detail) {
     return [];
   }
   return (jobsState.detail.subjects || [])
@@ -5662,17 +5663,16 @@ function bindImagePreviewLinkForm(options = {}) {
   form.elements.subjectSearch.addEventListener('input', () => {
     jobsState.imageLinkSubjectSearch = form.elements.subjectSearch.value;
     if (mode === 'review') {
-      const resultsPanel = form.querySelector('.image-review-search-results');
-      const results = imageReviewSubjectResults();
-      if (resultsPanel) {
-        resultsPanel.innerHTML = imageReviewSubjectResultHtml(results);
-        resultsPanel.hidden = !results.length;
-        bindImageReviewSubjectButtons(form);
-      }
-      if (results.length) {
-        jobsState.selectedImageSubjectId = results[0].id;
-        loadReviewSubjectPreview();
-      }
+      clearTimeout(jobsState.imageReviewSearchTimer);
+      jobsState.imageReviewSearchTimer = setTimeout(() => {
+        const resultsPanel = form.querySelector('.image-review-search-results');
+        const results = imageReviewSubjectResults();
+        if (resultsPanel) {
+          resultsPanel.innerHTML = imageReviewSubjectResultHtml(results);
+          resultsPanel.hidden = !results.length;
+          bindImageReviewSubjectButtons(form);
+        }
+      }, 80);
     } else {
       loadImagePreview(jobsState.selectedImageId);
     }
