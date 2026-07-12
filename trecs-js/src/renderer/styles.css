@@ -2827,6 +2827,7 @@ dd {
   display: grid;
   gap: 12px;
   grid-template-columns: minmax(340px, 1.15fr) minmax(220px, 0.85fr);
+  height: 100%;
   min-height: 0;
   padding: 12px;
 }
@@ -2837,6 +2838,7 @@ dd {
   border: 1px solid #d7e0e8;
   border-radius: 6px;
   display: flex;
+  height: 100%;
   justify-content: center;
   min-height: 340px;
   overflow: hidden;
@@ -2844,10 +2846,13 @@ dd {
 }
 
 .image-review-selected-photo img {
+  border: 0;
   display: block;
+  margin: 0;
   max-height: 100%;
   max-width: 100%;
   object-fit: contain;
+  width: auto;
 }
 
 .image-review-selected-photo img.rotate-landscape-ccw {
@@ -2872,7 +2877,7 @@ dd {
 .image-review-main {
   display: grid;
   gap: 12px;
-  grid-template-rows: minmax(380px, 1.25fr) minmax(150px, 0.75fr);
+  grid-template-rows: minmax(380px, 1fr) minmax(150px, 0.7fr);
   overflow: hidden;
   padding: 12px;
 }
@@ -2881,6 +2886,14 @@ dd {
   min-width: 0;
 }
 
+.image-review-list thead th {
+  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 .image-review-preview {
+  align-self: stretch;
   padding-bottom: 10px;
 }

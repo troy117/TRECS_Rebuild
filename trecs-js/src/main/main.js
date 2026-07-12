@@ -6603,6 +6603,147 @@ function captureDestinationName(ref, sourcePath) {
   return envelopeDestinationName(ref, sourcePath);
 }
 
+function stripCaptureReferencePrefix(filename, ref) {
+  const text = String(filename || '').trim();
+  const reference = String(ref || '').trim();
+  if (!text || !reference) {
+    return text;
+  }
+
+  const lowerText = text.toLowerCase();
+  const lowerReference = reference.toLowerCase();
+  for (const separator of ['-', '_']) {
+    const prefix = `${lowerReference}${separator}`;
+    if (lowerText.startsWith(prefix) && text.length > prefix.length) {
+      return text.slice(prefix.length);
+    }
+  }
+  return text;
+}
+
+function metadataValue(metadataJson, key) {
+  try {
+    const metadata = JSON.parse(metadataJson || '{}');
+    return metadata && metadata[key] ? String(metadata[key]) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function renameUnlinkedCaptureImage(database, input) {
+  const imageId = numericId(input.imageId);
+  const ref = String(input.ref || '').trim();
+  if (!ref) {
+    return null;
+  }
+
+  const rows = rowsFromDatabase(database, `
+    SELECT
+      ia.id,
+      ia.job_id AS jobId,
+      ia.filename,
+      ia.current_path AS currentPath,
+      ia.original_path AS originalPath,
+      ia.metadata_json AS metadataJson,
+      j.root_path AS rootPath,
+      (
+        SELECT COUNT(*)
+        FROM subject_images si
+        WHERE si.image_asset_id = ia.id
+      ) AS remainingLinks
+    FROM image_assets ia
+    JOIN jobs j ON j.id = ia.job_id
+    WHERE ia.id = ${imageId}
+    LIMIT 1;
+  `);
+  if (!rows.length || Number(rows[0].remainingLinks || 0) > 0) {
+    return null;
+  }
+
+  const row = rows[0];
+  const currentPath = resolveWorkspacePath(row.currentPath);
+  if (!fs.existsSync(currentPath)) {
+    return null;
+  }
+
+  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), 'Images');
+  const currentFolder = path.dirname(currentPath);
+  if (path.resolve(currentFolder).toLowerCase() !== path.resolve(jobImagesFolder).toLowerCase()) {
+    return null;
+  }
+
+  const newFilename = stripCaptureReferencePrefix(path.basename(currentPath), ref);
+  if (!newFilename || newFilename === path.basename(currentPath)) {
+    return null;
+  }
+
+  const destinationPath = uniquePath(currentFolder, newFilename);
+  moveFile(currentPath, destinationPath);
+  const relativeDestination = path.relative(projectRoot, destinationPath);
+  const oldCurrentPath = row.currentPath;
+  const oldOriginalPath = row.originalPath;
+  const originalRawPath = metadataValue(row.metadataJson, 'rawPath');
+  let metadataJson = row.metadataJson;
+  let relativeRawDestination = null;
+
+  if (originalRawPath) {
+    const rawPath = resolveWorkspacePath(originalRawPath);
+    if (fs.existsSync(rawPath) && path.resolve(path.dirname(rawPath)).toLowerCase() === path.resolve(jobImagesFolder).toLowerCase()) {
+      const rawFilename = stripCaptureReferencePrefix(path.basename(rawPath), ref);
+      if (rawFilename && rawFilename !== path.basename(rawPath)) {
+        const rawDestinationPath = uniquePath(path.dirname(rawPath), rawFilename);
+        moveFile(rawPath, rawDestinationPath);
+        relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
+        try {
+          const metadata = JSON.parse(row.metadataJson || '{}');
+          metadata.rawPath = relativeRawDestination;
+          metadataJson = JSON.stringify(metadata);
+        } catch (_error) {
+          metadataJson = row.metadataJson;
+        }
+      }
+    }
+  }
+
+  database.run(`
+    UPDATE image_assets
+    SET current_path = ?,
+        original_path = CASE WHEN original_path = ? THEN ? ELSE original_path END,
+        filename = ?,
+        metadata_json = ?
+    WHERE id = ?;
+  `, [
+    relativeDestination,
+    oldCurrentPath,
+    relativeDestination,
+    path.basename(destinationPath),
+    metadataJson,
+    imageId
+  ]);
+
+  database.run(`
+    UPDATE image_versions
+    SET path = ?
+    WHERE image_asset_id = ?
+      AND path = ?;
+  `, [relativeDestination, imageId, oldCurrentPath]);
+
+  if (oldOriginalPath && oldOriginalPath !== oldCurrentPath) {
+    database.run(`
+      UPDATE image_versions
+      SET path = ?
+      WHERE image_asset_id = ?
+        AND path = ?;
+    `, [relativeDestination, imageId, oldOriginalPath]);
+  }
+
+  return {
+    filename: path.basename(destinationPath),
+    currentPath: relativeDestination,
+    rawPath: relativeRawDestination
+  };
+}
+
 function getOrCreateCaptureSession(database, input) {
   const jobId = numericId(input.jobId);
   const shootStage = normalizeShootStage(input.shootStage);
@@ -7234,7 +7375,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
 
   const result = await writeSql((database) => {
     const rows = rowsFromDatabase(database, `
-      SELECT s.job_id AS jobId, si.selected
+      SELECT s.job_id AS jobId, s.legacy_ref_num AS ref, si.selected
       FROM subjects s
       JOIN subject_images si ON si.subject_id = s.id
       WHERE s.id = ${subjectId}
@@ -7278,7 +7419,12 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [replacementId, replacementId, subjectId]);
 
-    return { subjectId, imageId, jobId: rows[0].jobId };
+    const renameResult = renameUnlinkedCaptureImage(database, {
+      imageId,
+      ref: rows[0].ref
+    });
+
+    return { subjectId, imageId, jobId: rows[0].jobId, renameResult };
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
