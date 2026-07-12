@@ -728,13 +728,13 @@ dd {
 
 .crop-tool-card {
   max-height: calc(100vh - 32px);
-  width: min(92vw, 900px);
+  width: min(96vw, 1120px);
 }
 
 .crop-tool-layout {
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(360px, 1fr) 240px;
+  grid-template-columns: minmax(560px, 1fr) 240px;
   padding: 16px;
 }
 
@@ -745,7 +745,7 @@ dd {
   border-radius: 6px;
   display: flex;
   justify-content: center;
-  min-height: min(68vh, 620px);
+  min-height: min(80vh, 820px);
   overflow: hidden;
 }
 
@@ -754,8 +754,8 @@ dd {
   border: 1px solid #cbd5df;
   border-radius: 4px;
   cursor: grab;
-  height: min(66vh, 600px);
-  max-height: 600px;
+  height: min(78vh, 800px);
+  max-height: 800px;
   max-width: 100%;
   width: auto;
 }

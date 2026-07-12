@@ -77,6 +77,7 @@ const cropToolModal = document.getElementById('cropToolModal');
 const cropToolCanvas = document.getElementById('cropToolCanvas');
 const closeCropToolButton = document.getElementById('closeCropToolButton');
 const chooseCropToolImageButton = document.getElementById('chooseCropToolImageButton');
+const rotateCropToolButton = document.getElementById('rotateCropToolButton');
 const cropToolZoom = document.getElementById('cropToolZoom');
 const resetCropToolButton = document.getElementById('resetCropToolButton');
 const saveCropToolButton = document.getElementById('saveCropToolButton');
@@ -229,6 +230,7 @@ let jobsState = {
     image: null,
     filename: '',
     sourcePath: '',
+    rotation: 0,
     zoom: 1,
     minZoom: 1,
     offsetX: 0,
@@ -4066,12 +4068,28 @@ function cropToolContext() {
   return cropToolCanvas ? cropToolCanvas.getContext('2d') : null;
 }
 
-function cropToolBaseScale() {
+function cropToolRotation() {
+  return ((Number(jobsState.cropTool.rotation) || 0) % 360 + 360) % 360;
+}
+
+function cropToolOrientedSize() {
   const image = jobsState.cropTool.image;
-  if (!image || !cropToolCanvas) {
+  if (!image) {
+    return { width: 1, height: 1 };
+  }
+  const rotatedSideways = cropToolRotation() === 90 || cropToolRotation() === 270;
+  return {
+    width: rotatedSideways ? image.naturalHeight : image.naturalWidth,
+    height: rotatedSideways ? image.naturalWidth : image.naturalHeight
+  };
+}
+
+function cropToolBaseScale() {
+  if (!jobsState.cropTool.image || !cropToolCanvas) {
     return 1;
   }
-  return Math.max(cropToolCanvas.width / image.naturalWidth, cropToolCanvas.height / image.naturalHeight);
+  const size = cropToolOrientedSize();
+  return Math.max(cropToolCanvas.width / size.width, cropToolCanvas.height / size.height);
 }
 
 function clampCropToolOffsets() {
@@ -4080,14 +4098,36 @@ function clampCropToolOffsets() {
     return;
   }
   const scale = cropToolBaseScale() * jobsState.cropTool.zoom;
-  const drawWidth = image.naturalWidth * scale;
-  const drawHeight = image.naturalHeight * scale;
+  const size = cropToolOrientedSize();
+  const drawWidth = size.width * scale;
+  const drawHeight = size.height * scale;
   const minX = Math.min(0, cropToolCanvas.width - drawWidth);
   const maxX = Math.max(0, cropToolCanvas.width - drawWidth);
   const minY = Math.min(0, cropToolCanvas.height - drawHeight);
   const maxY = Math.max(0, cropToolCanvas.height - drawHeight);
   jobsState.cropTool.offsetX = Math.min(maxX, Math.max(minX, jobsState.cropTool.offsetX));
   jobsState.cropTool.offsetY = Math.min(maxY, Math.max(minY, jobsState.cropTool.offsetY));
+}
+
+function drawCropToolImage(context, image, x, y, scale) {
+  const rawWidth = image.naturalWidth * scale;
+  const rawHeight = image.naturalHeight * scale;
+  const rotation = cropToolRotation();
+
+  context.save();
+  context.translate(x, y);
+  if (rotation === 90) {
+    context.translate(rawHeight, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    context.translate(rawWidth, rawHeight);
+    context.rotate(Math.PI);
+  } else if (rotation === 270) {
+    context.translate(0, rawWidth);
+    context.rotate(-Math.PI / 2);
+  }
+  context.drawImage(image, 0, 0, rawWidth, rawHeight);
+  context.restore();
 }
 
 function drawCropTool() {
@@ -4112,13 +4152,7 @@ function drawCropTool() {
   const scale = cropToolBaseScale() * jobsState.cropTool.zoom;
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
-  context.drawImage(
-    image,
-    jobsState.cropTool.offsetX,
-    jobsState.cropTool.offsetY,
-    image.naturalWidth * scale,
-    image.naturalHeight * scale
-  );
+  drawCropToolImage(context, image, jobsState.cropTool.offsetX, jobsState.cropTool.offsetY, scale);
 
   context.strokeStyle = 'rgba(255, 255, 255, 0.9)';
   context.lineWidth = 2;
@@ -4147,8 +4181,9 @@ function resetCropToolImage() {
   jobsState.cropTool.zoom = 1;
   jobsState.cropTool.minZoom = 1;
   const scale = cropToolBaseScale();
-  jobsState.cropTool.offsetX = (cropToolCanvas.width - image.naturalWidth * scale) / 2;
-  jobsState.cropTool.offsetY = (cropToolCanvas.height - image.naturalHeight * scale) / 2;
+  const size = cropToolOrientedSize();
+  jobsState.cropTool.offsetX = (cropToolCanvas.width - size.width * scale) / 2;
+  jobsState.cropTool.offsetY = (cropToolCanvas.height - size.height * scale) / 2;
   if (cropToolZoom) {
     cropToolZoom.disabled = false;
     cropToolZoom.value = '1';
@@ -4158,6 +4193,9 @@ function resetCropToolImage() {
   }
   if (saveCropToolButton) {
     saveCropToolButton.disabled = false;
+  }
+  if (rotateCropToolButton) {
+    rotateCropToolButton.disabled = false;
   }
   drawCropTool();
 }
@@ -4189,6 +4227,7 @@ async function chooseCropToolImage() {
     jobsState.cropTool.image = image;
     jobsState.cropTool.filename = result.filename || '';
     jobsState.cropTool.sourcePath = result.filePath || '';
+    jobsState.cropTool.rotation = 0;
     resetCropToolImage();
     setCropToolStatus(`${result.filename || 'Image loaded'} - drag to position, adjust zoom, then save.`);
   };
@@ -4214,12 +4253,12 @@ async function saveCropToolImage() {
   const scale = cropToolBaseScale() * jobsState.cropTool.zoom * multiplier;
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = 'high';
-  context.drawImage(
+  drawCropToolImage(
+    context,
     image,
     jobsState.cropTool.offsetX * multiplier,
     jobsState.cropTool.offsetY * multiplier,
-    image.naturalWidth * scale,
-    image.naturalHeight * scale
+    scale
   );
 
   setCropToolStatus('Saving crop...');
@@ -5897,6 +5936,17 @@ if (chooseCropToolImageButton) {
 
 if (resetCropToolButton) {
   resetCropToolButton.addEventListener('click', resetCropToolImage);
+}
+
+if (rotateCropToolButton) {
+  rotateCropToolButton.addEventListener('click', () => {
+    if (!jobsState.cropTool.image) {
+      return;
+    }
+    jobsState.cropTool.rotation = (cropToolRotation() + 270) % 360;
+    resetCropToolImage();
+    setCropToolStatus(`${jobsState.cropTool.filename || 'Image'} rotated 90 degrees counter clockwise.`);
+  });
 }
 
 if (saveCropToolButton) {
