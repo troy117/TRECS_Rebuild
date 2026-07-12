@@ -566,6 +566,12 @@
                     <canvas id="cropToolCanvas" width="640" height="800"></canvas>
                   </div>
                   <div class="crop-tool-controls">
+                    <button id="chooseCropToolInputFolderButton" type="button">Input Folder</button>
+                    <button id="chooseCropToolOutputFolderButton" type="button">Output Folder</button>
+                    <div id="cropToolFolderSummary" class="crop-tool-folder-summary">No batch folders selected.</div>
+                    <div id="cropToolImageList" class="crop-tool-image-list">
+                      <div class="empty-state">No input folder loaded.</div>
+                    </div>
                     <button id="chooseCropToolImageButton" type="button">Open Image</button>
                     <button id="rotateCropToolButton" type="button" disabled>Rotate 90 CCW</button>
                     <label>

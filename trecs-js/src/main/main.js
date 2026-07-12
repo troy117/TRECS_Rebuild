@@ -7600,6 +7600,68 @@ async function chooseCropToolImage() {
   };
 }
 
+function cropToolImageFiles(folderPath) {
+  return fs.readdirSync(folderPath)
+    .filter((name) => ['.jpg', '.jpeg', '.png'].includes(path.extname(name).toLowerCase()))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    .map((name) => ({
+      filename: name,
+      filePath: path.join(folderPath, name)
+    }));
+}
+
+function cropToolImagePayload(filePath) {
+  const bytes = fs.readFileSync(filePath);
+  return {
+    canceled: false,
+    filePath,
+    filename: path.basename(filePath),
+    dataUrl: `data:${mimeTypeFor(filePath)};base64,${bytes.toString('base64')}`
+  };
+}
+
+async function chooseCropToolInputFolder() {
+  const result = await dialog.showOpenDialog({
+    title: 'Choose Crop Input Folder',
+    properties: ['openDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const folderPath = result.filePaths[0];
+  return {
+    canceled: false,
+    folderPath,
+    files: cropToolImageFiles(folderPath)
+  };
+}
+
+async function chooseCropToolOutputFolder() {
+  const result = await dialog.showOpenDialog({
+    title: 'Choose Crop Output Folder',
+    properties: ['openDirectory', 'createDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  return {
+    canceled: false,
+    folderPath: result.filePaths[0]
+  };
+}
+
+async function loadCropToolImage(_event, filePathValue) {
+  const filePath = String(filePathValue || '');
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error('Crop source image was not found.');
+  }
+  return cropToolImagePayload(filePath);
+}
+
 function setJpegDensity(buffer, dpi = 300) {
   if (buffer.length < 20 || buffer[0] !== 0xFF || buffer[1] !== 0xD8) {
     return buffer;
@@ -7648,31 +7710,46 @@ async function saveCropToolImage(_event, input = {}) {
     throw new Error('Crop export must be a JPEG image.');
   }
 
-  const defaultPath = input.sourcePath
-    ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`)
+  const outputFolder = String(input.outputFolder || '').trim();
+  const outputBaseName = input.sourcePath
+    ? `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`
     : '8x10-crop.jpg';
-  const result = await dialog.showSaveDialog({
-    title: 'Save 8x10 Crop',
-    defaultPath,
-    filters: [
-      { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] }
-    ]
-  });
+  let filePath = null;
 
-  if (result.canceled || !result.filePath) {
-    return { canceled: true };
+  if (outputFolder) {
+    fs.mkdirSync(outputFolder, { recursive: true });
+    filePath = uniquePath(outputFolder, outputBaseName);
+  } else {
+    const defaultPath = input.sourcePath
+      ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`)
+      : '8x10-crop.jpg';
+    const result = await dialog.showSaveDialog({
+      title: 'Save 8x10 Crop',
+      defaultPath,
+      filters: [
+        { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] }
+      ]
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { canceled: true };
+    }
+    filePath = result.filePath;
   }
 
   const bytes = setJpegDensity(Buffer.from(match[1], 'base64'), 300);
-  fs.writeFileSync(result.filePath, bytes);
+  fs.writeFileSync(filePath, bytes);
   return {
     canceled: false,
-    filePath: result.filePath,
-    filename: path.basename(result.filePath)
+    filePath,
+    filename: path.basename(filePath)
   };
 }
 
 ipcMain.handle('crop-tool:choose-image', chooseCropToolImage);
+ipcMain.handle('crop-tool:choose-input-folder', chooseCropToolInputFolder);
+ipcMain.handle('crop-tool:choose-output-folder', chooseCropToolOutputFolder);
+ipcMain.handle('crop-tool:load-image', loadCropToolImage);
 ipcMain.handle('crop-tool:save-image', saveCropToolImage);
 
 function sendTrecsMenuAction(window, action) {

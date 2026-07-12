@@ -770,6 +770,48 @@ dd {
   gap: 12px;
 }
 
+.crop-tool-folder-summary {
+  background: #f7fafc;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  color: #52677a;
+  font-size: 12px;
+  line-height: 1.35;
+  min-height: 50px;
+  overflow-wrap: anywhere;
+  padding: 8px;
+  white-space: pre-line;
+}
+
+.crop-tool-image-list {
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  max-height: 180px;
+  min-height: 120px;
+  overflow: auto;
+}
+
+.crop-tool-image-list button {
+  background: #fff;
+  border: 0;
+  border-bottom: 1px solid #edf1f5;
+  border-radius: 0;
+  display: block;
+  min-height: 32px;
+  overflow: hidden;
+  padding: 6px 8px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.crop-tool-image-list button.active {
+  background: #eaf4f8;
+  color: #0f7390;
+  font-weight: 650;
+}
+
 .crop-tool-controls input[type="range"] {
   width: 100%;
 }

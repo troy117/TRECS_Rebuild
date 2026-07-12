@@ -77,6 +77,10 @@ const cropToolModal = document.getElementById('cropToolModal');
 const cropToolCanvas = document.getElementById('cropToolCanvas');
 const closeCropToolButton = document.getElementById('closeCropToolButton');
 const chooseCropToolImageButton = document.getElementById('chooseCropToolImageButton');
+const chooseCropToolInputFolderButton = document.getElementById('chooseCropToolInputFolderButton');
+const chooseCropToolOutputFolderButton = document.getElementById('chooseCropToolOutputFolderButton');
+const cropToolFolderSummary = document.getElementById('cropToolFolderSummary');
+const cropToolImageList = document.getElementById('cropToolImageList');
 const rotateCropToolButton = document.getElementById('rotateCropToolButton');
 const cropToolZoom = document.getElementById('cropToolZoom');
 const resetCropToolButton = document.getElementById('resetCropToolButton');
@@ -228,6 +232,10 @@ let jobsState = {
   showImportPreviousJobForm: false,
   cropTool: {
     image: null,
+    files: [],
+    currentIndex: -1,
+    inputFolder: '',
+    outputFolder: '',
     filename: '',
     sourcePath: '',
     rotation: 0,
@@ -4206,14 +4214,66 @@ function setCropToolStatus(message) {
   }
 }
 
+function renderCropToolBatchList() {
+  if (cropToolFolderSummary) {
+    const input = jobsState.cropTool.inputFolder ? `Input: ${jobsState.cropTool.inputFolder}` : 'Input: not selected';
+    const output = jobsState.cropTool.outputFolder ? `Output: ${jobsState.cropTool.outputFolder}` : 'Output: not selected';
+    cropToolFolderSummary.textContent = `${input}\n${output}`;
+  }
+
+  if (!cropToolImageList) {
+    return;
+  }
+
+  const files = jobsState.cropTool.files || [];
+  if (!files.length) {
+    cropToolImageList.innerHTML = '<div class="empty-state">No input folder loaded.</div>';
+    return;
+  }
+
+  cropToolImageList.innerHTML = files.map((file, index) => `
+    <button class="${index === jobsState.cropTool.currentIndex ? 'active' : ''}" data-crop-tool-index="${index}" type="button">
+      ${escapeHtml(file.filename || '')}
+    </button>
+  `).join('');
+
+  cropToolImageList.querySelectorAll('[data-crop-tool-index]').forEach((button) => {
+    button.addEventListener('click', () => {
+      loadCropToolFileAtIndex(Number(button.dataset.cropToolIndex)).catch((error) => {
+        setCropToolStatus(error.message || 'Could not load crop image.');
+        console.error(error);
+      });
+    });
+  });
+}
+
 function setCropToolVisible(visible) {
   if (!cropToolModal) {
     return;
   }
   cropToolModal.hidden = !visible;
   if (visible) {
+    renderCropToolBatchList();
     drawCropTool();
   }
+}
+
+function loadCropToolPayload(result, index = -1) {
+  const image = new Image();
+  image.onload = () => {
+    jobsState.cropTool.image = image;
+    jobsState.cropTool.filename = result.filename || '';
+    jobsState.cropTool.sourcePath = result.filePath || '';
+    jobsState.cropTool.currentIndex = index;
+    jobsState.cropTool.rotation = 0;
+    resetCropToolImage();
+    renderCropToolBatchList();
+    setCropToolStatus(`${result.filename || 'Image loaded'} - drag to position, adjust zoom, then save.`);
+  };
+  image.onerror = () => {
+    setCropToolStatus('Could not load that image.');
+  };
+  image.src = result.dataUrl;
 }
 
 async function chooseCropToolImage() {
@@ -4222,19 +4282,42 @@ async function chooseCropToolImage() {
     return;
   }
 
-  const image = new Image();
-  image.onload = () => {
-    jobsState.cropTool.image = image;
-    jobsState.cropTool.filename = result.filename || '';
-    jobsState.cropTool.sourcePath = result.filePath || '';
-    jobsState.cropTool.rotation = 0;
-    resetCropToolImage();
-    setCropToolStatus(`${result.filename || 'Image loaded'} - drag to position, adjust zoom, then save.`);
-  };
-  image.onerror = () => {
-    setCropToolStatus('Could not load that image.');
-  };
-  image.src = result.dataUrl;
+  loadCropToolPayload(result, -1);
+}
+
+async function chooseCropToolInputFolder() {
+  const result = await trecsApi('chooseCropToolInputFolder').chooseCropToolInputFolder();
+  if (!result || result.canceled) {
+    return;
+  }
+  jobsState.cropTool.inputFolder = result.folderPath || '';
+  jobsState.cropTool.files = result.files || [];
+  jobsState.cropTool.currentIndex = -1;
+  renderCropToolBatchList();
+  if (!jobsState.cropTool.files.length) {
+    setCropToolStatus('No JPG or PNG images found in that input folder.');
+    return;
+  }
+  await loadCropToolFileAtIndex(0);
+}
+
+async function chooseCropToolOutputFolder() {
+  const result = await trecsApi('chooseCropToolOutputFolder').chooseCropToolOutputFolder();
+  if (!result || result.canceled) {
+    return;
+  }
+  jobsState.cropTool.outputFolder = result.folderPath || '';
+  renderCropToolBatchList();
+  setCropToolStatus(`Output folder selected. Crops will save there and advance to the next image.`);
+}
+
+async function loadCropToolFileAtIndex(index) {
+  const files = jobsState.cropTool.files || [];
+  if (index < 0 || index >= files.length) {
+    return;
+  }
+  const result = await trecsApi('loadCropToolImage').loadCropToolImage(files[index].filePath);
+  loadCropToolPayload(result, index);
 }
 
 async function saveCropToolImage() {
@@ -4264,6 +4347,7 @@ async function saveCropToolImage() {
   setCropToolStatus('Saving crop...');
   const result = await trecsApi('saveCropToolImage').saveCropToolImage({
     sourcePath: jobsState.cropTool.sourcePath,
+    outputFolder: jobsState.cropTool.outputFolder,
     dataUrl: output.toDataURL('image/jpeg', 0.95)
   });
   if (!result || result.canceled) {
@@ -4271,6 +4355,10 @@ async function saveCropToolImage() {
     return;
   }
   setCropToolStatus(`Saved ${result.filename || '8x10 crop'} at 2400 x 3000 / 300 DPI.`);
+  const nextIndex = jobsState.cropTool.currentIndex + 1;
+  if (jobsState.cropTool.outputFolder && nextIndex > 0 && nextIndex < jobsState.cropTool.files.length) {
+    await loadCropToolFileAtIndex(nextIndex);
+  }
 }
 
 async function handleTrecsMenuAction(action) {
@@ -5929,6 +6017,24 @@ if (chooseCropToolImageButton) {
   chooseCropToolImageButton.addEventListener('click', () => {
     chooseCropToolImage().catch((error) => {
       setCropToolStatus(error.message || 'Could not open image.');
+      console.error(error);
+    });
+  });
+}
+
+if (chooseCropToolInputFolderButton) {
+  chooseCropToolInputFolderButton.addEventListener('click', () => {
+    chooseCropToolInputFolder().catch((error) => {
+      setCropToolStatus(error.message || 'Could not open input folder.');
+      console.error(error);
+    });
+  });
+}
+
+if (chooseCropToolOutputFolderButton) {
+  chooseCropToolOutputFolderButton.addEventListener('click', () => {
+    chooseCropToolOutputFolder().catch((error) => {
+      setCropToolStatus(error.message || 'Could not choose output folder.');
       console.error(error);
     });
   });
