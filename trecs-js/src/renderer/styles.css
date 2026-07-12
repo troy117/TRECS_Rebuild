@@ -575,6 +575,21 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.detail-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.progress-card {
+  width: min(92vw, 520px);
+}
+
+.progress-card progress {
+  height: 18px;
+  width: 100%;
+}
+
 .empty-state {
   color: #617488;
   padding: 18px;

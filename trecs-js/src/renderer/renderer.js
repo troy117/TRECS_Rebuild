@@ -106,6 +106,11 @@ const endOfDayStatus = document.getElementById('endOfDayStatus');
 const endOfDayActionNote = document.getElementById('endOfDayActionNote');
 const cancelEndOfDayButton = document.getElementById('cancelEndOfDayButton');
 const confirmEndOfDayButton = document.getElementById('confirmEndOfDayButton');
+const croppedMediumModal = document.getElementById('croppedMediumModal');
+const croppedMediumProgress = document.getElementById('croppedMediumProgress');
+const croppedMediumStatus = document.getElementById('croppedMediumStatus');
+const croppedMediumSummary = document.getElementById('croppedMediumSummary');
+const closeCroppedMediumButton = document.getElementById('closeCroppedMediumButton');
 const schoolDataModal = document.getElementById('schoolDataModal');
 const schoolDataFilePath = document.getElementById('schoolDataFilePath');
 const schoolDataMapping = document.getElementById('schoolDataMapping');
@@ -213,6 +218,7 @@ let jobsState = {
   lastLaptopPackage: null,
   lastEndOfDayPackage: null,
   lastCroppedImageSync: null,
+  lastCroppedMediumGeneration: null,
   imagePreviewCache: new Map(),
   imageHoverToken: 0,
   lightboxImageIds: [],
@@ -262,6 +268,12 @@ if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
       console.error(error);
       window.alert(error.message || 'Menu action failed');
     });
+  });
+}
+
+if (window.trecs && typeof window.trecs.onCroppedMediumProgress === 'function') {
+  window.trecs.onCroppedMediumProgress((payload) => {
+    updateCroppedMediumProgress(payload);
   });
 }
 
@@ -599,7 +611,7 @@ function setWorkspaceMode(mode) {
   imageReviewWorkspace.hidden = !imageReviewOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
-  backToJobsButton.textContent = (envelopeOpen || imageReviewOpen) ? 'Back to Students' : 'Back to Jobs';
+  backToJobsButton.textContent = (captureOpen || envelopeOpen || imageReviewOpen) ? 'Back to Students' : 'Back to Jobs';
   if (workspaceStudentsButton) {
     workspaceStudentsButton.classList.toggle('active', studentsOpen);
   }
@@ -1057,14 +1069,23 @@ async function confirmEndOfDayPackage() {
     };
     setEndOfDayModalVisible(false);
     if (reviewState.mode === 'approve') {
+      const wasWorkspaceOpen = jobsState.jobWorkspaceOpen && Number(jobsState.selectedJobId) === Number(result.id);
+      const previousWorkspaceMode = jobsState.workspaceMode;
+      const previousSubjectId = jobsState.selectedSubjectId;
       jobsState.selectedJobId = result.id;
       jobsState.selectedType = 'all';
       jobsState.search = '';
-      jobsState.detail = null;
       jobSearchInput.value = '';
       await loadDashboard();
       await loadJobs();
-      await loadJobDetail(result.id);
+      if (wasWorkspaceOpen) {
+        jobsState.workspaceMode = previousWorkspaceMode || 'students';
+        jobsState.selectedSubjectId = previousSubjectId;
+        await reloadCurrentJobDetail();
+      } else {
+        jobsState.detail = null;
+        await loadJobDetail(result.id);
+      }
       window.alert([
         'End of Day package approved.',
         '',
@@ -3914,7 +3935,13 @@ function renderJobDetail(job) {
         </div>
       </dl>
       <div class="path-box">${job.rootPath}</div>
+      <div class="detail-actions">
+        <button data-generate-cropped-medium="${job.id}" type="button">Create Cropped Medium</button>
+      </div>
       <div class="package-actions">
+        <span data-cropped-medium-status>
+          ${renderCroppedMediumStatus(job.id)}
+        </span>
         <span data-cropped-image-sync-status>
           ${renderCroppedImageSyncStatus(job.id)}
         </span>
@@ -3946,6 +3973,95 @@ function renderCroppedImageSyncStatus(jobId) {
   }
 
   return `Synced ${sync.registered} cropped images (${sync.croppedLarge} large, ${sync.croppedMed} medium). ${sync.unmatched} unmatched.`;
+}
+
+function renderCroppedMediumStatus(jobId) {
+  const generation = jobsState.lastCroppedMediumGeneration;
+  if (!generation || generation.jobId !== jobId) {
+    return '';
+  }
+
+  if (generation.status === 'working') {
+    return 'Creating Cropped Medium images...';
+  }
+
+  if (generation.status === 'error') {
+    return generation.message || 'Cropped Medium creation failed';
+  }
+
+  return `Cropped Medium: ${generation.created} created, ${generation.skipped} skipped, ${generation.failed} failed.`;
+}
+
+function setCroppedMediumModalVisible(visible) {
+  if (!croppedMediumModal) {
+    return;
+  }
+  croppedMediumModal.hidden = !visible;
+  if (visible) {
+    closeCroppedMediumButton.disabled = true;
+    croppedMediumProgress.value = 0;
+    croppedMediumProgress.max = 100;
+    croppedMediumStatus.textContent = 'Preparing images...';
+    croppedMediumSummary.textContent = '';
+  }
+}
+
+function updateCroppedMediumProgress(payload = {}) {
+  if (!croppedMediumModal || croppedMediumModal.hidden) {
+    return;
+  }
+  const total = Number(payload.total || 0);
+  const done = Number(payload.done || 0);
+  croppedMediumProgress.max = total || 100;
+  croppedMediumProgress.value = total ? done : 0;
+  const filename = payload.filename ? ` ${payload.filename}` : '';
+  const status = payload.status ? `${payload.status}${filename}` : 'Working...';
+  croppedMediumStatus.textContent = status;
+  croppedMediumSummary.textContent = `${formatNumber(done)} / ${formatNumber(total)} processed, ${formatNumber(payload.created || 0)} created, ${formatNumber(payload.skipped || 0)} skipped, ${formatNumber(payload.failed || 0)} failed`;
+}
+
+async function performGenerateCroppedMedium(jobId) {
+  setCroppedMediumModalVisible(true);
+  jobsState.lastCroppedMediumGeneration = { jobId, status: 'working' };
+  renderJobDetail(jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : jobsState.jobs.find((job) => job.id === jobId));
+
+  try {
+    const result = await trecsApi('generateCroppedMediumImages').generateCroppedMediumImages(jobId);
+    jobsState.lastCroppedMediumGeneration = {
+      jobId,
+      status: 'done',
+      created: result.created || 0,
+      skipped: result.skipped || 0,
+      failed: result.failed || 0
+    };
+    jobsState.lastCroppedImageSync = {
+      jobId,
+      status: 'done',
+      registered: result.syncResult ? result.syncResult.registered : 0,
+      croppedLarge: result.syncResult && result.syncResult.folders
+        ? (Object.fromEntries(result.syncResult.folders.map((folder) => [folder.versionType, folder])).cropped_large || {}).matched || 0
+        : 0,
+      croppedMed: result.syncResult && result.syncResult.folders
+        ? (Object.fromEntries(result.syncResult.folders.map((folder) => [folder.versionType, folder])).cropped_med || {}).matched || 0
+        : 0,
+      unmatched: result.syncResult && result.syncResult.folders
+        ? result.syncResult.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
+        : 0
+    };
+    croppedMediumStatus.textContent = `Done. ${formatNumber(result.created || 0)} created, ${formatNumber(result.skipped || 0)} skipped, ${formatNumber(result.failed || 0)} failed.`;
+    closeCroppedMediumButton.disabled = false;
+    await reloadCurrentJobDetail();
+  } catch (error) {
+    jobsState.lastCroppedMediumGeneration = {
+      jobId,
+      status: 'error',
+      message: error.message || 'Cropped Medium creation failed'
+    };
+    croppedMediumStatus.textContent = error.message || 'Cropped Medium creation failed';
+    closeCroppedMediumButton.disabled = false;
+    renderJobDetail(jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : jobsState.jobs.find((job) => job.id === jobId));
+    console.error(error);
+  }
 }
 
 function renderLaptopPackageStatus(jobId) {
@@ -4433,6 +4549,8 @@ async function handleTrecsMenuAction(action) {
     openSchoolDataImport(jobId);
   } else if (action === 'sync-cropped-images') {
     await performSyncCroppedImages(jobId);
+  } else if (action === 'create-cropped-medium') {
+    await performGenerateCroppedMedium(jobId);
   } else if (action === 'prepare-onsite-setup') {
     await performPrepareOnsiteSetup(jobId);
   } else if (action === 'make-end-of-day') {
@@ -4477,6 +4595,21 @@ function bindJobDetailActions() {
       } finally {
         croppedSyncButton.disabled = false;
         croppedSyncButton.textContent = originalText;
+      }
+    });
+  }
+
+  const croppedMediumButton = jobDetailPanel.querySelector('[data-generate-cropped-medium]');
+  if (croppedMediumButton) {
+    croppedMediumButton.addEventListener('click', async () => {
+      const originalText = croppedMediumButton.textContent;
+      croppedMediumButton.disabled = true;
+      croppedMediumButton.textContent = 'Creating...';
+      try {
+        await performGenerateCroppedMedium(Number(croppedMediumButton.dataset.generateCroppedMedium));
+      } finally {
+        croppedMediumButton.disabled = false;
+        croppedMediumButton.textContent = originalText;
       }
     });
   }
@@ -5044,6 +5177,7 @@ async function saveSubjectImageLink(subjectId, imageId, control) {
     const result = await trecsApi('linkSubjectImage').linkSubjectImage(subjectId, imageId);
     jobsState.selectedSubjectId = result.subjectId;
     jobsState.selectedImageId = result.imageId;
+    jobsState.imagePreviewCache.delete(result.imageId);
     await reloadCurrentJobDetail();
   } catch (error) {
     if (control) {
@@ -5959,7 +6093,7 @@ jobSearchInput.addEventListener('input', () => {
 });
 
 backToJobsButton.addEventListener('click', () => {
-  if (jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
+  if (jobsState.workspaceMode === 'capture' || jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
     setWorkspaceMode('students');
   } else {
     closeJobWorkspace();
@@ -6302,6 +6436,13 @@ cancelEndOfDayButton.addEventListener('click', () => {
   setEndOfDayModalVisible(false);
 });
 confirmEndOfDayButton.addEventListener('click', confirmEndOfDayPackage);
+if (closeCroppedMediumButton) {
+  closeCroppedMediumButton.addEventListener('click', () => {
+    if (!closeCroppedMediumButton.disabled) {
+      setCroppedMediumModalVisible(false);
+    }
+  });
+}
 endOfDayModal.addEventListener('wheel', (event) => {
   if (endOfDayModal.hidden) {
     return;

@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('trecs', {
   renderAdminItem: (jobId, input) => ipcRenderer.invoke('admin-items:render', jobId, input),
   renderSubjectIdCard: (jobId, subjectId, input) => ipcRenderer.invoke('id-card:render-subject', jobId, subjectId, input),
   syncCroppedImages: (jobId) => ipcRenderer.invoke('images:sync-cropped', jobId),
+  generateCroppedMediumImages: (jobId) => ipcRenderer.invoke('images:generate-cropped-medium', jobId),
+  onCroppedMediumProgress: (callback) => {
+    ipcRenderer.removeAllListeners('images:cropped-medium-progress');
+    ipcRenderer.on('images:cropped-medium-progress', (_event, payload) => callback(payload));
+  },
   getCapturePlan: async (jobId) => {
     const detail = await ipcRenderer.invoke('job:detail', jobId);
     return detail.capture;

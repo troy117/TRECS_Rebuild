@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -3053,6 +3053,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
 ipcMain.handle('admin-items:get', getAdminItems);
 ipcMain.handle('admin-items:render', renderAdminItem);
 ipcMain.handle('images:sync-cropped', syncCroppedImages);
+ipcMain.handle('images:generate-cropped-medium', generateCroppedMediumImages);
 
 async function renderSubjectIdCard(_event, jobIdValue, subjectIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
@@ -3373,6 +3374,92 @@ async function syncCroppedImages(_event, jobIdValue) {
 
   syncResult.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   return syncResult;
+}
+
+async function generateCroppedMediumImages(event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const job = await adminJobSummary(jobId);
+  const jobRoot = resolveProjectPath(job.rootPath);
+  if (!jobRoot || !fs.existsSync(jobRoot) || !fs.statSync(jobRoot).isDirectory()) {
+    throw new Error('Job folder was not found');
+  }
+
+  const sourceFolder = path.join(jobRoot, 'CroppedLarge');
+  if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) {
+    throw new Error('CroppedLarge folder was not found for this job');
+  }
+
+  const destinationFolder = path.join(jobRoot, 'CroppedMed');
+  fs.mkdirSync(destinationFolder, { recursive: true });
+
+  const files = fs.readdirSync(sourceFolder)
+    .filter((name) => {
+      const sourcePath = path.join(sourceFolder, name);
+      return fs.statSync(sourcePath).isFile() && isImportableImage(sourcePath);
+    })
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+  const sendProgress = (payload) => {
+    if (event && event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('images:cropped-medium-progress', {
+        jobId,
+        total: files.length,
+        ...payload
+      });
+    }
+  };
+
+  let created = 0;
+  let skipped = 0;
+  let failed = 0;
+  const errors = [];
+
+  sendProgress({ done: 0, created, skipped, failed, filename: '', status: 'starting' });
+
+  files.forEach((name, index) => {
+    const sourcePath = path.join(sourceFolder, name);
+    const extension = path.extname(name).toLowerCase();
+    const outputName = ['.jpg', '.jpeg'].includes(extension)
+      ? name
+      : `${path.basename(name, path.extname(name))}.jpg`;
+    const destinationPath = path.join(destinationFolder, outputName);
+
+    if (fs.existsSync(destinationPath)) {
+      skipped += 1;
+      sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'skipped' });
+      return;
+    }
+
+    try {
+      const image = nativeImage.createFromPath(sourcePath);
+      if (image.isEmpty()) {
+        throw new Error('Could not read image');
+      }
+      const resized = image.resize({ width: 480, height: 600, quality: 'best' });
+      const bytes = setJpegDensity(resized.toJPEG(92), 300);
+      fs.writeFileSync(destinationPath, bytes);
+      created += 1;
+      sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'created' });
+    } catch (error) {
+      failed += 1;
+      errors.push({ filename: name, message: error.message || String(error) });
+      sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'failed' });
+    }
+  });
+
+  const syncResult = await syncCroppedImages(null, jobId);
+  const result = {
+    jobId,
+    total: files.length,
+    created,
+    skipped,
+    failed,
+    errors,
+    destinationFolder,
+    syncResult
+  };
+  sendProgress({ done: files.length, created, skipped, failed, filename: '', status: 'done' });
+  return result;
 }
 
 function copyPreviousTrecsImages(sourceRoot, jobRoot) {
@@ -6744,6 +6831,113 @@ function renameUnlinkedCaptureImage(database, input) {
   };
 }
 
+function renameLinkedCaptureImage(database, input) {
+  const imageId = numericId(input.imageId);
+  const ref = String(input.ref || '').trim();
+  if (!ref) {
+    return null;
+  }
+
+  const rows = rowsFromDatabase(database, `
+    SELECT
+      ia.id,
+      ia.filename,
+      ia.current_path AS currentPath,
+      ia.original_path AS originalPath,
+      ia.metadata_json AS metadataJson,
+      j.root_path AS rootPath
+    FROM image_assets ia
+    JOIN jobs j ON j.id = ia.job_id
+    WHERE ia.id = ${imageId}
+    LIMIT 1;
+  `);
+  if (!rows.length) {
+    return null;
+  }
+
+  const row = rows[0];
+  const currentPath = resolveWorkspacePath(row.currentPath);
+  if (!fs.existsSync(currentPath)) {
+    return null;
+  }
+
+  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), 'Images');
+  const currentFolder = path.dirname(currentPath);
+  if (path.resolve(currentFolder).toLowerCase() !== path.resolve(jobImagesFolder).toLowerCase()) {
+    return null;
+  }
+
+  const currentName = path.basename(currentPath);
+  const prefixedName = envelopeDestinationName(ref, currentPath);
+  if (prefixedName === currentName) {
+    return null;
+  }
+
+  const destinationPath = uniquePath(currentFolder, prefixedName);
+  moveFile(currentPath, destinationPath);
+  const relativeDestination = path.relative(projectRoot, destinationPath);
+  const oldCurrentPath = row.currentPath;
+  const oldOriginalPath = row.originalPath;
+  const originalRawPath = metadataValue(row.metadataJson, 'rawPath');
+  let metadataJson = row.metadataJson;
+  let relativeRawDestination = null;
+
+  if (originalRawPath) {
+    const rawPath = resolveWorkspacePath(originalRawPath);
+    if (fs.existsSync(rawPath) && path.resolve(path.dirname(rawPath)).toLowerCase() === path.resolve(jobImagesFolder).toLowerCase()) {
+      const rawDestinationName = `${path.basename(destinationPath, path.extname(destinationPath))}${path.extname(rawPath) || '.CR3'}`;
+      const rawDestinationPath = uniquePath(path.dirname(rawPath), rawDestinationName);
+      moveFile(rawPath, rawDestinationPath);
+      relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
+      try {
+        const metadata = JSON.parse(row.metadataJson || '{}');
+        metadata.rawPath = relativeRawDestination;
+        metadataJson = JSON.stringify(metadata);
+      } catch (_error) {
+        metadataJson = row.metadataJson;
+      }
+    }
+  }
+
+  database.run(`
+    UPDATE image_assets
+    SET current_path = ?,
+        original_path = CASE WHEN original_path = ? THEN ? ELSE original_path END,
+        filename = ?,
+        metadata_json = ?
+    WHERE id = ?;
+  `, [
+    relativeDestination,
+    oldCurrentPath,
+    relativeDestination,
+    path.basename(destinationPath),
+    metadataJson,
+    imageId
+  ]);
+
+  database.run(`
+    UPDATE image_versions
+    SET path = ?
+    WHERE image_asset_id = ?
+      AND path = ?;
+  `, [relativeDestination, imageId, oldCurrentPath]);
+
+  if (oldOriginalPath && oldOriginalPath !== oldCurrentPath) {
+    database.run(`
+      UPDATE image_versions
+      SET path = ?
+      WHERE image_asset_id = ?
+        AND path = ?;
+    `, [relativeDestination, imageId, oldOriginalPath]);
+  }
+
+  return {
+    filename: path.basename(destinationPath),
+    currentPath: relativeDestination,
+    rawPath: relativeRawDestination
+  };
+}
+
 function getOrCreateCaptureSession(database, input) {
   const jobId = numericId(input.jobId);
   const shootStage = normalizeShootStage(input.shootStage);
@@ -7435,9 +7629,9 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  return writeSql((database) => {
+  const result = await writeSql((database) => {
     const match = database.exec(`
-      SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
+      SELECT s.id AS subjectId, s.job_id AS subjectJobId, s.legacy_ref_num AS ref, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
@@ -7447,9 +7641,11 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
     if (!match.length || !match[0].values.length) {
       throw new Error('Subject and image must belong to the same job');
     }
-    if (match[0].values[0][4] === 'rejected') {
+    if (match[0].values[0][5] === 'rejected') {
       throw new Error('Rejected images cannot be selected');
     }
+    const subjectJobId = match[0].values[0][1];
+    const subjectRef = match[0].values[0][2];
 
     database.run(`
       UPDATE subject_images
@@ -7509,8 +7705,16 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [imageId, subjectId]);
 
-    return { subjectId, imageId };
+    const renameResult = renameLinkedCaptureImage(database, {
+      imageId,
+      ref: subjectRef
+    });
+
+    return { subjectId, imageId, jobId: subjectJobId, renameResult };
   });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  return result;
 }
 
 ipcMain.handle('image:link-subject', linkSubjectImage);
@@ -7818,6 +8022,7 @@ function createApplicationMenu(window) {
         { type: 'separator' },
         { label: 'Import School Data', click: () => sendTrecsMenuAction(window, 'import-school-data') },
         { label: 'Sync Cropped Images', click: () => sendTrecsMenuAction(window, 'sync-cropped-images') },
+        { label: 'Create Cropped Medium', click: () => sendTrecsMenuAction(window, 'create-cropped-medium') },
         { label: '8x10 Crop Tool', click: () => sendTrecsMenuAction(window, 'crop-tool') },
         { label: 'Prepare Onsite Setup', click: () => sendTrecsMenuAction(window, 'prepare-onsite-setup') },
         { label: 'Make End of Day', click: () => sendTrecsMenuAction(window, 'make-end-of-day') }
