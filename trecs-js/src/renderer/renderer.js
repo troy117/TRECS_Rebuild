@@ -553,6 +553,7 @@ function closeJobWorkspace() {
 }
 
 function setWorkspaceMode(mode) {
+  hideImageHoverPreview();
   jobsState.workspaceMode = mode;
   const studentsOpen = mode === 'students';
   const captureOpen = mode === 'capture';
@@ -2286,8 +2287,7 @@ async function setCaptureShootStage(stage) {
 
 function captureReviewImages() {
   const capture = jobsState.detail && jobsState.detail.capture ? jobsState.detail.capture : {};
-  const reviewCandidates = capture.reviewCandidates || [];
-  return reviewCandidates.length ? reviewCandidates : (capture.recentImages || []);
+  return capture.reviewCandidates || [];
 }
 
 function renderImageReviewWorkspace() {
@@ -4704,6 +4704,7 @@ async function setLinkedImageRejected(imageId, rejected, control) {
   if (!imageId) {
     return;
   }
+  hideImageHoverPreview();
   const originalText = control ? control.textContent : '';
   if (control) {
     control.disabled = true;
@@ -4733,9 +4734,10 @@ async function unlinkLinkedImage(subjectId, imageId, control) {
   if (!subjectId || !imageId) {
     return;
   }
+  hideImageHoverPreview();
   const image = linkedImagesForSubject(subjectId).find((item) => Number(item.imageAssetId) === Number(imageId));
   const label = image && image.filename ? image.filename : `image #${imageId}`;
-  if (!confirm(`Unlink ${label} from this student? The image file will stay on disk.`)) {
+  if (!confirm(`Unlink ${label} from this student? If this image has no other student links, the reference prefix will be removed from the filename.`)) {
     return;
   }
 
@@ -4747,6 +4749,10 @@ async function unlinkLinkedImage(subjectId, imageId, control) {
 
   try {
     await trecsApi('unlinkSubjectImage').unlinkSubjectImage(subjectId, imageId);
+    jobsState.imagePreviewCache.delete(imageId);
+    if (Number(jobsState.lightboxImageId) === Number(imageId)) {
+      closeImageLightbox();
+    }
     await reloadCurrentJobDetail();
   } catch (error) {
     if (control) {
@@ -5016,6 +5022,7 @@ async function loadJobDetail(jobId) {
 }
 
 async function reloadCurrentJobDetail() {
+  hideImageHoverPreview();
   if (!jobsState.selectedJobId) {
     return;
   }
@@ -5042,6 +5049,9 @@ async function reloadCurrentJobDetail() {
 async function loadImagePreview(imageId, options = {}) {
   const panel = document.getElementById(options.panelId || 'imagePreviewPanel');
   if (!panel || !imageId) {
+    if (panel) {
+      panel.innerHTML = '<div class="empty-state">Select an image to review.</div>';
+    }
     return;
   }
 
