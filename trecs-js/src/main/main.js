@@ -7576,6 +7576,105 @@ async function getImagePreview(_event, imageIdValue) {
 
 ipcMain.handle('image:preview', getImagePreview);
 
+async function chooseCropToolImage() {
+  const result = await dialog.showOpenDialog({
+    title: 'Choose Image To Crop',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const filePath = result.filePaths[0];
+  const bytes = fs.readFileSync(filePath);
+  return {
+    canceled: false,
+    filePath,
+    filename: path.basename(filePath),
+    dataUrl: `data:${mimeTypeFor(filePath)};base64,${bytes.toString('base64')}`
+  };
+}
+
+function setJpegDensity(buffer, dpi = 300) {
+  if (buffer.length < 20 || buffer[0] !== 0xFF || buffer[1] !== 0xD8) {
+    return buffer;
+  }
+
+  let offset = 2;
+  while (offset + 4 < buffer.length && buffer[offset] === 0xFF) {
+    const marker = buffer[offset + 1];
+    if (marker === 0xDA || marker === 0xD9) {
+      break;
+    }
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2 || offset + 2 + length > buffer.length) {
+      break;
+    }
+    if (
+      marker === 0xE0
+      && length >= 16
+      && buffer.toString('ascii', offset + 4, offset + 9) === 'JFIF\0'
+    ) {
+      buffer[offset + 11] = 1;
+      buffer.writeUInt16BE(dpi, offset + 12);
+      buffer.writeUInt16BE(dpi, offset + 14);
+      return buffer;
+    }
+    offset += 2 + length;
+  }
+
+  const app0 = Buffer.alloc(18);
+  app0[0] = 0xFF;
+  app0[1] = 0xE0;
+  app0.writeUInt16BE(16, 2);
+  app0.write('JFIF\0', 4, 'ascii');
+  app0[9] = 1;
+  app0[10] = 1;
+  app0[11] = 1;
+  app0.writeUInt16BE(dpi, 12);
+  app0.writeUInt16BE(dpi, 14);
+  return Buffer.concat([buffer.subarray(0, 2), app0, buffer.subarray(2)]);
+}
+
+async function saveCropToolImage(_event, input = {}) {
+  const dataUrl = String(input.dataUrl || '');
+  const match = dataUrl.match(/^data:image\/jpeg;base64,(.+)$/);
+  if (!match) {
+    throw new Error('Crop export must be a JPEG image.');
+  }
+
+  const defaultPath = input.sourcePath
+    ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`)
+    : '8x10-crop.jpg';
+  const result = await dialog.showSaveDialog({
+    title: 'Save 8x10 Crop',
+    defaultPath,
+    filters: [
+      { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] }
+    ]
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true };
+  }
+
+  const bytes = setJpegDensity(Buffer.from(match[1], 'base64'), 300);
+  fs.writeFileSync(result.filePath, bytes);
+  return {
+    canceled: false,
+    filePath: result.filePath,
+    filename: path.basename(result.filePath)
+  };
+}
+
+ipcMain.handle('crop-tool:choose-image', chooseCropToolImage);
+ipcMain.handle('crop-tool:save-image', saveCropToolImage);
+
 function sendTrecsMenuAction(window, action) {
   if (!window || window.isDestroyed()) {
     return;
@@ -7642,6 +7741,7 @@ function createApplicationMenu(window) {
         { type: 'separator' },
         { label: 'Import School Data', click: () => sendTrecsMenuAction(window, 'import-school-data') },
         { label: 'Sync Cropped Images', click: () => sendTrecsMenuAction(window, 'sync-cropped-images') },
+        { label: '8x10 Crop Tool', click: () => sendTrecsMenuAction(window, 'crop-tool') },
         { label: 'Prepare Onsite Setup', click: () => sendTrecsMenuAction(window, 'prepare-onsite-setup') },
         { label: 'Make End of Day', click: () => sendTrecsMenuAction(window, 'make-end-of-day') }
       ]

@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('trecs', {
   setImageRejected: (imageId, rejected, reason) => ipcRenderer.invoke('image:set-rejected', imageId, rejected, reason),
   unlinkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:unlink-subject', subjectId, imageId),
   getImagePreview: (imageId) => ipcRenderer.invoke('image:preview', imageId),
+  chooseCropToolImage: () => ipcRenderer.invoke('crop-tool:choose-image'),
+  saveCropToolImage: (input) => ipcRenderer.invoke('crop-tool:save-image', input),
   prepareLaptopPackage: (jobId) => ipcRenderer.invoke('laptop-package:prepare', jobId),
   getEndOfDayPreview: (jobId) => ipcRenderer.invoke('end-of-day:preview', jobId),
   createEndOfDayPackage: (jobId, adjustments) => ipcRenderer.invoke('end-of-day:create', jobId, adjustments)

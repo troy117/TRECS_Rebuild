@@ -555,6 +555,30 @@
               </div>
             </div>
 
+            <div class="modal-backdrop" id="cropToolModal" hidden>
+              <div class="modal-card crop-tool-card">
+                <div class="modal-heading">
+                  <h2>8x10 Crop Tool</h2>
+                  <button id="closeCropToolButton" type="button">Close</button>
+                </div>
+                <div class="crop-tool-layout">
+                  <div class="crop-tool-stage">
+                    <canvas id="cropToolCanvas" width="480" height="600"></canvas>
+                  </div>
+                  <div class="crop-tool-controls">
+                    <button id="chooseCropToolImageButton" type="button">Open Image</button>
+                    <label>
+                      <span>Zoom</span>
+                      <input id="cropToolZoom" type="range" min="1" max="3" step="0.01" value="1" disabled>
+                    </label>
+                    <button id="resetCropToolButton" type="button" disabled>Reset</button>
+                    <button class="primary" id="saveCropToolButton" type="button" disabled>Save 8x10 JPG</button>
+                    <p id="cropToolStatus">Open an image to make a 2400 x 3000 crop.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div class="modal-backdrop" id="studentFieldSettingsModal" hidden>
               <form class="modal-card student-field-settings-card" id="studentFieldSettingsForm">
                 <div class="modal-heading">

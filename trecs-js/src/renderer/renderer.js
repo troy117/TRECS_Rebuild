@@ -73,6 +73,14 @@ const previousLightboxImageButton = document.getElementById('previousLightboxIma
 const nextLightboxImageButton = document.getElementById('nextLightboxImageButton');
 const selectLightboxImageButton = document.getElementById('selectLightboxImageButton');
 const imageHoverPreview = document.getElementById('imageHoverPreview');
+const cropToolModal = document.getElementById('cropToolModal');
+const cropToolCanvas = document.getElementById('cropToolCanvas');
+const closeCropToolButton = document.getElementById('closeCropToolButton');
+const chooseCropToolImageButton = document.getElementById('chooseCropToolImageButton');
+const cropToolZoom = document.getElementById('cropToolZoom');
+const resetCropToolButton = document.getElementById('resetCropToolButton');
+const saveCropToolButton = document.getElementById('saveCropToolButton');
+const cropToolStatus = document.getElementById('cropToolStatus');
 const studentFieldSettingsModal = document.getElementById('studentFieldSettingsModal');
 const studentFieldSettingsForm = document.getElementById('studentFieldSettingsForm');
 const studentFieldSettingsList = document.getElementById('studentFieldSettingsList');
@@ -216,7 +224,21 @@ let jobsState = {
   showNewSchoolForm: false,
   selectedNewClientId: null,
   showNewJobForm: false,
-  showImportPreviousJobForm: false
+  showImportPreviousJobForm: false,
+  cropTool: {
+    image: null,
+    filename: '',
+    sourcePath: '',
+    zoom: 1,
+    minZoom: 1,
+    offsetX: 0,
+    offsetY: 0,
+    dragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragOffsetX: 0,
+    dragOffsetY: 0
+  }
 };
 
 if (window.trecs && databasePath) {
@@ -4040,7 +4062,184 @@ async function performSyncCroppedImages(jobId) {
   }
 }
 
+function cropToolContext() {
+  return cropToolCanvas ? cropToolCanvas.getContext('2d') : null;
+}
+
+function cropToolBaseScale() {
+  const image = jobsState.cropTool.image;
+  if (!image || !cropToolCanvas) {
+    return 1;
+  }
+  return Math.max(cropToolCanvas.width / image.naturalWidth, cropToolCanvas.height / image.naturalHeight);
+}
+
+function clampCropToolOffsets() {
+  const image = jobsState.cropTool.image;
+  if (!image || !cropToolCanvas) {
+    return;
+  }
+  const scale = cropToolBaseScale() * jobsState.cropTool.zoom;
+  const drawWidth = image.naturalWidth * scale;
+  const drawHeight = image.naturalHeight * scale;
+  const minX = Math.min(0, cropToolCanvas.width - drawWidth);
+  const maxX = Math.max(0, cropToolCanvas.width - drawWidth);
+  const minY = Math.min(0, cropToolCanvas.height - drawHeight);
+  const maxY = Math.max(0, cropToolCanvas.height - drawHeight);
+  jobsState.cropTool.offsetX = Math.min(maxX, Math.max(minX, jobsState.cropTool.offsetX));
+  jobsState.cropTool.offsetY = Math.min(maxY, Math.max(minY, jobsState.cropTool.offsetY));
+}
+
+function drawCropTool() {
+  const context = cropToolContext();
+  if (!context || !cropToolCanvas) {
+    return;
+  }
+  context.clearRect(0, 0, cropToolCanvas.width, cropToolCanvas.height);
+  context.fillStyle = '#f8fafc';
+  context.fillRect(0, 0, cropToolCanvas.width, cropToolCanvas.height);
+
+  const image = jobsState.cropTool.image;
+  if (!image) {
+    context.fillStyle = '#52677a';
+    context.font = '18px Segoe UI, Arial, sans-serif';
+    context.textAlign = 'center';
+    context.fillText('Open an image', cropToolCanvas.width / 2, cropToolCanvas.height / 2);
+    return;
+  }
+
+  clampCropToolOffsets();
+  const scale = cropToolBaseScale() * jobsState.cropTool.zoom;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(
+    image,
+    jobsState.cropTool.offsetX,
+    jobsState.cropTool.offsetY,
+    image.naturalWidth * scale,
+    image.naturalHeight * scale
+  );
+
+  context.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+  context.lineWidth = 2;
+  context.strokeRect(1, 1, cropToolCanvas.width - 2, cropToolCanvas.height - 2);
+  context.strokeStyle = 'rgba(15, 23, 42, 0.32)';
+  context.lineWidth = 1;
+  for (const x of [cropToolCanvas.width / 3, cropToolCanvas.width * 2 / 3]) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x, cropToolCanvas.height);
+    context.stroke();
+  }
+  for (const y of [cropToolCanvas.height / 3, cropToolCanvas.height * 2 / 3]) {
+    context.beginPath();
+    context.moveTo(0, y);
+    context.lineTo(cropToolCanvas.width, y);
+    context.stroke();
+  }
+}
+
+function resetCropToolImage() {
+  const image = jobsState.cropTool.image;
+  if (!image || !cropToolCanvas) {
+    return;
+  }
+  jobsState.cropTool.zoom = 1;
+  jobsState.cropTool.minZoom = 1;
+  const scale = cropToolBaseScale();
+  jobsState.cropTool.offsetX = (cropToolCanvas.width - image.naturalWidth * scale) / 2;
+  jobsState.cropTool.offsetY = (cropToolCanvas.height - image.naturalHeight * scale) / 2;
+  if (cropToolZoom) {
+    cropToolZoom.disabled = false;
+    cropToolZoom.value = '1';
+  }
+  if (resetCropToolButton) {
+    resetCropToolButton.disabled = false;
+  }
+  if (saveCropToolButton) {
+    saveCropToolButton.disabled = false;
+  }
+  drawCropTool();
+}
+
+function setCropToolStatus(message) {
+  if (cropToolStatus) {
+    cropToolStatus.textContent = message;
+  }
+}
+
+function setCropToolVisible(visible) {
+  if (!cropToolModal) {
+    return;
+  }
+  cropToolModal.hidden = !visible;
+  if (visible) {
+    drawCropTool();
+  }
+}
+
+async function chooseCropToolImage() {
+  const result = await trecsApi('chooseCropToolImage').chooseCropToolImage();
+  if (!result || result.canceled) {
+    return;
+  }
+
+  const image = new Image();
+  image.onload = () => {
+    jobsState.cropTool.image = image;
+    jobsState.cropTool.filename = result.filename || '';
+    jobsState.cropTool.sourcePath = result.filePath || '';
+    resetCropToolImage();
+    setCropToolStatus(`${result.filename || 'Image loaded'} - drag to position, adjust zoom, then save.`);
+  };
+  image.onerror = () => {
+    setCropToolStatus('Could not load that image.');
+  };
+  image.src = result.dataUrl;
+}
+
+async function saveCropToolImage() {
+  const image = jobsState.cropTool.image;
+  if (!image || !cropToolCanvas) {
+    return;
+  }
+
+  const output = document.createElement('canvas');
+  output.width = 2400;
+  output.height = 3000;
+  const context = output.getContext('2d');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, output.width, output.height);
+  const multiplier = output.width / cropToolCanvas.width;
+  const scale = cropToolBaseScale() * jobsState.cropTool.zoom * multiplier;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(
+    image,
+    jobsState.cropTool.offsetX * multiplier,
+    jobsState.cropTool.offsetY * multiplier,
+    image.naturalWidth * scale,
+    image.naturalHeight * scale
+  );
+
+  setCropToolStatus('Saving crop...');
+  const result = await trecsApi('saveCropToolImage').saveCropToolImage({
+    sourcePath: jobsState.cropTool.sourcePath,
+    dataUrl: output.toDataURL('image/jpeg', 0.95)
+  });
+  if (!result || result.canceled) {
+    setCropToolStatus('Save canceled.');
+    return;
+  }
+  setCropToolStatus(`Saved ${result.filename || '8x10 crop'} at 2400 x 3000 / 300 DPI.`);
+}
+
 async function handleTrecsMenuAction(action) {
+  if (action === 'crop-tool') {
+    setCropToolVisible(true);
+    return;
+  }
+
   if (action === 'new-school') {
     showJobsForAction();
     setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
@@ -5682,6 +5881,90 @@ cancelAddRecordsButton.addEventListener('click', () => {
 });
 
 addRecordsForm.addEventListener('submit', submitAddRecords);
+
+if (closeCropToolButton) {
+  closeCropToolButton.addEventListener('click', () => setCropToolVisible(false));
+}
+
+if (chooseCropToolImageButton) {
+  chooseCropToolImageButton.addEventListener('click', () => {
+    chooseCropToolImage().catch((error) => {
+      setCropToolStatus(error.message || 'Could not open image.');
+      console.error(error);
+    });
+  });
+}
+
+if (resetCropToolButton) {
+  resetCropToolButton.addEventListener('click', resetCropToolImage);
+}
+
+if (saveCropToolButton) {
+  saveCropToolButton.addEventListener('click', () => {
+    saveCropToolImage().catch((error) => {
+      setCropToolStatus(error.message || 'Could not save crop.');
+      console.error(error);
+    });
+  });
+}
+
+if (cropToolZoom) {
+  cropToolZoom.addEventListener('input', () => {
+    const image = jobsState.cropTool.image;
+    if (!image) {
+      return;
+    }
+    const previousZoom = jobsState.cropTool.zoom;
+    const nextZoom = Number(cropToolZoom.value) || 1;
+    const centerX = cropToolCanvas.width / 2;
+    const centerY = cropToolCanvas.height / 2;
+    const ratio = nextZoom / previousZoom;
+    jobsState.cropTool.offsetX = centerX - (centerX - jobsState.cropTool.offsetX) * ratio;
+    jobsState.cropTool.offsetY = centerY - (centerY - jobsState.cropTool.offsetY) * ratio;
+    jobsState.cropTool.zoom = nextZoom;
+    drawCropTool();
+  });
+}
+
+if (cropToolCanvas) {
+  cropToolCanvas.addEventListener('pointerdown', (event) => {
+    if (!jobsState.cropTool.image) {
+      return;
+    }
+    cropToolCanvas.setPointerCapture(event.pointerId);
+    cropToolCanvas.classList.add('dragging');
+    jobsState.cropTool.dragging = true;
+    jobsState.cropTool.dragStartX = event.clientX;
+    jobsState.cropTool.dragStartY = event.clientY;
+    jobsState.cropTool.dragOffsetX = jobsState.cropTool.offsetX;
+    jobsState.cropTool.dragOffsetY = jobsState.cropTool.offsetY;
+  });
+
+  cropToolCanvas.addEventListener('pointermove', (event) => {
+    if (!jobsState.cropTool.dragging) {
+      return;
+    }
+    const rect = cropToolCanvas.getBoundingClientRect();
+    const scaleX = cropToolCanvas.width / rect.width;
+    const scaleY = cropToolCanvas.height / rect.height;
+    jobsState.cropTool.offsetX = jobsState.cropTool.dragOffsetX + (event.clientX - jobsState.cropTool.dragStartX) * scaleX;
+    jobsState.cropTool.offsetY = jobsState.cropTool.dragOffsetY + (event.clientY - jobsState.cropTool.dragStartY) * scaleY;
+    drawCropTool();
+  });
+
+  cropToolCanvas.addEventListener('pointerup', (event) => {
+    jobsState.cropTool.dragging = false;
+    cropToolCanvas.classList.remove('dragging');
+    if (cropToolCanvas.hasPointerCapture(event.pointerId)) {
+      cropToolCanvas.releasePointerCapture(event.pointerId);
+    }
+  });
+
+  cropToolCanvas.addEventListener('pointercancel', () => {
+    jobsState.cropTool.dragging = false;
+    cropToolCanvas.classList.remove('dragging');
+  });
+}
 
 captureEntryForm.addEventListener('submit', (event) => {
   event.preventDefault();
