@@ -2767,12 +2767,21 @@ dd {
 
 .image-review-subject-preview {
   border-top: 1px solid #d7e0e8;
-  display: grid;
-  gap: 10px;
-  grid-template-rows: auto minmax(0, 1fr);
   min-height: 180px;
   overflow: hidden;
   padding: 12px;
+}
+
+.image-review-subject-card {
+  background: #fff;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: grid;
+  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 100%;
+  overflow: hidden;
+  padding: 10px;
 }
 
 .image-review-subject-meta strong,
@@ -2786,10 +2795,20 @@ dd {
   margin-top: 3px;
 }
 
-.image-review-subject-preview img {
+.image-review-subject-photo {
+  align-items: center;
   background: #eef2f5;
   border: 1px solid #d7e0e8;
   border-radius: 6px;
+  display: flex;
+  justify-content: center;
+  min-height: 170px;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.image-review-subject-photo img {
+  background: #eef2f5;
   display: block;
   margin: 0 auto;
   max-height: 100%;
@@ -2797,11 +2816,53 @@ dd {
   object-fit: contain;
 }
 
-.image-review-subject-preview img.rotate-landscape-ccw {
+.image-review-subject-photo img.rotate-landscape-ccw {
   max-height: none;
   max-width: none;
   transform: rotate(-90deg);
   width: min(230px, 68%);
+}
+
+.image-review-selected-image {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(220px, 1fr);
+  min-height: 0;
+  padding: 12px;
+}
+
+.image-review-selected-photo {
+  align-items: center;
+  background: #eef2f5;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: flex;
+  justify-content: center;
+  min-height: 220px;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.image-review-selected-photo img {
+  display: block;
+  max-height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.image-review-selected-photo img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: min(260px, 70%);
+}
+
+.image-review-selected-detail {
+  min-width: 0;
+}
+
+.image-review-selected-detail dl {
+  padding: 0;
 }
 
 .image-review-main {

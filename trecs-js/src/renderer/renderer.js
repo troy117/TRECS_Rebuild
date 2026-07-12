@@ -2347,7 +2347,7 @@ function renderImageReviewWorkspace() {
   bindHoverImagePreviews(imageReviewWorkspace);
   bindImagePreviewLinkForm({ mode: 'review' });
   loadReviewSubjectPreview();
-  loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false });
+  loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false, layout: 'review' });
 }
 
 function renderCaptureSubject() {
@@ -5052,8 +5052,7 @@ async function loadImagePreview(imageId, options = {}) {
     return;
   }
 
-  panel.innerHTML = `
-    <img src="${preview.dataUrl}" alt="${preview.filename}">
+  const detailHtml = `
     <dl>
       <div>
         <dt>Filename</dt>
@@ -5068,8 +5067,24 @@ async function loadImagePreview(imageId, options = {}) {
         <dd>${preview.width} x ${preview.height}</dd>
       </div>
     </dl>
-    ${options.includeLinkPanel === false ? '' : renderImageLinkPanel(imageId)}
   `;
+  panel.innerHTML = options.layout === 'review'
+    ? `
+      <div class="image-review-selected-image">
+        <div class="image-review-selected-photo">
+          <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Review image')}">
+        </div>
+        <div class="image-review-selected-detail">
+          ${detailHtml}
+        </div>
+      </div>
+      ${options.includeLinkPanel === false ? '' : renderImageLinkPanel(imageId)}
+    `
+    : `
+      <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Image preview')}">
+      ${detailHtml}
+      ${options.includeLinkPanel === false ? '' : renderImageLinkPanel(imageId)}
+    `;
   const previewImage = panel.querySelector('img');
   if (previewImage) {
     setLandscapeRotation(previewImage);
@@ -5172,8 +5187,8 @@ function bindImageReviewSubjectButtons(form) {
         return;
       }
       jobsState.selectedImageSubjectId = subject.id;
-      jobsState.imageLinkSubjectSearch = subject.name || subject.ref || '';
-      form.elements.subjectSearch.value = jobsState.imageLinkSubjectSearch;
+      jobsState.imageLinkSubjectSearch = '';
+      form.elements.subjectSearch.value = '';
       const results = form.querySelector('.image-review-search-results');
       if (results) {
         results.hidden = true;
@@ -5199,23 +5214,42 @@ async function loadReviewSubjectPreview() {
     <span>${escapeHtml([subject.grade, subject.homeroom, subject.externalId].filter(Boolean).join(' / '))}</span>
   `;
   if (!subject.imageAssetId) {
-    panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">No current photo linked.</div>`;
+    panel.innerHTML = `
+      <div class="image-review-subject-card">
+        <div class="image-review-subject-meta">${detail}</div>
+        <div class="image-review-subject-photo"><div class="empty-state">No current photo linked.</div></div>
+      </div>
+    `;
     return;
   }
 
   try {
     const preview = await imagePreviewForId(subject.imageAssetId);
     if (!preview || preview.missing || !preview.dataUrl) {
-      panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">Preview unavailable.</div>`;
+      panel.innerHTML = `
+        <div class="image-review-subject-card">
+          <div class="image-review-subject-meta">${detail}</div>
+          <div class="image-review-subject-photo"><div class="empty-state">Preview unavailable.</div></div>
+        </div>
+      `;
       return;
     }
     panel.innerHTML = `
-      <div class="image-review-subject-meta">${detail}</div>
-      <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Current student photo')}">
+      <div class="image-review-subject-card">
+        <div class="image-review-subject-meta">${detail}</div>
+        <div class="image-review-subject-photo">
+          <img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Current student photo')}">
+        </div>
+      </div>
     `;
     setLandscapeRotation(panel.querySelector('img'));
   } catch (error) {
-    panel.innerHTML = `<div class="image-review-subject-meta">${detail}</div><div class="empty-state">Preview unavailable.</div>`;
+    panel.innerHTML = `
+      <div class="image-review-subject-card">
+        <div class="image-review-subject-meta">${detail}</div>
+        <div class="image-review-subject-photo"><div class="empty-state">Preview unavailable.</div></div>
+      </div>
+    `;
     console.error(error);
   }
 }
