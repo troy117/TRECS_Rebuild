@@ -1739,10 +1739,38 @@ async function imagePreviewForId(imageId) {
   return jobsState.imagePreviewCache.get(imageId);
 }
 
-function setLandscapeRotation(image) {
-  image.addEventListener('load', () => {
-    image.classList.toggle('rotate-landscape-ccw', image.naturalWidth > image.naturalHeight);
-  }, { once: true });
+function fitRotatedImageToFrame(image) {
+  const frame = image.parentElement;
+  if (!frame || !image.naturalWidth || !image.naturalHeight || image.naturalWidth <= image.naturalHeight) {
+    image.style.width = '';
+    return;
+  }
+
+  const frameWidth = Math.max(0, frame.clientWidth - 20);
+  const frameHeight = Math.max(0, frame.clientHeight - 20);
+  if (!frameWidth || !frameHeight) {
+    return;
+  }
+
+  const aspect = image.naturalWidth / image.naturalHeight;
+  const fittedWidth = Math.min(frameHeight, frameWidth * aspect);
+  image.style.width = `${Math.max(120, fittedWidth)}px`;
+}
+
+function setLandscapeRotation(image, options = {}) {
+  const apply = () => {
+    const isLandscape = image.naturalWidth > image.naturalHeight;
+    image.classList.toggle('rotate-landscape-ccw', isLandscape);
+    if (options.fitRotatedToFrame) {
+      fitRotatedImageToFrame(image);
+    }
+  };
+
+  if (image.complete && image.naturalWidth) {
+    apply();
+  } else {
+    image.addEventListener('load', apply, { once: true });
+  }
 }
 
 function linkedImagesForSubject(subjectId) {
@@ -5096,7 +5124,7 @@ async function loadImagePreview(imageId, options = {}) {
     `;
   const previewImage = panel.querySelector('img');
   if (previewImage) {
-    setLandscapeRotation(previewImage);
+    setLandscapeRotation(previewImage, { fitRotatedToFrame: options.layout === 'review' });
     if (options.layout === 'review') {
       previewImage.addEventListener('dblclick', () => {
         openImageLightbox(imageId);
@@ -5256,7 +5284,7 @@ async function loadReviewSubjectPreview() {
         </div>
       </div>
     `;
-    setLandscapeRotation(panel.querySelector('img'));
+    setLandscapeRotation(panel.querySelector('img'), { fitRotatedToFrame: true });
   } catch (error) {
     panel.innerHTML = `
       <div class="image-review-subject-card">
