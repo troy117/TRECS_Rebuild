@@ -4078,7 +4078,8 @@ function renderCroppedImageSyncStatus(jobId) {
     return sync.message || 'Cropped image sync failed';
   }
 
-  return `Synced ${sync.registered} cropped images (${sync.croppedLarge} large, ${sync.croppedMed} medium). ${sync.unmatched} unmatched.`;
+  const skipped = sync.ambiguous ? ` ${sync.ambiguous} ambiguous.` : '';
+  return `Synced ${sync.registered} cropped images (${sync.croppedLarge} large, ${sync.croppedMed} medium). ${sync.unmatched} unmatched.${skipped}`;
 }
 
 function croppedSyncStatusFromResult(jobId, result) {
@@ -4092,7 +4093,8 @@ function croppedSyncStatusFromResult(jobId, result) {
     registered: result ? result.registered : 0,
     croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
     croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
-    unmatched: folders.reduce((total, folder) => total + ((folder.unmatched || []).length), 0)
+    unmatched: folders.reduce((total, folder) => total + ((folder.unmatched || []).length), 0),
+    ambiguous: folders.reduce((total, folder) => total + ((folder.ambiguous || []).length), 0)
   };
 }
 

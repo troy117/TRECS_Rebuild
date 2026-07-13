@@ -3278,16 +3278,70 @@ const CROPPED_IMAGE_FOLDERS = [
   { folder: 'CroppedMed', versionType: 'cropped_med' }
 ];
 
+function normalizedImageMatchName(filename) {
+  const extension = path.extname(String(filename || '')).toLowerCase();
+  const base = path.basename(String(filename || ''), path.extname(String(filename || '')))
+    .replace(/^\d+[-_]+/, '')
+    .toLowerCase();
+  return `${base}${extension}`;
+}
+
+function addCroppedImageLookupValue(lookup, key, row) {
+  const value = String(key || '').trim().toLowerCase();
+  if (!value) {
+    return;
+  }
+  if (!lookup.has(value)) {
+    lookup.set(value, []);
+  }
+  if (!lookup.get(value).some((item) => Number(item.id) === Number(row.id))) {
+    lookup.get(value).push(row);
+  }
+}
+
+function buildCroppedImageLookup(imageRows, aliases = false) {
+  const lookup = new Map();
+  imageRows.forEach((row) => {
+    addCroppedImageLookupValue(lookup, row.filename, row);
+    if (!aliases) {
+      return;
+    }
+    addCroppedImageLookupValue(lookup, path.basename(row.currentPath || ''), row);
+    addCroppedImageLookupValue(lookup, path.basename(row.originalPath || ''), row);
+    addCroppedImageLookupValue(lookup, normalizedImageMatchName(row.filename), row);
+    addCroppedImageLookupValue(lookup, normalizedImageMatchName(row.currentPath), row);
+    addCroppedImageLookupValue(lookup, normalizedImageMatchName(row.originalPath), row);
+  });
+  return lookup;
+}
+
+function croppedImageLookupMatch(exactLookup, aliasLookup, filename) {
+  const exact = exactLookup.get(String(filename || '').toLowerCase()) || [];
+  if (exact.length === 1) {
+    return { image: exact[0], ambiguous: false };
+  }
+  if (exact.length > 1) {
+    return { image: null, ambiguous: true };
+  }
+
+  const normalized = normalizedImageMatchName(filename);
+  const aliases = aliasLookup.get(normalized) || [];
+  if (aliases.length === 1) {
+    return { image: aliases[0], ambiguous: false };
+  }
+  return { image: null, ambiguous: aliases.length > 1 };
+}
+
 function scanCroppedImageFolder(jobRoot, folder, versionType, imageRows) {
   const folderPath = path.join(jobRoot, folder);
-  const imagesByFilename = new Map(
-    imageRows.map((row) => [String(row.filename || '').toLowerCase(), row])
-  );
+  const exactLookup = buildCroppedImageLookup(imageRows);
+  const aliasLookup = buildCroppedImageLookup(imageRows, true);
   const summary = {
     folder,
     versionType,
     scanned: 0,
     matched: 0,
+    ambiguous: [],
     unmatched: [],
     missingFolder: false
   };
@@ -3305,7 +3359,12 @@ function scanCroppedImageFolder(jobRoot, folder, versionType, imageRows) {
     }
 
     summary.scanned += 1;
-    const image = imagesByFilename.get(name.toLowerCase());
+    const match = croppedImageLookupMatch(exactLookup, aliasLookup, name);
+    const image = match.image;
+    if (match.ambiguous) {
+      summary.ambiguous.push(name);
+      return;
+    }
     if (!image) {
       summary.unmatched.push(name);
       return;
@@ -3333,7 +3392,11 @@ async function syncCroppedImages(_event, jobIdValue) {
   }
 
   const imageRows = await querySql(`
-    SELECT id, filename
+    SELECT
+      id,
+      filename,
+      current_path AS currentPath,
+      original_path AS originalPath
     FROM image_assets
     WHERE job_id = ${jobId};
   `);
