@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('trecs', {
   importPreviousTrecsJob: (input) => ipcRenderer.invoke('job:import-previous-trecs', input),
   chooseOnsiteSetupFolder: () => ipcRenderer.invoke('job:choose-onsite-setup-folder'),
   loadOnsiteSetup: (input) => ipcRenderer.invoke('job:load-onsite-setup', input),
+  loadOnsiteSetups: (input) => ipcRenderer.invoke('job:load-onsite-setups', input),
+  getSystemInfo: () => ipcRenderer.invoke('app:system-info'),
   chooseEndOfDayPackageFolder: () => ipcRenderer.invoke('end-of-day:choose-package-folder'),
   approveEndOfDayPackage: (input) => ipcRenderer.invoke('end-of-day:approve-package', input),
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
@@ -39,7 +41,7 @@ contextBridge.exposeInMainWorld('trecs', {
   updateOrder: (orderId, input) => ipcRenderer.invoke('order:update', orderId, input),
   deleteOrder: (orderId) => ipcRenderer.invoke('order:delete', orderId),
   findSubjectByBarcode: (jobId, barcode) => ipcRenderer.invoke('envelope:find-subject', jobId, barcode),
-  searchEnvelopeSubjects: (jobId, search) => ipcRenderer.invoke('envelope:search-subjects', jobId, search),
+  searchEnvelopeSubjects: (jobId, search, mode) => ipcRenderer.invoke('envelope:search-subjects', jobId, search, mode),
   startEnvelopeWatcher: (jobId, subjectId, hotFolder) => ipcRenderer.invoke('envelope:start-watcher', jobId, subjectId, hotFolder),
   stopEnvelopeWatcher: () => ipcRenderer.invoke('envelope:stop-watcher'),
   confirmEnvelopeScan: (accept) => ipcRenderer.invoke('envelope:confirm-scan', accept),
@@ -55,6 +57,7 @@ contextBridge.exposeInMainWorld('trecs', {
     ipcRenderer.removeAllListeners('menu:trecs-action');
     ipcRenderer.on('menu:trecs-action', (_event, action) => callback(action));
   },
+  setMenuContext: (context) => ipcRenderer.invoke('menu:set-context', context),
   getOrderEnvelopePreview: (orderId) => ipcRenderer.invoke('envelope:order-preview', orderId),
   getUnlinkedEnvelopeScans: (jobId) => ipcRenderer.invoke('envelope:unlinked-list', jobId),
   getEnvelopeScanPreview: (scanId) => ipcRenderer.invoke('envelope:scan-preview', scanId),

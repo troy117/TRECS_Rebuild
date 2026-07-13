@@ -21,6 +21,13 @@ const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 
 let sqlModulePromise;
 
+function systemInfo() {
+  return {
+    computerName: process.env.COMPUTERNAME || os.hostname() || '',
+    userName: process.env.USERNAME || os.userInfo().username || ''
+  };
+}
+
 function logStartup(message, error = null) {
   if (!portableMode) {
     return;
@@ -1390,6 +1397,7 @@ async function buildEndOfDayPreview(jobId) {
         ia.metadata_json AS metadataJson,
         ia.captured_at AS capturedAt,
         cs.workstation_name AS captureWorkstation,
+        cs.user_name AS photographerName,
         cs.file_mode AS captureFileMode,
         s.id AS subjectId,
         s.legacy_ref_num AS ref,
@@ -1432,11 +1440,16 @@ async function buildEndOfDayPreview(jobId) {
         };
     const localCapture = await readLocalCaptureRows(jobId);
 
+    const photographerNames = Array.from(new Set(capturedImages.map((image) => image.photographerName).filter(Boolean)));
+    const workstationNames = Array.from(new Set(capturedImages.map((image) => image.captureWorkstation).filter(Boolean)));
+
     return {
       job,
       baselinePath,
       hasBaseline,
       localCaptureDatabasePath: localCapture.dbPath,
+      photographerNames,
+      workstationNames,
       counts: {
         capturedImages: capturedImages.length,
         capturedRawFiles: capturedImages.filter((image) => image.rawPath).length,
@@ -1565,6 +1578,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       shootStage: image.shootStage || 'main',
       shootStageLabel: shootStageLabel(image.shootStage),
       captureWorkstation: image.captureWorkstation || null,
+      photographerName: image.photographerName || null,
       captureFileMode: image.captureFileMode || null,
       ref: image.ref,
       studentName: image.studentName,
@@ -1580,6 +1594,8 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     app: 'TRECS',
     createdAt: createdAt.toISOString(),
     workstation: process.env.COMPUTERNAME || os.hostname(),
+    photographerNames: preview.photographerNames || [],
+    workstationNames: preview.workstationNames || [],
     sourceDatabasePath: prototypeDatabasePath,
     job: preview.job,
     counts: adjustedCounts,
@@ -3590,7 +3606,7 @@ async function choosePreviousTrecsJobFolder(event) {
 
 async function chooseOnsiteSetupFolder(event) {
   const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
-    title: 'Choose Onsite Setup Folder',
+    title: 'Choose Onsite Setup Folder or Parent Folder',
     properties: ['openDirectory']
   });
 
@@ -3601,13 +3617,22 @@ async function chooseOnsiteSetupFolder(event) {
   const folderPath = result.filePaths[0];
   const manifestPath = path.join(folderPath, 'onsite-setup.json');
   const databasePath = path.join(folderPath, 'Database', 'job.db');
+  const childSetupFolders = fs.readdirSync(folderPath)
+    .map((name) => path.join(folderPath, name))
+    .filter((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isDirectory())
+    .filter((candidate) => fs.existsSync(path.join(candidate, 'onsite-setup.json')) && fs.existsSync(path.join(candidate, 'Database', 'job.db')));
+  const setupFolders = fs.existsSync(manifestPath) && fs.existsSync(databasePath)
+    ? [folderPath]
+    : childSetupFolders;
   return {
     canceled: false,
     folderPath,
     manifestPath,
     databasePath,
     hasManifest: fs.existsSync(manifestPath),
-    hasDatabase: fs.existsSync(databasePath)
+    hasDatabase: fs.existsSync(databasePath),
+    setupFolders,
+    setupCount: setupFolders.length
   };
 }
 
@@ -4517,10 +4542,48 @@ async function importPreviousTrecsJob(_event, input = {}) {
   return result;
 }
 
+async function loadOnsiteSetups(_event, input = {}) {
+  const setupFolders = Array.isArray(input.setupFolders) ? input.setupFolders : [];
+  const uniqueFolders = Array.from(new Set(setupFolders.map((folder) => String(folder || '').trim()).filter(Boolean)));
+  if (!uniqueFolders.length) {
+    throw new Error('No onsite setup folders were found');
+  }
+
+  const loaded = [];
+  const skipped = [];
+  for (const setupFolder of uniqueFolders) {
+    try {
+      const result = await loadOnsiteSetup(null, { setupFolder });
+      loaded.push(result);
+    } catch (error) {
+      skipped.push({
+        setupFolder,
+        message: error.message || 'Load failed'
+      });
+    }
+  }
+
+  if (!loaded.length && skipped.length) {
+    throw new Error(skipped.map((item) => `${path.basename(item.setupFolder)}: ${item.message}`).join('\n'));
+  }
+
+  return {
+    loaded,
+    skipped,
+    counts: {
+      loaded: loaded.length,
+      skipped: skipped.length,
+      subjects: loaded.reduce((total, item) => total + Number(item.counts && item.counts.subjects || 0), 0)
+    }
+  };
+}
+
 ipcMain.handle('job:choose-previous-trecs-folder', choosePreviousTrecsJobFolder);
 ipcMain.handle('job:import-previous-trecs', importPreviousTrecsJob);
 ipcMain.handle('job:choose-onsite-setup-folder', chooseOnsiteSetupFolder);
 ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
+ipcMain.handle('job:load-onsite-setups', loadOnsiteSetups);
+ipcMain.handle('app:system-info', () => systemInfo());
 ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
 ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
@@ -5911,15 +5974,39 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
   return { subject: subjectRowForEnvelope(rows[0]) };
 }
 
-async function searchEnvelopeSubjects(_event, jobIdValue, searchValue) {
+async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue = 'all') {
   const jobId = numericId(jobIdValue);
   const search = normalizeEnvelopeSearch(searchValue);
-  if (search.length < 2) {
+  const mode = ['all', 'name', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
+  const minimumLength = mode === 'grade' || mode === 'homeroom' ? 1 : 2;
+  if (search.length < minimumLength) {
     return [];
   }
 
   const likeSql = sqlLiteral(`%${search}%`);
   const exactSql = sqlLiteral(search);
+  const resultLimit = mode === 'grade' || mode === 'homeroom' ? 75 : 12;
+  const searchSql = mode === 'grade'
+    ? `(COALESCE(s.grade, '') LIKE ${likeSql})`
+    : mode === 'homeroom'
+      ? `(COALESCE(s.homeroom, '') LIKE ${likeSql})`
+      : mode === 'name'
+        ? `(
+            COALESCE(s.display_name, '') LIKE ${likeSql}
+            OR COALESCE(s.first_name, '') LIKE ${likeSql}
+            OR COALESCE(s.last_name, '') LIKE ${likeSql}
+            OR TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, '')) LIKE ${likeSql}
+          )`
+        : `(
+            s.legacy_ref_num = ${exactSql}
+            OR s.external_id = ${exactSql}
+            OR COALESCE(s.display_name, '') LIKE ${likeSql}
+            OR COALESCE(s.first_name, '') LIKE ${likeSql}
+            OR COALESCE(s.last_name, '') LIKE ${likeSql}
+            OR TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, '')) LIKE ${likeSql}
+            OR COALESCE(s.grade, '') LIKE ${likeSql}
+            OR COALESCE(s.homeroom, '') LIKE ${likeSql}
+          )`;
   const rows = await querySql(`
     SELECT
       s.id,
@@ -5941,14 +6028,7 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue) {
     FROM subjects s
     LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
     WHERE s.job_id = ${jobId}
-      AND (
-        s.legacy_ref_num = ${exactSql}
-        OR s.external_id = ${exactSql}
-        OR COALESCE(s.display_name, '') LIKE ${likeSql}
-        OR COALESCE(s.first_name, '') LIKE ${likeSql}
-        OR COALESCE(s.last_name, '') LIKE ${likeSql}
-        OR TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, '')) LIKE ${likeSql}
-      )
+      AND ${searchSql}
     ORDER BY
       CASE
         WHEN s.legacy_ref_num = ${exactSql} THEN 0
@@ -5956,10 +6036,12 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue) {
         WHEN COALESCE(s.display_name, '') LIKE ${likeSql} THEN 2
         ELSE 3
       END,
+      CASE WHEN ${mode === 'grade' ? `COALESCE(s.grade, '') = ${exactSql}` : '0'} THEN 0 ELSE 1 END,
+      CASE WHEN ${mode === 'homeroom' ? `COALESCE(s.homeroom, '') = ${exactSql}` : '0'} THEN 0 ELSE 1 END,
       s.last_name,
       s.first_name,
       s.id
-    LIMIT 12;
+    LIMIT ${resultLimit};
   `);
 
   return rows.map(subjectRowForEnvelope);
@@ -7012,8 +7094,8 @@ function getOrCreateCaptureSession(database, input) {
   const jobId = numericId(input.jobId);
   const shootStage = normalizeShootStage(input.shootStage);
   const fileMode = normalizeCaptureFileMode(input.fileMode);
-  const workstation = process.env.COMPUTERNAME || os.hostname() || 'workstation';
-  const userName = process.env.USERNAME || os.userInfo().username || null;
+  const workstation = optionalText(input.workstationName, 255) || process.env.COMPUTERNAME || os.hostname() || 'workstation';
+  const userName = optionalText(input.photographerName, 255) || process.env.USERNAME || os.userInfo().username || null;
   const hotFolderPath = input.hotFolder ? path.relative(projectRoot, input.hotFolder) : null;
   const localDatabasePath = localCaptureDatabasePath(jobId);
 
@@ -7026,6 +7108,7 @@ function getOrCreateCaptureSession(database, input) {
       AND shoot_stage = ${sqlLiteral(shootStage)}
       AND file_mode = ${sqlLiteral(fileMode)}
       AND workstation_name = ${sqlLiteral(workstation)}
+      AND COALESCE(user_name, '') = ${sqlLiteral(userName || '')}
     ORDER BY started_at DESC, id DESC
     LIMIT 1;
   `);
@@ -7107,6 +7190,16 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         s.id AS subjectId,
         s.legacy_ref_num AS ref,
         s.primary_image_asset_id AS previousPrimaryImageId,
+        (
+          SELECT si_selected.image_asset_id
+          FROM subject_images si_selected
+          JOIN image_assets ia_selected ON ia_selected.id = si_selected.image_asset_id
+          WHERE si_selected.subject_id = s.id
+            AND si_selected.selected = 1
+            AND ia_selected.status != 'rejected'
+          ORDER BY si_selected.sort_order, ia_selected.id DESC
+          LIMIT 1
+        ) AS selectedImageId,
         j.id AS jobId,
         j.root_path AS rootPath
       FROM subjects s
@@ -7143,6 +7236,8 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       hotFolder,
       shootStage,
       fileMode,
+      photographerName: options.photographerName,
+      workstationName: options.workstationName,
       storageRootPath: row.rootPath
     });
 
@@ -7198,14 +7293,10 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       versionStatement.free();
     }
 
-    database.run(`
-      UPDATE subject_images
-      SET selected = 0
-      WHERE subject_id = ?;
-    `, [subjectId]);
-
+    const selectedImageId = row.selectedImageId ? Number(row.selectedImageId) : null;
+    const shouldSelectNewImage = !selectedImageId;
     const previousPrimaryImageId = row.previousPrimaryImageId ? Number(row.previousPrimaryImageId) : null;
-    if (previousPrimaryImageId) {
+    if (previousPrimaryImageId && previousPrimaryImageId !== imageId) {
       database.run(`
         INSERT OR IGNORE INTO subject_images (
           subject_id,
@@ -7216,13 +7307,23 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         )
         VALUES (?, ?, 'capture', 0, 1);
       `, [subjectId, previousPrimaryImageId]);
+      if (previousPrimaryImageId !== selectedImageId) {
+        database.run(`
+          UPDATE subject_images
+          SET selected = 0,
+              sort_order = 1
+          WHERE subject_id = ?
+            AND image_asset_id = ?;
+        `, [subjectId, previousPrimaryImageId]);
+      }
+    }
+
+    if (shouldSelectNewImage) {
       database.run(`
         UPDATE subject_images
-        SET selected = 0,
-            sort_order = 1
-        WHERE subject_id = ?
-          AND image_asset_id = ?;
-      `, [subjectId, previousPrimaryImageId]);
+        SET selected = 0
+        WHERE subject_id = ?;
+      `, [subjectId]);
     }
 
     database.run(`
@@ -7233,24 +7334,35 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         selected,
         sort_order
       )
-      VALUES (?, ?, 'capture', 1, 0);
-    `, [subjectId, imageId]);
+      VALUES (?, ?, 'capture', ?, ?);
+    `, [subjectId, imageId, shouldSelectNewImage ? 1 : 0, shouldSelectNewImage ? 0 : 1]);
 
     database.run(`
       UPDATE subject_images
-      SET selected = 1,
-          sort_order = 0
+      SET selected = ?,
+          sort_order = ?
       WHERE subject_id = ?
         AND image_asset_id = ?;
-    `, [subjectId, imageId]);
+    `, [shouldSelectNewImage ? 1 : 0, shouldSelectNewImage ? 0 : 1, subjectId, imageId]);
 
+    if (selectedImageId) {
+      database.run(`
+        UPDATE subject_images
+        SET selected = 1,
+            sort_order = 0
+        WHERE subject_id = ?
+          AND image_asset_id = ?;
+      `, [subjectId, selectedImageId]);
+    }
+
+    const primaryImageId = shouldSelectNewImage ? imageId : selectedImageId;
     database.run(`
       UPDATE subjects
       SET primary_image_asset_id = ?,
           photographed_status = 'photographed',
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?;
-    `, [imageId, subjectId]);
+    `, [primaryImageId, subjectId]);
 
     database.run(`
       UPDATE capture_sessions
@@ -7271,7 +7383,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
         path: relativeDestination,
         dataUrl: imageDataUrl(destinationPath),
         rotationDegrees: 0,
-        selected: true,
+        selected: shouldSelectNewImage,
         shootStage,
         shootStageLabel: shootStageLabel(shootStage),
         fileMode
@@ -7312,7 +7424,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
       subjectId,
       hotFolder,
       shootStage,
-      fileMode
+      fileMode,
+      photographerName: options.photographerName,
+      workstationName: options.workstationName
     });
     return { captureSessionId };
   });
@@ -7330,6 +7444,8 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     lastSourcePath: null,
     fileMode,
     shootStage,
+    photographerName: optionalText(options.photographerName, 255),
+    workstationName: optionalText(options.workstationName, 255),
     captureSessionId,
     watcher: null
   };
@@ -7366,7 +7482,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
         }
         const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
           fileMode: watcherState.fileMode,
-          shootStage: watcherState.shootStage
+          shootStage: watcherState.shootStage,
+          photographerName: watcherState.photographerName,
+          workstationName: watcherState.workstationName
         });
         watcherState.lastSourcePath = sourcePath;
         watcherState.lastImportAt = Date.now();
@@ -7458,8 +7576,7 @@ async function getCaptureSubjectImages(_event, subjectIdValue) {
     WHERE si.subject_id = ${subjectId}
       AND ia.status != 'rejected'
     GROUP BY ia.id
-    ORDER BY ia.id DESC
-    LIMIT 2;
+    ORDER BY ia.id DESC;
   `);
 
   return rows.map((row) => {
@@ -8045,7 +8162,163 @@ function sendTrecsMenuAction(window, action) {
   window.webContents.send('menu:trecs-action', action);
 }
 
-function createApplicationMenu(window) {
+function menuAction(window, label, action) {
+  return { label, click: () => sendTrecsMenuAction(window, action) };
+}
+
+function menuActionMap(window) {
+  return {
+    newSchool: menuAction(window, 'New School', 'new-school'),
+    newJob: menuAction(window, 'New Job', 'new-job'),
+    importPreviousJob: menuAction(window, 'Import Previous TRECS Job', 'import-previous-job'),
+    loadOnsiteSetup: menuAction(window, 'Load Onsite Setup', 'load-onsite-setup'),
+    loadEndOfDay: menuAction(window, 'Load End of Day', 'load-end-of-day'),
+    studentFieldSetup: menuAction(window, 'Student Field Setup', 'student-field-setup'),
+    imageCapture: menuAction(window, 'Image Capture', 'image-capture'),
+    envelopeEntry: menuAction(window, 'Envelope Entry', 'envelope-entry'),
+    adminItems: menuAction(window, 'Admin Items', 'admin-items'),
+    addBlankRecords: menuAction(window, 'Add Blank Records', 'add-records'),
+    importSchoolData: menuAction(window, 'Import School Data', 'import-school-data'),
+    syncCroppedImages: menuAction(window, 'Sync Cropped Images', 'sync-cropped-images'),
+    createCroppedMedium: menuAction(window, 'Create Cropped Medium', 'create-cropped-medium'),
+    imageReview: menuAction(window, 'Image Review', 'image-review'),
+    cropTool: menuAction(window, '8x10 Crop Tool', 'crop-tool'),
+    prepareOnsiteSetup: menuAction(window, 'Prepare Onsite Setup', 'prepare-onsite-setup'),
+    makeEndOfDay: menuAction(window, 'Make End of Day', 'make-end-of-day')
+  };
+}
+
+function createContextMenus(window, context) {
+  const actions = menuActionMap(window);
+  if (context === 'job') {
+    return [
+      {
+        label: 'Job',
+        submenu: [
+          actions.newSchool,
+          actions.newJob,
+          actions.importPreviousJob,
+          actions.loadOnsiteSetup,
+          actions.loadEndOfDay
+        ]
+      },
+      {
+        label: 'TRECS',
+        submenu: [
+          actions.studentFieldSetup,
+          { type: 'separator' },
+          actions.imageCapture,
+          actions.envelopeEntry,
+          actions.adminItems,
+          { type: 'separator' },
+          actions.cropTool,
+          actions.prepareOnsiteSetup,
+          actions.makeEndOfDay
+        ]
+      }
+    ];
+  }
+
+  if (context === 'student') {
+    return [
+      {
+        label: 'Student',
+        submenu: [
+          actions.addBlankRecords,
+          actions.importSchoolData,
+          actions.syncCroppedImages,
+          actions.createCroppedMedium,
+          actions.imageReview
+        ]
+      },
+      {
+        label: 'TRECS',
+        submenu: [
+          actions.newSchool,
+          actions.newJob,
+          actions.importPreviousJob,
+          actions.loadOnsiteSetup,
+          actions.loadEndOfDay,
+          { type: 'separator' },
+          actions.studentFieldSetup,
+          { type: 'separator' },
+          actions.imageCapture,
+          actions.envelopeEntry,
+          actions.adminItems,
+          { type: 'separator' },
+          actions.cropTool,
+          actions.prepareOnsiteSetup,
+          actions.makeEndOfDay
+        ]
+      }
+    ];
+  }
+
+  if (context === 'capture') {
+    return [
+      {
+        label: 'Capture',
+        submenu: [
+          actions.makeEndOfDay,
+          actions.addBlankRecords
+        ]
+      },
+      {
+        label: 'TRECS',
+        submenu: [
+          actions.newSchool,
+          actions.newJob,
+          actions.importPreviousJob,
+          actions.loadOnsiteSetup,
+          actions.loadEndOfDay,
+          { type: 'separator' },
+          actions.studentFieldSetup,
+          { type: 'separator' },
+          actions.imageCapture,
+          actions.envelopeEntry,
+          actions.adminItems,
+          { type: 'separator' },
+          actions.importSchoolData,
+          actions.syncCroppedImages,
+          actions.createCroppedMedium,
+          actions.imageReview,
+          actions.cropTool,
+          actions.prepareOnsiteSetup
+        ]
+      }
+    ];
+  }
+
+  return [
+    {
+      label: 'TRECS',
+      submenu: [
+        actions.newSchool,
+        actions.newJob,
+        actions.importPreviousJob,
+        actions.loadOnsiteSetup,
+        actions.loadEndOfDay,
+        { type: 'separator' },
+        actions.studentFieldSetup,
+        { type: 'separator' },
+        actions.imageCapture,
+        actions.envelopeEntry,
+        actions.adminItems,
+        actions.addBlankRecords,
+        { type: 'separator' },
+        actions.importSchoolData,
+        actions.syncCroppedImages,
+        actions.createCroppedMedium,
+        actions.imageReview,
+        actions.cropTool,
+        actions.prepareOnsiteSetup,
+        actions.makeEndOfDay
+      ]
+    }
+  ];
+}
+
+function createApplicationMenu(window, context = 'job') {
   const template = [
     {
       label: 'File',
@@ -8086,30 +8359,7 @@ function createApplicationMenu(window) {
         { role: 'close' }
       ]
     },
-    {
-      label: 'TRECS',
-      submenu: [
-        { label: 'New School', click: () => sendTrecsMenuAction(window, 'new-school') },
-        { label: 'New Job', click: () => sendTrecsMenuAction(window, 'new-job') },
-        { label: 'Import Previous Job', click: () => sendTrecsMenuAction(window, 'import-previous-job') },
-        { label: 'Load Onsite Setup', click: () => sendTrecsMenuAction(window, 'load-onsite-setup') },
-        { label: 'Load End of Day', click: () => sendTrecsMenuAction(window, 'load-end-of-day') },
-        { type: 'separator' },
-        { label: 'Student Field Setup', click: () => sendTrecsMenuAction(window, 'student-field-setup') },
-        { type: 'separator' },
-        { label: 'Image Capture', click: () => sendTrecsMenuAction(window, 'image-capture') },
-        { label: 'Envelope Entry', click: () => sendTrecsMenuAction(window, 'envelope-entry') },
-        { label: 'Admin Items', click: () => sendTrecsMenuAction(window, 'admin-items') },
-        { label: 'Add Records', click: () => sendTrecsMenuAction(window, 'add-records') },
-        { type: 'separator' },
-        { label: 'Import School Data', click: () => sendTrecsMenuAction(window, 'import-school-data') },
-        { label: 'Sync Cropped Images', click: () => sendTrecsMenuAction(window, 'sync-cropped-images') },
-        { label: 'Create Cropped Medium', click: () => sendTrecsMenuAction(window, 'create-cropped-medium') },
-        { label: '8x10 Crop Tool', click: () => sendTrecsMenuAction(window, 'crop-tool') },
-        { label: 'Prepare Onsite Setup', click: () => sendTrecsMenuAction(window, 'prepare-onsite-setup') },
-        { label: 'Make End of Day', click: () => sendTrecsMenuAction(window, 'make-end-of-day') }
-      ]
-    },
+    ...createContextMenus(window, context),
     {
       label: 'Help',
       submenu: [
@@ -8120,6 +8370,12 @@ function createApplicationMenu(window) {
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
+
+ipcMain.handle('menu:set-context', (event, contextValue) => {
+  const context = ['job', 'student', 'capture', 'default'].includes(String(contextValue || '')) ? String(contextValue) : 'default';
+  createApplicationMenu(BrowserWindow.fromWebContents(event.sender), context);
+  return { context };
+});
 
 function createWindow() {
   logStartup('createWindow');

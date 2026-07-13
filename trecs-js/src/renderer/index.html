@@ -400,30 +400,24 @@
 
             <section class="capture-workspace" id="captureWorkspace" hidden>
               <section class="panel capture-entry-panel">
-                <div class="panel-heading">
-                  <h2>Image Capture</h2>
-                </div>
                 <form class="capture-entry-form" id="captureEntryForm">
                   <label>
-                    <span>Camera Card Barcode / Ref</span>
                     <input name="barcode" autocomplete="off" placeholder="Scan barcode">
                   </label>
                   <label class="capture-search-field">
-                    <span>Student Name Search</span>
-                    <input name="studentSearch" autocomplete="off" placeholder="Type student name">
+                    <span>Student Search</span>
+                    <div class="capture-search-row">
+                      <select name="searchMode">
+                        <option value="all">All</option>
+                        <option value="name">Name</option>
+                        <option value="grade">Grade</option>
+                        <option value="homeroom">Homeroom</option>
+                      </select>
+                      <input name="studentSearch" autocomplete="off" placeholder="Name, grade, or homeroom">
+                    </div>
                     <div id="captureStudentSearchResults" class="student-search-results" hidden></div>
                   </label>
-                  <div class="capture-mode-control">
-                    <span>Shoot Stage</span>
-                    <select name="shootStage" id="captureShootStageSelect">
-                      <option value="main">Main Picture Day</option>
-                      <option value="makeup">Makeup Day</option>
-                      <option value="retake">Retake</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  <div class="capture-mode-control">
-                    <span>Capture Files</span>
+                  <div class="capture-mode-control" id="captureFileModeControl">
                     <div class="segmented compact" id="captureFileModeToggle">
                       <button data-capture-file-mode="jpg_raw" type="button">JPG + CR3</button>
                       <button data-capture-file-mode="jpg_only" type="button">JPG Only</button>
@@ -438,9 +432,13 @@
 
               <section class="panel capture-compare-panel">
                 <div class="panel-heading">
-                  <h2>Compare Images</h2>
+                  <div class="capture-title-row">
+                    <button class="secondary small capture-back-button" id="captureBackToStudentsButton" type="button">Back to Students</button>
+                    <span id="captureSessionMeta" class="capture-session-meta"></span>
+                  </div>
                   <div class="capture-heading-status">
                     <span id="capturePairStatus" class="capture-pair-status ready"><i></i>Ready</span>
+                    <span id="capturePhotoCount" class="capture-photo-count"></span>
                     <span id="capturePreviewMeta"></span>
                   </div>
                 </div>
@@ -680,6 +678,37 @@
       </main>
     </div>
     <div id="imageHoverPreview" class="image-hover-preview" hidden></div>
+
+    <div class="modal-backdrop" id="captureLoginModal" hidden>
+      <form class="modal-card capture-login-card" id="captureLoginForm">
+        <div class="modal-heading">
+          <h2>Capture Sign In</h2>
+          <button id="cancelCaptureLoginButton" type="button">Cancel</button>
+        </div>
+        <label>
+          <span>Photographer</span>
+          <input name="photographerName" autocomplete="name" required>
+        </label>
+        <label>
+          <span>Computer</span>
+          <input name="workstationName" required>
+        </label>
+        <label>
+          <span>Shoot Stage</span>
+          <select name="shootStage">
+            <option value="main">Main Picture Day</option>
+            <option value="makeup">Makeup Day</option>
+            <option value="retake">Retake</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <p id="captureLoginStatus"></p>
+        <div class="form-actions">
+          <span>This information will be included in End of Day.</span>
+          <button class="primary" type="submit">Start Capture</button>
+        </div>
+      </form>
+    </div>
 
     <script src="./renderer.js"></script>
   </body>
