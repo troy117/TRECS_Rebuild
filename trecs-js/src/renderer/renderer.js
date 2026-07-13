@@ -3976,6 +3976,21 @@ function renderCroppedImageSyncStatus(jobId) {
   return `Synced ${sync.registered} cropped images (${sync.croppedLarge} large, ${sync.croppedMed} medium). ${sync.unmatched} unmatched.`;
 }
 
+function croppedSyncStatusFromResult(jobId, result) {
+  const folders = result && result.folders ? result.folders : [];
+  const folderCounts = Object.fromEntries(
+    folders.map((folder) => [folder.versionType, folder])
+  );
+  return {
+    jobId,
+    status: 'done',
+    registered: result ? result.registered : 0,
+    croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
+    croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
+    unmatched: folders.reduce((total, folder) => total + ((folder.unmatched || []).length), 0)
+  };
+}
+
 function renderCroppedMediumStatus(jobId) {
   const generation = jobsState.lastCroppedMediumGeneration;
   if (!generation || generation.jobId !== jobId) {
@@ -4036,20 +4051,7 @@ async function performGenerateCroppedMedium(jobId) {
       skipped: result.skipped || 0,
       failed: result.failed || 0
     };
-    jobsState.lastCroppedImageSync = {
-      jobId,
-      status: 'done',
-      registered: result.syncResult ? result.syncResult.registered : 0,
-      croppedLarge: result.syncResult && result.syncResult.folders
-        ? (Object.fromEntries(result.syncResult.folders.map((folder) => [folder.versionType, folder])).cropped_large || {}).matched || 0
-        : 0,
-      croppedMed: result.syncResult && result.syncResult.folders
-        ? (Object.fromEntries(result.syncResult.folders.map((folder) => [folder.versionType, folder])).cropped_med || {}).matched || 0
-        : 0,
-      unmatched: result.syncResult && result.syncResult.folders
-        ? result.syncResult.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
-        : 0
-    };
+    jobsState.lastCroppedImageSync = croppedSyncStatusFromResult(jobId, result.syncResult);
     croppedMediumStatus.textContent = `Done. ${formatNumber(result.created || 0)} created, ${formatNumber(result.skipped || 0)} skipped, ${formatNumber(result.failed || 0)} failed.`;
     closeCroppedMediumButton.disabled = false;
     await reloadCurrentJobDetail();
@@ -4167,17 +4169,7 @@ async function performSyncCroppedImages(jobId) {
   try {
     const result = await trecsApi('syncCroppedImages').syncCroppedImages(jobId);
     jobsState.imagePreviewCache.clear();
-    const folderCounts = Object.fromEntries(
-      result.folders.map((folder) => [folder.versionType, folder])
-    );
-    jobsState.lastCroppedImageSync = {
-      jobId,
-      status: 'done',
-      registered: result.registered,
-      croppedLarge: folderCounts.cropped_large ? folderCounts.cropped_large.matched : 0,
-      croppedMed: folderCounts.cropped_med ? folderCounts.cropped_med.matched : 0,
-      unmatched: result.folders.reduce((total, folder) => total + folder.unmatched.length, 0)
-    };
+    jobsState.lastCroppedImageSync = croppedSyncStatusFromResult(jobId, result);
     await reloadCurrentJobDetail();
   } catch (error) {
     jobsState.lastCroppedImageSync = {
