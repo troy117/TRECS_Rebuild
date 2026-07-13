@@ -2266,14 +2266,118 @@ dd {
   width: min(39vh, 375px);
 }
 
-.linked-image-row,
 [data-hover-image-id] {
   cursor: zoom-in;
 }
 
-.linked-image-row {
-  border: 1px solid transparent;
+.linked-image-card {
+  background: #fff;
+  border: 1px solid #d7e0e8;
   border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.linked-image-card {
+  cursor: zoom-in;
+}
+
+.linked-image-topline {
+  align-items: center;
+  color: #52677a;
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.linked-image-topline span,
+.linked-image-topline small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linked-image-file {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.linked-image-preview-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 74px minmax(0, 1fr);
+}
+
+.linked-image-preview-row em {
+  color: #52677a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.linked-image-thumb {
+  align-items: center;
+  background: #eef2f5;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: flex;
+  height: 88px;
+  justify-content: center;
+  min-height: 0;
+  padding: 3px;
+  width: 74px;
+}
+
+.linked-image-thumb img {
+  display: block;
+  max-height: 100%;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.linked-image-thumb img.rotate-landscape-ccw {
+  max-height: none;
+  max-width: none;
+  transform: rotate(-90deg);
+  width: 78px;
+}
+
+.linked-image-thumb span {
+  color: #617488;
+  font-size: 11px;
+}
+
+.linked-image-availability {
+  border: 1px solid #edf1f5;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.linked-image-availability th,
+.linked-image-availability td {
+  font-size: 11px;
+  padding: 6px 7px;
+  text-align: center;
+}
+
+.linked-image-availability th:first-child,
+.linked-image-availability td:first-child {
+  text-align: left;
+}
+
+.availability-mark {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.availability-mark.yes {
+  color: #157347;
+}
+
+.availability-mark.no {
+  color: #b42318;
 }
 
 .selected-linked-image {
@@ -2290,14 +2394,17 @@ dd {
 .linked-image-actions {
   display: grid;
   gap: 6px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .linked-image-actions button {
   cursor: pointer;
   min-height: 30px;
   padding: 5px 8px;
+}
+
+.linked-image-actions button:only-child {
+  grid-column: 1 / -1;
 }
 
 .workspace-fields {

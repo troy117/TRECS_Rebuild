@@ -5073,6 +5073,9 @@ async function getJobDetail(_event, jobIdValue) {
         ELSE MIN(si.role)
       END AS role,
       MAX(si.selected) AS selected,
+      MAX(CASE WHEN iv.version_type = 'original' THEN 1 ELSE 0 END) AS hasOriginal,
+      MAX(CASE WHEN iv.version_type = 'cropped_large' THEN 1 ELSE 0 END) AS hasCroppedLarge,
+      MAX(CASE WHEN iv.version_type = 'cropped_med' THEN 1 ELSE 0 END) AS hasCroppedMed,
       COALESCE(
         MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
         MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),

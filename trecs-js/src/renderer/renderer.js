@@ -1840,6 +1840,132 @@ function linkedImagesForSubject(subjectId) {
   return rowsFor(jobsState.detail && jobsState.detail.subjectImages ? jobsState.detail.subjectImages : [], 'subjectId', subjectId);
 }
 
+function availabilityMark(value) {
+  return value ? '<span class="availability-mark yes" aria-label="Exists">&#10003;</span>' : '<span class="availability-mark no" aria-label="Missing">&times;</span>';
+}
+
+function linkedImageAvailabilityTable(image) {
+  const hasImage = Number(image.hasOriginal || 0) > 0 || Boolean(image.currentPath);
+  return `
+    <table class="linked-image-availability">
+      <thead>
+        <tr>
+          <th>Image Sources</th>
+          <th>Image</th>
+          <th>Cropped Large</th>
+          <th>CroppedMed</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>${escapeHtml(image.source || image.captureFileMode || 'capture')}</td>
+          <td>${availabilityMark(hasImage)}</td>
+          <td>${availabilityMark(Number(image.hasCroppedLarge || 0) > 0)}</td>
+          <td>${availabilityMark(Number(image.hasCroppedMed || 0) > 0)}</td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+}
+
+function linkedImageStatusLine(image) {
+  const parts = [];
+  if (image.selected) {
+    parts.push('selected');
+  } else if (image.role) {
+    parts.push(image.role);
+  }
+  if (image.status === 'rejected') {
+    parts.push('rejected');
+  }
+  parts.push(image.shootStageLabel || 'Unknown event');
+  return parts.join(' / ');
+}
+
+function renderLinkedImageCard(image, options = {}) {
+  const subjectId = options.subjectId || '';
+  const mode = options.mode || 'workspace';
+  const imageId = image.imageAssetId;
+  const selected = Boolean(image.selected);
+  const rejected = image.status === 'rejected';
+  const selectAttr = mode === 'workspace'
+    ? `data-workspace-select-image="${imageId}"`
+    : `data-link-subject-id="${subjectId}" data-link-image-id="${imageId}"`;
+  const selectLabel = selected ? 'Selected' : 'Set Selected';
+  const rejectButton = mode === 'workspace'
+    ? `<button data-workspace-reject-image="${imageId}" data-rejected="${rejected ? '1' : '0'}" type="button">${rejected ? 'Restore' : 'Reject'}</button>`
+    : '';
+  const unlinkButton = mode === 'workspace'
+    ? `<button data-workspace-unlink-image="${imageId}" type="button">Unlink</button>`
+    : '';
+
+  return `
+    <div class="linked-image-card ${selected ? 'selected-linked-image' : ''} ${rejected ? 'rejected-linked-image' : ''}" data-linked-image-card="${imageId}" data-linked-image-subject-id="${subjectId}">
+      <div class="linked-image-topline">
+        <span>${escapeHtml(linkedImageStatusLine(image))}</span>
+        <small>${escapeHtml(image.captureWorkstation || '')}</small>
+      </div>
+      <strong class="linked-image-file">${escapeHtml(image.filename || '')}</strong>
+      <div class="linked-image-preview-row">
+        <button class="linked-image-thumb" data-open-linked-image="${imageId}" type="button">
+          <span>Loading</span>
+        </button>
+        <em>${escapeHtml(linkedImageMetaLine(image))}</em>
+      </div>
+      ${linkedImageAvailabilityTable(image)}
+      <div class="linked-image-actions">
+        <button ${selectAttr} type="button" ${selected || rejected ? 'disabled' : ''}>${selectLabel}</button>
+        ${rejectButton}
+        ${unlinkButton}
+      </div>
+    </div>
+  `;
+}
+
+async function loadLinkedImageThumbnails(root = document) {
+  const thumbs = Array.from(root.querySelectorAll('.linked-image-thumb[data-open-linked-image]'));
+  await Promise.all(thumbs.map(async (button) => {
+    const imageId = Number(button.dataset.openLinkedImage);
+    if (!imageId) {
+      return;
+    }
+    try {
+      const preview = await imagePreviewForId(imageId);
+      if (!preview || preview.missing || !preview.dataUrl) {
+        button.innerHTML = '<span>No preview</span>';
+        return;
+      }
+      button.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Linked image thumbnail')}">`;
+      setLandscapeRotation(button.querySelector('img'));
+    } catch (error) {
+      button.innerHTML = '<span>No preview</span>';
+      console.error(error);
+    }
+  }));
+}
+
+function bindLinkedImageCards(root = document) {
+  root.querySelectorAll('[data-linked-image-card]').forEach((card) => {
+    card.addEventListener('dblclick', (event) => {
+      if (event.target.closest('button')) {
+        return;
+      }
+      openImageLightbox(Number(card.dataset.linkedImageCard), {
+        subjectId: Number(card.dataset.linkedImageSubjectId) || null
+      });
+    });
+  });
+  root.querySelectorAll('[data-open-linked-image]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const card = button.closest('[data-linked-image-card]');
+      openImageLightbox(Number(button.dataset.openLinkedImage), {
+        subjectId: card ? Number(card.dataset.linkedImageSubjectId) || null : null
+      });
+    });
+  });
+  loadLinkedImageThumbnails(root);
+}
+
 function lightboxImagesForSubject(subjectId, fallbackImageId) {
   const linkedImages = linkedImagesForSubject(subjectId);
   const ids = linkedImages.map((image) => Number(image.imageAssetId)).filter(Boolean);
@@ -2107,23 +2233,7 @@ function renderWorkspaceOrderDetail(subject) {
     )}
     ${renderMiniSection(
       'Linked Images',
-      images.map((image) => `
-        <div class="linked-image-row ${image.selected ? 'selected-linked-image' : ''} ${image.status === 'rejected' ? 'rejected-linked-image' : ''}" data-hover-image-id="${image.imageAssetId}">
-          <span>${image.role}${image.selected ? ' / selected' : ''}${image.status === 'rejected' ? ' / rejected' : ''}</span>
-          <strong>${image.filename}</strong>
-          <em>${escapeHtml(linkedImageMetaLine(image))}</em>
-          <div class="linked-image-actions">
-            <button data-open-linked-image="${image.imageAssetId}" type="button">Open</button>
-            <button data-workspace-select-image="${image.imageAssetId}" type="button" ${image.selected || image.status === 'rejected' ? 'disabled' : ''}>
-              ${image.selected ? 'Selected' : 'Set Selected'}
-            </button>
-            <button data-workspace-reject-image="${image.imageAssetId}" data-rejected="${image.status === 'rejected' ? '1' : '0'}" type="button">
-              ${image.status === 'rejected' ? 'Restore' : 'Reject'}
-            </button>
-            <button data-workspace-unlink-image="${image.imageAssetId}" type="button">Unlink</button>
-          </div>
-        </div>
-      `),
+      images.map((image) => renderLinkedImageCard(image, { subjectId: subject.id, mode: 'workspace' })),
       'No linked images.'
     )}
   `;
@@ -2148,11 +2258,6 @@ function renderWorkspaceOrderDetail(subject) {
       await saveSubjectImageLink(subject.id, Number(button.dataset.workspaceSelectImage), button);
     });
   });
-  workspaceOrderDetail.querySelectorAll('[data-open-linked-image]').forEach((button) => {
-    button.addEventListener('click', () => {
-      openImageLightbox(Number(button.dataset.openLinkedImage), { subjectId: subject.id });
-    });
-  });
   workspaceOrderDetail.querySelectorAll('[data-workspace-reject-image]').forEach((button) => {
     button.addEventListener('click', async () => {
       const imageId = Number(button.dataset.workspaceRejectImage);
@@ -2165,7 +2270,7 @@ function renderWorkspaceOrderDetail(subject) {
       await unlinkLinkedImage(subject.id, Number(button.dataset.workspaceUnlinkImage), button);
     });
   });
-  bindHoverImagePreviews(workspaceOrderDetail);
+  bindLinkedImageCards(workspaceOrderDetail);
 }
 
 async function showOrderEnvelope(orderId) {
@@ -4793,6 +4898,7 @@ function renderSubjectsTab(subjects) {
 
   bindNoteForms();
   bindImageLinkActions();
+  bindLinkedImageCards(jobWorkflowContent);
   bindHoverImagePreviews(jobWorkflowContent);
 }
 
@@ -4978,14 +5084,7 @@ function renderSubjectDetail(subject) {
     )}
     ${renderMiniSection(
       'Linked Images',
-      images.map((image) => `
-        <div class="linked-image-row" data-hover-image-id="${image.imageAssetId}">
-          <span>${image.role}${image.selected ? ' / selected' : ''}</span>
-          <strong>${image.filename}</strong>
-          <em>${escapeHtml(linkedImageMetaLine(image))}</em>
-          <button data-link-subject-id="${subject.id}" data-link-image-id="${image.imageAssetId}">Set Primary</button>
-        </div>
-      `),
+      images.map((image) => renderLinkedImageCard(image, { subjectId: subject.id, mode: 'detail' })),
       'No linked images.'
     )}
   `;
