@@ -205,6 +205,40 @@ async function updateLocalCaptureSelection(jobId, subjectId, imageAssetId) {
   }
 }
 
+async function markLocalCaptureEventsPackaged(jobId, copiedImages) {
+  const SQL = await getSqlModule();
+  const dbPath = localCaptureDatabasePath(jobId);
+  if (!fs.existsSync(dbPath)) {
+    return null;
+  }
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+
+  try {
+    createLocalCaptureSchema(database);
+    copiedImages.forEach((image) => {
+      database.run(`
+        UPDATE capture_events
+        SET sync_status = 'packaged',
+            jpg_path = ?,
+            cr3_path = ?,
+            selected = ?
+        WHERE job_id = ?
+          AND image_asset_id = ?;
+      `, [
+        image.jpgPath || null,
+        image.rawPath || null,
+        image.selected ? 1 : 0,
+        jobId,
+        image.imageAssetId
+      ]);
+    });
+    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    return dbPath;
+  } finally {
+    database.close();
+  }
+}
+
 function createJobDatabaseSchema(database) {
   database.run(`
     PRAGMA foreign_keys = ON;
@@ -821,6 +855,15 @@ function timestampForFolder(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, '-');
 }
 
+function endOfDayTimestampForFolder(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-') + `-${pad(date.getHours())}${pad(date.getMinutes())}`;
+}
+
 function normalizeText(value, label, maxLength = 255) {
   const text = String(value || '').trim();
   if (!text) {
@@ -1229,6 +1272,7 @@ function localCaptureRowsFromDatabase(database, jobId) {
     SELECT *
     FROM capture_events
     WHERE job_id = ${jobId}
+      AND sync_status != 'packaged'
     ORDER BY captured_at, id;
   `);
 }
@@ -1409,6 +1453,7 @@ async function buildEndOfDayPreview(jobId) {
       LEFT JOIN subjects s ON s.id = si.subject_id
       WHERE ia.job_id = ${jobId}
         AND ia.source = 'capture_hot_folder'
+        AND ia.status != 'packaged'
       ORDER BY ia.captured_at, ia.id;
     `).map((row) => {
       const metadata = parseImageMetadata(row.metadataJson);
@@ -1471,7 +1516,7 @@ async function getEndOfDayPreview(_event, jobIdValue) {
   return buildEndOfDayPreview(numericId(jobIdValue));
 }
 
-function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
+function movePackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
   if (!sourcePathValue) {
     return null;
   }
@@ -1483,8 +1528,23 @@ function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null
 
   fs.mkdirSync(destinationFolder, { recursive: true });
   const destinationPath = uniquePath(destinationFolder, fallbackName || path.basename(sourcePath));
-  fs.copyFileSync(sourcePath, destinationPath);
+  moveFile(sourcePath, destinationPath);
   return path.relative(projectRoot, destinationPath);
+}
+
+function endOfDayPackageDisplayName(preview, createdAt) {
+  const timestamp = endOfDayTimestampForFolder(createdAt);
+  const workstation = (preview.workstationNames && preview.workstationNames.length === 1)
+    ? preview.workstationNames[0]
+    : preview.workstationNames && preview.workstationNames.length > 1
+      ? 'Multiple Computers'
+      : process.env.COMPUTERNAME || os.hostname() || 'Computer';
+  const photographer = (preview.photographerNames && preview.photographerNames.length === 1)
+    ? preview.photographerNames[0]
+    : preview.photographerNames && preview.photographerNames.length > 1
+      ? 'Multiple Photographers'
+      : process.env.USERNAME || os.userInfo().username || 'Photographer';
+  return safeFolderName(`EOD - ${timestamp} - ${workstation} - ${photographer}`);
 }
 
 function adjustedEndOfDaySubjectChanges(preview, adjustments = {}) {
@@ -1550,28 +1610,22 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     deletedSubjects: (subjectChanges.deletedSubjects || []).length
   };
   const createdAt = new Date();
-  const packageName = `${safeFolderName(`${preview.job.trecsName || preview.job.clientName}-${preview.job.name}`)}-end-of-day-${timestampForFolder(createdAt)}`;
-  const packagePath = path.join(projectRoot, 'exports', 'end-of-day', packageName);
+  const packageName = endOfDayPackageDisplayName(preview, createdAt);
+  const packagePath = uniquePath(path.join(projectRoot, 'exports', 'end-of-day'), packageName);
   const databaseFolder = path.join(packagePath, 'Database');
-  const imagesFolder = path.join(packagePath, 'Images');
+  const jpgFolder = path.join(packagePath, 'JPG');
+  const rawFolder = path.join(packagePath, 'CR3');
   fs.mkdirSync(databaseFolder, { recursive: true });
-  fs.mkdirSync(imagesFolder, { recursive: true });
-
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
-    fs.copyFileSync(jobDatabasePath, path.join(databaseFolder, 'job.db'));
-  }
-  if (preview.localCaptureDatabasePath && fs.existsSync(preview.localCaptureDatabasePath)) {
-    fs.copyFileSync(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
-  }
+  fs.mkdirSync(jpgFolder, { recursive: true });
+  fs.mkdirSync(rawFolder, { recursive: true });
   if (preview.hasBaseline && fs.existsSync(preview.baselinePath)) {
     fs.copyFileSync(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
   }
 
   const copiedImages = [];
   preview.capturedImages.forEach((image) => {
-    const jpgPath = copyPackageFile(image.currentPath, imagesFolder);
-    const rawPath = copyPackageFile(image.rawPath, imagesFolder);
+    const jpgPath = movePackageFile(image.currentPath, jpgFolder);
+    const rawPath = movePackageFile(image.rawPath, rawFolder);
     copiedImages.push({
       imageAssetId: image.id,
       captureSessionId: image.captureSessionId,
@@ -1588,6 +1642,51 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       selected: image.selected === 1
     });
   });
+
+  await writeSql((database) => {
+    copiedImages.forEach((image) => {
+      const currentPath = image.jpgPath || null;
+      const metadata = {
+        rawPath: image.rawPath || null,
+        fileMode: image.captureFileMode || null,
+        shootStage: image.shootStage || null,
+        captureSessionId: image.captureSessionId || null,
+        endOfDayPackage: path.relative(projectRoot, packagePath)
+      };
+      database.run(`
+        UPDATE image_assets
+        SET original_path = ?,
+            current_path = ?,
+            status = 'packaged',
+            metadata_json = ?,
+            imported_at = CURRENT_TIMESTAMP
+        WHERE id = ?;
+      `, [
+        currentPath,
+        currentPath,
+        JSON.stringify(metadata),
+        image.imageAssetId
+      ]);
+      if (currentPath) {
+        database.run(`
+          UPDATE image_versions
+          SET path = ?
+          WHERE image_asset_id = ?
+            AND version_type = 'original';
+        `, [currentPath, image.imageAssetId]);
+      }
+    });
+    return { closedImages: copiedImages.length };
+  });
+  await markLocalCaptureEventsPackaged(jobId, copiedImages);
+  if (preview.localCaptureDatabasePath && fs.existsSync(preview.localCaptureDatabasePath)) {
+    fs.copyFileSync(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
+  }
+
+  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
+    fs.copyFileSync(jobDatabasePath, path.join(databaseFolder, 'job.db'));
+  }
 
   const manifest = {
     packageType: 'end_of_day',
@@ -1606,7 +1705,8 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       database: 'Database/job.db',
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
       onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
-      images: 'Images'
+      images: 'JPG',
+      rawImages: 'CR3'
     }
   };
 
@@ -3759,7 +3859,8 @@ function readEndOfDayPackage(packageFolder) {
     manifest,
     manifestPath,
     databasePath,
-    imagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images')
+    imagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'),
+    rawImagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.rawImages ? manifest.paths.rawImages : (manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'))
   };
 }
 
@@ -3814,6 +3915,7 @@ function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
   const copiedByImageId = new Map((packageInfo.manifest.copiedImages || []).map((image) => [Number(image.imageAssetId), image]));
   const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'Images');
   let copied = 0;
+  const importedPathByImageId = new Map();
 
   fs.mkdirSync(destinationFolder, { recursive: true });
 
@@ -3826,33 +3928,33 @@ function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
     let currentPath = row.current_path;
     let metadata = parseImageMetadata(row.metadata_json);
     const jpgSource = copiedImage.jpgPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.jpgPath)) : null;
-    const rawSource = copiedImage.rawPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.rawPath)) : null;
+    const rawSource = copiedImage.rawPath ? path.join(packageInfo.rawImagesFolder, path.basename(copiedImage.rawPath)) : null;
 
     if (jpgSource && fs.existsSync(jpgSource) && fs.statSync(jpgSource).isFile()) {
       const destinationPath = uniquePath(destinationFolder, path.basename(jpgSource));
       fs.copyFileSync(jpgSource, destinationPath);
       currentPath = path.relative(projectRoot, destinationPath);
+      importedPathByImageId.set(Number(row.id), currentPath);
       copied += 1;
     }
 
-    if (rawSource && fs.existsSync(rawSource) && fs.statSync(rawSource).isFile()) {
-      const destinationPath = uniquePath(destinationFolder, path.basename(rawSource));
-      fs.copyFileSync(rawSource, destinationPath);
+    if (rawSource) {
       metadata = {
         ...metadata,
-        rawPath: path.relative(projectRoot, destinationPath)
+        rawPath: rawSource
       };
-      copied += 1;
     }
 
     return {
       ...row,
+      original_path: currentPath,
       current_path: currentPath,
+      status: 'imported',
       metadata_json: Object.keys(metadata).length ? JSON.stringify(metadata) : row.metadata_json
     };
   });
 
-  return { rows, copied };
+  return { rows, copied, importedPathByImageId };
 }
 
 function endOfDayIncludedNewSubjectIds(manifest) {
@@ -3919,6 +4021,12 @@ async function approveEndOfDayPackage(_event, input = {}) {
       ensureJobFolders(jobRows[0].rootPath);
       const imageCopyResult = copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, jobRows[0].rootPath);
       const imageRows = imageCopyResult.rows;
+      const imageVersionRows = packageTables.image_versions.map((row) => {
+        const importedPath = imageCopyResult.importedPathByImageId.get(Number(row.image_asset_id));
+        return importedPath && row.version_type === 'original'
+          ? { ...row, path: importedPath }
+          : row;
+      });
       const copiedFiles = imageCopyResult.copied;
 
       const newSubjectRows = subjectRowsToImport
@@ -3960,7 +4068,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
 
       upsertImportedRowsById(database, 'image_assets', imageRows);
-      insertImportedRows(database, 'image_versions', packageTables.image_versions);
+      insertImportedRows(database, 'image_versions', imageVersionRows);
       insertImportedRows(database, 'subject_images', packageTables.subject_images);
 
       subjectRowsToImport
@@ -7575,6 +7683,7 @@ async function getCaptureSubjectImages(_event, subjectIdValue) {
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     WHERE si.subject_id = ${subjectId}
       AND ia.status != 'rejected'
+      AND ia.status != 'packaged'
     GROUP BY ia.id
     ORDER BY ia.id DESC;
   `);
@@ -7929,6 +8038,7 @@ async function getImagePreview(_event, imageIdValue) {
   const rows = await querySql(`
     SELECT
       ia.filename,
+      ia.status,
       COALESCE(
         MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
         MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
@@ -7963,6 +8073,10 @@ async function getImagePreview(_event, imageIdValue) {
   }
 
   const row = rows[0];
+  if (row.status === 'packaged' && !['cropped_med', 'cropped_large'].includes(row.versionType)) {
+    return { ...row, path: null, dataUrl: null, missing: true };
+  }
+
   const fullPath = resolveProjectPath(row.path);
   if (!fullPath || !fs.existsSync(fullPath)) {
     return { ...row, dataUrl: null, missing: true };
