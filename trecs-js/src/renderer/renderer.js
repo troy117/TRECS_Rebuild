@@ -3953,27 +3953,7 @@ function renderSisOptions() {
   `;
 }
 
-function bindSisOptions() {
-  adminItemsList.querySelectorAll('[data-sis-option]').forEach((control) => {
-    control.addEventListener('change', () => {
-      jobsState[control.dataset.sisOption] = control.checked;
-      const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
-      if (!selectedSisFormats(false).length && !hasStaffExport) {
-        jobsState[control.dataset.sisOption] = true;
-        control.checked = true;
-      }
-    });
-  });
-  adminItemsList.querySelectorAll('[data-admin-export-option]').forEach((control) => {
-    control.addEventListener('change', () => {
-      jobsState[control.dataset.adminExportOption] = control.checked;
-      const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
-      if (!selectedSisFormats(false).length && !hasStaffExport) {
-        jobsState.sisStudentCd = true;
-      }
-    });
-  });
-}
+function bindSisOptions() {}
 
 function renderIdCardOptions(listNames) {
   const listOptions = listNames.length
@@ -4182,26 +4162,6 @@ function renderAdminItemsWorkspace() {
 
   adminItemsList.querySelectorAll('[data-render-selected-admin-items]').forEach((button) => {
     button.addEventListener('click', () => renderSelectedAdminItems(button));
-  });
-
-  adminItemsList.querySelectorAll('[data-admin-item-check]').forEach((checkbox) => {
-    checkbox.addEventListener('click', (event) => {
-      event.stopPropagation();
-    });
-    checkbox.addEventListener('change', (event) => {
-      try {
-        const control = event.currentTarget;
-        const itemType = control && control.dataset ? control.dataset.adminItemCheck : '';
-        if (!itemType) {
-          return;
-        }
-        setAdminItemSelected(itemType, Boolean(control.checked));
-        updateAdminSelectedCountFromDom();
-      } catch (error) {
-        adminItemsStatus.textContent = error.message || 'Could not update admin item selection';
-        console.error(error);
-      }
-    });
   });
 
   adminItemsList.querySelectorAll('[data-toggle-admin-item]').forEach((button) => {
@@ -6751,6 +6711,47 @@ if (workspaceEnvelopeButton) {
 if (workspaceAdminItemsButton) {
   workspaceAdminItemsButton.addEventListener('click', () => {
     setWorkspaceMode('admin');
+  });
+}
+
+if (adminItemsList) {
+  adminItemsList.addEventListener('change', (event) => {
+    const control = event.target;
+    if (!control || control.tagName !== 'INPUT') {
+      return;
+    }
+    try {
+      if (control.dataset.adminItemCheck) {
+        setAdminItemSelected(control.dataset.adminItemCheck, Boolean(control.checked));
+        updateAdminSelectedCountFromDom();
+        return;
+      }
+
+      if (control.dataset.sisOption) {
+        jobsState[control.dataset.sisOption] = Boolean(control.checked);
+        const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
+        if (!selectedSisFormats(false).length && !hasStaffExport) {
+          jobsState[control.dataset.sisOption] = true;
+          control.checked = true;
+        }
+        return;
+      }
+
+      if (control.dataset.adminExportOption) {
+        jobsState[control.dataset.adminExportOption] = Boolean(control.checked);
+        const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
+        if (!selectedSisFormats(false).length && !hasStaffExport) {
+          jobsState.sisStudentCd = true;
+          const studentCd = adminItemsList.querySelector('[data-sis-option="sisStudentCd"]');
+          if (studentCd) {
+            studentCd.checked = true;
+          }
+        }
+      }
+    } catch (error) {
+      adminItemsStatus.textContent = error.message || 'Could not update admin selection';
+      console.error(error);
+    }
   });
 }
 
