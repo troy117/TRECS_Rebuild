@@ -132,8 +132,6 @@ const refreshUnlinkedEnvelopesButton = document.getElementById('refreshUnlinkedE
 const unlinkedEnvelopeList = document.getElementById('unlinkedEnvelopeList');
 const adminItemsWorkspace = document.getElementById('adminItemsWorkspace');
 const adminOptionsForm = document.getElementById('adminOptionsForm');
-const adminOutputFolderPath = document.getElementById('adminOutputFolderPath');
-const chooseAdminOutputFolderButton = document.getElementById('chooseAdminOutputFolderButton');
 const adminItemsStatus = document.getElementById('adminItemsStatus');
 const adminItemsList = document.getElementById('adminItemsList');
 const adminItemsHistoryCount = document.getElementById('adminItemsHistoryCount');
@@ -202,7 +200,6 @@ let jobsState = {
   adminItems: null,
   adminStage: 'original_picture_day',
   adminSortBy: 'grade',
-  adminOutputFolder: '',
   expandedAdminItem: null,
   sisStudentCd: true,
   sisDestiny: false,
@@ -3693,15 +3690,13 @@ function adminItemHelp(type, stage) {
 function adminOutputOptions() {
   return {
     stage: adminOptionsForm.elements.stage.value,
-    sortBy: adminOptionsForm.elements.sortBy.value,
-    outputFolder: adminOutputFolderPath ? adminOutputFolderPath.value : ''
+    sortBy: adminOptionsForm.elements.sortBy.value
   };
 }
 
 function applyAdminOptions(options) {
   jobsState.adminStage = options.stage;
   jobsState.adminSortBy = options.sortBy;
-  jobsState.adminOutputFolder = options.outputFolder || '';
 }
 
 function renderDirectoryOptions(listNames) {
@@ -3997,9 +3992,6 @@ function renderAdminItemsWorkspace() {
 
   adminOptionsForm.elements.stage.value = jobsState.adminStage;
   adminOptionsForm.elements.sortBy.value = jobsState.adminSortBy;
-  if (adminOutputFolderPath) {
-    adminOutputFolderPath.value = jobsState.adminOutputFolder || '';
-  }
 
   if (!jobsState.adminItems || jobsState.adminItems.stage !== jobsState.adminStage) {
     loadAdminItems();
@@ -4088,13 +4080,6 @@ function renderAdminItemsWorkspace() {
 }
 
 async function renderAdminItem(button) {
-  if (!jobsState.adminOutputFolder) {
-    adminItemsStatus.textContent = 'Choose an output folder first.';
-    if (adminOutputFolderPath) {
-      adminOutputFolderPath.focus();
-    }
-    return;
-  }
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = 'Rendering...';
@@ -4105,7 +4090,6 @@ async function renderAdminItem(button) {
       type: button.dataset.renderAdminItem,
       stage: jobsState.adminStage,
       sortBy: jobsState.adminSortBy,
-      outputFolder: jobsState.adminOutputFolder,
       sisFormats: selectedSisFormats(button.dataset.renderAdminItem !== 'administrative_exports'),
       idCardSource: jobsState.idCardSource,
       idCardListName: jobsState.idCardListName,
@@ -6599,25 +6583,6 @@ adminOptionsForm.addEventListener('change', () => {
   jobsState.adminItems = null;
   renderAdminItemsWorkspace();
 });
-
-if (chooseAdminOutputFolderButton) {
-  chooseAdminOutputFolderButton.addEventListener('click', async () => {
-    try {
-      const choice = await trecsApi('chooseAdminOutputFolder').chooseAdminOutputFolder();
-      if (!choice || choice.canceled) {
-        return;
-      }
-      jobsState.adminOutputFolder = choice.folderPath;
-      if (adminOutputFolderPath) {
-        adminOutputFolderPath.value = choice.folderPath;
-      }
-      renderAdminItemsWorkspace();
-    } catch (error) {
-      adminItemsStatus.textContent = error.message || 'Could not choose output folder';
-      console.error(error);
-    }
-  });
-}
 
 if (workspaceAddBlankButton) {
   workspaceAddBlankButton.addEventListener('click', () => {

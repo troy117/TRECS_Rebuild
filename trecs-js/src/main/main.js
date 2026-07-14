@@ -855,19 +855,6 @@ function timestampForFolder(date = new Date()) {
   return date.toISOString().replace(/[:.]/g, '-');
 }
 
-function quotedPowerShellString(value) {
-  return `'${String(value || '').replace(/'/g, "''")}'`;
-}
-
-function resourcePath(...parts) {
-  const candidates = [
-    path.join(projectRoot, ...parts),
-    path.join(bundledResourceRoot, ...parts),
-    path.join(appSourceRoot, ...parts)
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
-}
-
 function endOfDayTimestampForFolder(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
   return [
@@ -1938,7 +1925,7 @@ function normalizeNullableId(value, label) {
 const ADMIN_ITEM_TYPES = new Map([
   ['delivery_envelope_cover', {
     label: 'Delivery Envelope Cover',
-    extension: 'jpg',
+    extension: 'txt',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['school_directory', {
@@ -2636,18 +2623,6 @@ function adminOutputRelativePath(job, stage, type, extension, date = new Date())
   return path.join(folder, filename);
 }
 
-function adminOutputPath(job, stage, type, extension, date, outputFolder) {
-  if (!outputFolder) {
-    return adminOutputRelativePath(job, stage, type, extension, date);
-  }
-  const item = ADMIN_ITEM_TYPES.get(type);
-  const itemFolder = safeFolderName(item ? item.label : type);
-  const filename = type === 'delivery_envelope_cover'
-    ? `${safeFolderName(job.location || job.clientName || 'School')}_Envelope${stage === 'makeup_day' ? '2' : '1'}.${extension}`
-    : `${safeFolderName(type)}-${timestampForFolder(date)}.${extension}`;
-  return path.join(outputFolder, itemFolder, filename);
-}
-
 function adminOutputAbsolutePath(outputPath) {
   return path.isAbsolute(outputPath) ? outputPath : path.join(projectRoot, outputPath);
 }
@@ -2863,99 +2838,6 @@ function buildAdminContent(type, stage, job, subjects, options) {
   }
 
   throw new Error('Unsupported admin item type');
-}
-
-function renderTextOnJpegTemplate(input) {
-  const templatePath = input.templatePath;
-  const outputPath = input.outputPath;
-  const text = input.text || '';
-  const maxWidth = Number(input.maxWidth || 2400);
-  const x = Number(input.x || 300);
-  const y = Number(input.y || 1000);
-  const fontName = input.fontName || 'Myriad Pro';
-  const fallbackFontName = input.fallbackFontName || 'Arial';
-  const initialFontSize = Number(input.fontSize || 200);
-  const color = input.color || 'Black';
-  const script = `
-Add-Type -AssemblyName System.Drawing
-$templatePath = ${quotedPowerShellString(templatePath)}
-$outputPath = ${quotedPowerShellString(outputPath)}
-$text = ${quotedPowerShellString(text)}
-$fontName = ${quotedPowerShellString(fontName)}
-$fallbackFontName = ${quotedPowerShellString(fallbackFontName)}
-$maxWidth = ${maxWidth}
-$x = ${x}
-$y = ${y}
-$fontSize = ${initialFontSize}
-$bitmap = [System.Drawing.Image]::FromFile($templatePath)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-$brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::${color})
-$font = New-Object System.Drawing.Font($fontName, $fontSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-if ($font.Name -ne $fontName) {
-  $font.Dispose()
-  $font = New-Object System.Drawing.Font($fallbackFontName, $fontSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-}
-$size = $graphics.MeasureString($text, $font)
-while (($size.Width -gt $maxWidth) -and ($fontSize -gt 10)) {
-  $font.Dispose()
-  $fontSize = $fontSize - 1
-  $font = New-Object System.Drawing.Font($fontName, $fontSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-  if ($font.Name -ne $fontName) {
-    $font.Dispose()
-    $font = New-Object System.Drawing.Font($fallbackFontName, $fontSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-  }
-  $size = $graphics.MeasureString($text, $font)
-}
-$graphics.DrawString($text, $font, $brush, $x, $y)
-$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-$encoder = [System.Drawing.Imaging.Encoder]::Quality
-$encoderParameters = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$encoderParameters.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter($encoder, [int64]95)
-$bitmap.Save($outputPath, $codec, $encoderParameters)
-$encoderParameters.Dispose()
-$font.Dispose()
-$brush.Dispose()
-$graphics.Dispose()
-$bitmap.Dispose()
-`;
-  const result = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-    windowsHide: true,
-    encoding: 'utf8'
-  });
-
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    result.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    result.on('error', reject);
-    result.on('close', (code) => {
-      if (code === 0 && fs.existsSync(outputPath)) {
-        resolve();
-        return;
-      }
-      reject(new Error(stderr.trim() || `Delivery envelope render failed with exit code ${code}`));
-    });
-  });
-}
-
-async function renderDeliveryEnvelopeCover(job, stage, outputPath) {
-  const templateName = stage === 'makeup_day' ? 'Delivery_Form2.jpg' : 'Delivery_Form1.jpg';
-  const templatePath = resourcePath('Templates', 'FALL', templateName);
-  if (!fs.existsSync(templatePath)) {
-    throw new Error(`Missing FALL delivery template: ${templateName}`);
-  }
-  await renderTextOnJpegTemplate({
-    templatePath,
-    outputPath,
-    text: job.clientName || job.location || '',
-    x: 300,
-    y: 1000,
-    maxWidth: 2400,
-    fontSize: 200
-  });
 }
 
 function outputFileName(baseName, outputStem) {
@@ -3265,14 +3147,11 @@ function buildStickerPrintOutput(job, subjects, options, listSubjectIds) {
 async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_day') {
   const jobId = numericId(jobIdValue);
   const stage = normalizeShootStage(stageValue);
-  const [job, subjects, listNames] = await Promise.all([
+  const [job, subjects, listNames, batches] = await Promise.all([
     adminJobSummary(jobId),
     adminSubjectRows(jobId),
-    adminListNames(jobId)
-  ]);
-  let batches = [];
-  try {
-    batches = await querySql(`
+    adminListNames(jobId),
+    querySql(`
       SELECT
         id,
         shoot_stage AS shootStage,
@@ -3288,10 +3167,8 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
       WHERE job_id = ${jobId}
       ORDER BY created_at DESC, id DESC
       LIMIT 50;
-    `);
-  } catch (error) {
-    logStartup('admin item history unavailable', error);
-  }
+    `)
+  ]);
 
   const photographed = subjects.filter((subject) => subject.imageFilename).length;
   const missing = subjects.filter((subject) => !subject.imageFilename || subject.photographedStatus !== 'photographed').length;
@@ -3316,7 +3193,6 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   const stage = normalizeShootStage(input.stage);
   const type = normalizeAdminItemType(input.type, stage);
   const item = ADMIN_ITEM_TYPES.get(type);
-  const outputFolder = optionalText(input.outputFolder, 1000) || '';
   const options = {
     sortBy: normalizeDirectorySort(input.sortBy),
     sisFormats: normalizeSisFormats(input.sisFormats || input.sisFormat, type === 'administrative_exports'),
@@ -3342,13 +3218,11 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   const job = await adminJobSummary(jobId);
   const subjects = await adminSubjectRows(jobId);
   const createdAt = new Date();
-  const outputPath = adminOutputPath(job, stage, type, item.extension, createdAt, outputFolder);
+  const outputPath = adminOutputRelativePath(job, stage, type, item.extension, createdAt);
   const absoluteOutputPath = adminOutputAbsolutePath(outputPath);
 
   fs.mkdirSync(path.dirname(absoluteOutputPath), { recursive: true });
-  if (type === 'delivery_envelope_cover') {
-    await renderDeliveryEnvelopeCover(job, stage, absoluteOutputPath);
-  } else if (type === 'school_directory') {
+  if (type === 'school_directory') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.directoryListName);
     const directoryOutput = buildSchoolDirectoryOutput(job, subjects, options, listSubjectIds);
     fs.writeFileSync(absoluteOutputPath, directoryOutput.csv);
@@ -3455,7 +3329,6 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
 
 ipcMain.handle('admin-items:get', getAdminItems);
 ipcMain.handle('admin-items:render', renderAdminItem);
-ipcMain.handle('admin-items:choose-output-folder', chooseAdminOutputFolder);
 ipcMain.handle('images:sync-cropped', syncCroppedImages);
 ipcMain.handle('images:generate-cropped-medium', generateCroppedMediumImages);
 
@@ -4182,22 +4055,6 @@ async function chooseEndOfDayPackageFolder(event) {
     hasManifest: fs.existsSync(manifestPath),
     hasDatabase: fs.existsSync(databasePath),
     manifest
-  };
-}
-
-async function chooseAdminOutputFolder(event) {
-  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
-    title: 'Choose Admin Items Output Folder',
-    properties: ['openDirectory', 'createDirectory']
-  });
-
-  if (result.canceled || !result.filePaths.length) {
-    return { canceled: true };
-  }
-
-  return {
-    canceled: false,
-    folderPath: result.filePaths[0]
   };
 }
 

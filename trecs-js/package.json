@@ -31,10 +31,6 @@
         "to": "JARS"
       },
       {
-        "from": "../Templates",
-        "to": "Templates"
-      },
-      {
         "from": "../tools",
         "to": "tools",
         "filter": [
