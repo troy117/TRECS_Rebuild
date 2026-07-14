@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('trecs', {
   importSchoolData: (jobId, input) => ipcRenderer.invoke('school-data:import', jobId, input),
   getAdminItems: (jobId, stage) => ipcRenderer.invoke('admin-items:get', jobId, stage),
   renderAdminItem: (jobId, input) => ipcRenderer.invoke('admin-items:render', jobId, input),
+  chooseAdminOutputFolder: () => ipcRenderer.invoke('admin-items:choose-output-folder'),
   renderSubjectIdCard: (jobId, subjectId, input) => ipcRenderer.invoke('id-card:render-subject', jobId, subjectId, input),
   syncCroppedImages: (jobId) => ipcRenderer.invoke('images:sync-cropped', jobId),
   generateCroppedMediumImages: (jobId) => ipcRenderer.invoke('images:generate-cropped-medium', jobId),
