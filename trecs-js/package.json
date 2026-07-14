@@ -38,6 +38,13 @@
           "**/*.class",
           "**/*.js"
         ]
+      },
+      {
+        "from": "../Templates/FALL",
+        "to": "Templates/FALL",
+        "filter": [
+          "*.jpg"
+        ]
       }
     ],
     "win": {

@@ -234,7 +234,7 @@ let jobsState = {
   directorySource: 'all',
   directoryListName: '',
   directorySortMethod: 'alpha_grade',
-  directorySchoolYear: 'School Year: 2025 - 2026',
+  directorySchoolYear: '2025-2026',
   directoryContactLine: 'Island Photography: 559-456-1400',
   directoryPhotographedOnly: false,
   stickerSource: 'all',
@@ -3788,6 +3788,48 @@ function shootStageLabel(stage) {
   return stage === 'makeup_day' ? 'Makeup Day' : 'Original Picture Day';
 }
 
+function currentJobSummary() {
+  return jobsState.detail && jobsState.detail.summary
+    ? jobsState.detail.summary
+    : jobsState.jobs.find((job) => Number(job.id) === Number(jobsState.selectedJobId));
+}
+
+function schoolYearFromJobName(job) {
+  const name = String(job && (job.job || job.name) || '');
+  const fallMatch = name.match(/\bFALL[_\s-]*(20\d{2})\b/i);
+  const yearMatch = fallMatch || name.match(/\b(20\d{2})\b/);
+  if (!yearMatch) {
+    return '2025-2026';
+  }
+  const startYear = Number(yearMatch[1]);
+  if (!Number.isFinite(startYear)) {
+    return '2025-2026';
+  }
+  return `${startYear}-${startYear + 1}`;
+}
+
+function resetAdminSchoolYearForCurrentJob(force = false) {
+  const defaultYear = schoolYearFromJobName(currentJobSummary());
+  if (force || !jobsState.directorySchoolYear) {
+    jobsState.directorySchoolYear = defaultYear;
+  }
+}
+
+function directorySchoolYearLabel(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return 'School Year: 2025 - 2026';
+  }
+  if (/^school year:/i.test(text)) {
+    return text;
+  }
+  const match = text.match(/^(20\d{2})\s*[-/]\s*(20\d{2})$/);
+  if (match) {
+    return `School Year: ${match[1]} - ${match[2]}`;
+  }
+  return `School Year: ${text}`;
+}
+
 function adminItemHelp(type, stage) {
   const helps = {
     delivery_envelope_cover: 'Creates the delivery envelope cover summary for this stage.',
@@ -3843,6 +3885,7 @@ function adminOutputOptions() {
   return {
     stage: adminOptionsForm.elements.stage.value,
     sortBy: adminOptionsForm.elements.sortBy.value,
+    schoolYear: adminOptionsForm.elements.schoolYear ? adminOptionsForm.elements.schoolYear.value : jobsState.directorySchoolYear,
     outputFolder: outputInput ? outputInput.value : ''
   };
 }
@@ -3850,6 +3893,7 @@ function adminOutputOptions() {
 function applyAdminOptions(options) {
   jobsState.adminStage = options.stage;
   jobsState.adminSortBy = options.sortBy;
+  jobsState.directorySchoolYear = options.schoolYear || jobsState.directorySchoolYear;
   jobsState.adminOutputFolder = options.outputFolder || '';
 }
 
@@ -3891,10 +3935,6 @@ function renderDirectoryOptions(listNames) {
           <option value="alpha_homeroom" ${jobsState.directorySortMethod === 'alpha_homeroom' ? 'selected' : ''}>Alpha by Homeroom</option>
           <option value="alpha_school" ${jobsState.directorySortMethod === 'alpha_school' ? 'selected' : ''}>Alpha by School</option>
         </select>
-      </label>
-      <label>
-        <span>School Year</span>
-        <input data-directory-option="directorySchoolYear" value="${escapeHtml(jobsState.directorySchoolYear)}">
       </label>
       <label>
         <span>Contact Line</span>
@@ -4098,6 +4138,33 @@ function selectedSisFormats(useFallback = true) {
   return formats.length || !useFallback ? formats : ['student_cd'];
 }
 
+function adminRenderRequest(type) {
+  return {
+    type,
+    stage: jobsState.adminStage,
+    sortBy: jobsState.adminSortBy,
+    outputFolder: jobsState.adminOutputFolder,
+    sisFormats: selectedSisFormats(),
+    idCardSource: jobsState.idCardSource,
+    idCardListName: jobsState.idCardListName,
+    idCardLayout: jobsState.idCardLayout,
+    idCardReason: jobsState.idCardReason,
+    idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
+    directoryType: jobsState.directoryType,
+    directorySource: jobsState.directorySource,
+    directoryListName: jobsState.directoryListName,
+    directorySortMethod: jobsState.directorySortMethod,
+    directorySchoolYear: directorySchoolYearLabel(jobsState.directorySchoolYear),
+    directoryContactLine: jobsState.directoryContactLine,
+    directoryPhotographedOnly: jobsState.directoryPhotographedOnly,
+    stickerSource: jobsState.stickerSource,
+    stickerListName: jobsState.stickerListName,
+    stickerCopies: jobsState.stickerCopies,
+    stickerSortMethod: jobsState.stickerSortMethod,
+    stickerPhotographedOnly: jobsState.stickerPhotographedOnly
+  };
+}
+
 async function loadAdminItems() {
   if (!jobsState.selectedJobId) {
     return;
@@ -4107,7 +4174,7 @@ async function loadAdminItems() {
   }
 
   jobsState.adminItemsLoading = true;
-  adminItemsStatus.textContent = 'Loading...';
+  adminItemsStatus.textContent = shootStageLabel(jobsState.adminStage);
   const options = adminOutputOptions();
   applyAdminOptions(options);
 
@@ -4136,8 +4203,12 @@ function renderAdminItemsWorkspace() {
   }
 
   ensureAdminOutputControls();
+  resetAdminSchoolYearForCurrentJob();
   adminOptionsForm.elements.stage.value = jobsState.adminStage;
   adminOptionsForm.elements.sortBy.value = jobsState.adminSortBy;
+  if (adminOptionsForm.elements.schoolYear) {
+    adminOptionsForm.elements.schoolYear.value = jobsState.directorySchoolYear || schoolYearFromJobName(currentJobSummary());
+  }
   const outputInput = adminOutputFolderInput();
   if (outputInput) {
     outputInput.value = jobsState.adminOutputFolder || '';
@@ -4160,7 +4231,7 @@ function renderAdminItemsWorkspace() {
   const groups = Array.from(new Set(items.map((item) => item.group)));
   const selectedCount = items.filter((item) => selectedItems.has(item.type)).length;
   const allSelected = selectedCount === items.length;
-  adminItemsStatus.textContent = jobsState.adminItemsLoading ? 'Loading history...' : shootStageLabel(data.stage);
+  adminItemsStatus.textContent = shootStageLabel(data.stage);
   adminItemsList.innerHTML = `
     <section class="admin-metrics">
       <article><span>Subjects</span><strong>${formatNumber(metrics.subjects || 0)}</strong></article>
@@ -4195,8 +4266,8 @@ function renderAdminItemsWorkspace() {
       `).join('')}
     </div>
     <section class="admin-design-note">
-      <strong>Design preview only</strong>
-      <span>The Run button currently validates the selection and shows progress. The individual admin item actions will be wired next.</span>
+      <strong>Output ready</strong>
+      <span>Select the admin items to render, choose an output folder, then run the batch.</span>
       ${data.error ? `<span>${escapeHtml(data.error)}</span>` : ''}
     </section>
   `;
@@ -4298,25 +4369,38 @@ async function runSelectedAdminItems() {
     progress: 0,
     message: `Preparing ${formatNumber(selectedItems.length)} admin item${selectedItems.length === 1 ? '' : 's'}...`
   };
-  adminItemsStatus.textContent = 'Design preview';
+  adminItemsStatus.textContent = shootStageLabel(jobsState.adminStage);
   renderAdminRunState();
 
+  const rendered = [];
   for (let index = 0; index < selectedItems.length; index += 1) {
     const item = selectedItems[index];
     jobsState.adminRunStatus = {
       running: true,
-      progress: Math.round(((index + 1) / selectedItems.length) * 100),
-      message: `Queued ${item.label}`
+      progress: Math.round((index / selectedItems.length) * 100),
+      message: `Rendering ${item.label}...`
     };
     renderAdminRunState();
-    await new Promise((resolve) => setTimeout(resolve, 180));
+    const result = await trecsApi('renderAdminItem').renderAdminItem(
+      jobsState.selectedJobId,
+      adminRenderRequest(item.type)
+    );
+    rendered.push(result);
+    jobsState.adminRunStatus = {
+      running: true,
+      progress: Math.round(((index + 1) / selectedItems.length) * 100),
+      message: `Rendered ${item.label}`
+    };
+    renderAdminRunState();
   }
 
   jobsState.adminRunStatus = {
     running: false,
     progress: 100,
-    message: `Ready to build ${formatNumber(selectedItems.length)} selected item${selectedItems.length === 1 ? '' : 's'} when actions are wired`
+    message: `Rendered ${formatNumber(rendered.length)} admin item${rendered.length === 1 ? '' : 's'}`
   };
+  jobsState.adminItems = null;
+  await loadAdminItems();
   renderAdminRunState();
 }
 
@@ -4327,29 +4411,10 @@ async function renderAdminItem(button) {
   adminItemsStatus.textContent = 'Rendering...';
 
   try {
-    await trecsApi('renderAdminItem').renderAdminItem(jobsState.selectedJobId, {
-      type: button.dataset.renderAdminItem,
-      stage: jobsState.adminStage,
-      sortBy: jobsState.adminSortBy,
-      sisFormats: selectedSisFormats(),
-      idCardSource: jobsState.idCardSource,
-      idCardListName: jobsState.idCardListName,
-      idCardLayout: jobsState.idCardLayout,
-      idCardReason: jobsState.idCardReason,
-      idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
-      directoryType: jobsState.directoryType,
-      directorySource: jobsState.directorySource,
-      directoryListName: jobsState.directoryListName,
-      directorySortMethod: jobsState.directorySortMethod,
-      directorySchoolYear: jobsState.directorySchoolYear,
-      directoryContactLine: jobsState.directoryContactLine,
-      directoryPhotographedOnly: jobsState.directoryPhotographedOnly,
-      stickerSource: jobsState.stickerSource,
-      stickerListName: jobsState.stickerListName,
-      stickerCopies: jobsState.stickerCopies,
-      stickerSortMethod: jobsState.stickerSortMethod,
-      stickerPhotographedOnly: jobsState.stickerPhotographedOnly
-    });
+    await trecsApi('renderAdminItem').renderAdminItem(
+      jobsState.selectedJobId,
+      adminRenderRequest(button.dataset.renderAdminItem)
+    );
     jobsState.adminItems = null;
     await loadAdminItems();
   } catch (error) {
@@ -6176,6 +6241,7 @@ async function loadJobDetail(jobId) {
   jobsState.showStudentEditForm = false;
   jobsState.workspaceMode = 'students';
   jobsState.adminItems = null;
+  resetAdminSchoolYearForCurrentJob(true);
   renderWorkflowTab();
 }
 

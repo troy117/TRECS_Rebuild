@@ -38,8 +38,30 @@ function compileAccessReader() {
   ]);
 }
 
+function compileDeliveryEnvelopeCoverRenderer() {
+  const source = path.join(repoRoot, 'tools', 'DeliveryEnvelopeCoverRenderer.java');
+  const output = path.join(repoRoot, 'tools', 'DeliveryEnvelopeCoverRenderer.class');
+  if (fs.existsSync(output) && fs.statSync(output).mtimeMs >= fs.statSync(source).mtimeMs) {
+    return;
+  }
+
+  run('javac', [source]);
+}
+
+function compileSchoolDirectoryRenderer() {
+  const source = path.join(repoRoot, 'tools', 'SchoolDirectoryRenderer.java');
+  const output = path.join(repoRoot, 'tools', 'SchoolDirectoryRenderer.class');
+  if (fs.existsSync(output) && fs.statSync(output).mtimeMs >= fs.statSync(source).mtimeMs) {
+    return;
+  }
+
+  run('javac', [source]);
+}
+
 function main() {
   compileAccessReader();
+  compileDeliveryEnvelopeCoverRenderer();
+  compileSchoolDirectoryRenderer();
   const builderCli = path.join(appRoot, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
   run(process.execPath, [builderCli, '--win', 'portable', '--x64'], { cwd: appRoot });
   console.log(`Single EXE created at ${path.join(repoRoot, 'build', 'single', 'TRECS-Portable.exe')}`);

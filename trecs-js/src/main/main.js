@@ -2119,17 +2119,17 @@ function normalizeNullableId(value, label) {
 const ADMIN_ITEM_TYPES = new Map([
   ['delivery_envelope_cover', {
     label: 'Delivery Envelope Cover',
-    extension: 'txt',
+    extension: 'jpg',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['school_directory', {
     label: 'School Directory',
-    extension: 'csv',
+    extension: 'jpg',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['missing_photo_report', {
     label: 'Missing Photo Report',
-    extension: 'csv',
+    extension: 'xlsx',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['sis_export', {
@@ -2154,7 +2154,7 @@ const ADMIN_ITEM_TYPES = new Map([
   }]
 ]);
 
-function normalizeShootStage(value) {
+function normalizeAdminShootStage(value) {
   const stage = String(value || 'original_picture_day').trim();
   const allowed = new Set(['original_picture_day', 'makeup_day']);
   if (!allowed.has(stage)) {
@@ -2206,6 +2206,18 @@ function normalizeDirectorySortMethod(value) {
     throw new Error('Invalid directory sort method');
   }
   return sort;
+}
+
+function normalizeDirectorySchoolYear(value) {
+  const text = optionalText(value, 255) || '2025-2026';
+  if (/^school year:/i.test(text)) {
+    return text;
+  }
+  const match = text.match(/^(20\d{2})\s*[-/]\s*(20\d{2})$/);
+  if (match) {
+    return `School Year: ${match[1]} - ${match[2]}`;
+  }
+  return `School Year: ${text}`;
 }
 
 function normalizeStickerSource(value) {
@@ -2806,6 +2818,203 @@ function adminOutputAbsolutePath(outputPath) {
   return path.isAbsolute(outputPath) ? outputPath : path.join(projectRoot, outputPath);
 }
 
+function adminOutputPathForRequest(job, stage, type, extension, outputFolderValue, date = new Date()) {
+  const outputFolder = optionalText(outputFolderValue, 1000);
+  if (!outputFolder) {
+    return adminOutputRelativePath(job, stage, type, extension, date);
+  }
+
+  const absoluteOutputFolder = path.isAbsolute(outputFolder)
+    ? outputFolder
+    : path.join(projectRoot, outputFolder);
+  const schoolOutputFolder = path.join(absoluteOutputFolder, safeFolderName(job.location || job.clientName || 'School'));
+  const filename = type === 'delivery_envelope_cover'
+    ? `${safeFolderName(job.location || job.clientName || 'School')}_Envelope${stage === 'makeup_day' ? '2' : '1'}.jpg`
+    : type === 'school_directory'
+      ? `MugBook_${safeFolderName(job.location || job.clientName || 'School')}_0.jpg`
+      : type === 'missing_photo_report'
+        ? `${safeFolderName(job.location || job.clientName || 'School')}_Photography_Report.xlsx`
+    : `${safeFolderName(type)}-${timestampForFolder(date)}.${extension}`;
+  return path.join(schoolOutputFolder, filename);
+}
+
+async function ensureBundledJavaTool(className) {
+  const sourcePath = path.join(bundledResourceRoot, 'tools', `${className}.java`);
+  const classPath = path.join(bundledResourceRoot, 'tools', `${className}.class`);
+  const sourceExists = fs.existsSync(sourcePath);
+  const classExists = fs.existsSync(classPath);
+  if (!sourceExists) {
+    if (classExists) {
+      return;
+    }
+    throw new Error('Delivery envelope cover renderer was not found');
+  }
+  if (app.isPackaged && classExists) {
+    return;
+  }
+
+  const sourceTime = fs.statSync(sourcePath).mtimeMs;
+  const classTime = classExists ? fs.statSync(classPath).mtimeMs : 0;
+  if (classTime >= sourceTime) {
+    return;
+  }
+
+  await processOutput('javac', [
+    path.join('tools', `${className}.java`)
+  ], { cwd: bundledResourceRoot });
+}
+
+async function ensureDeliveryEnvelopeCoverRenderer() {
+  await ensureBundledJavaTool('DeliveryEnvelopeCoverRenderer');
+}
+
+async function renderDeliveryEnvelopeCover(job, stage, absoluteOutputPath) {
+  await ensureDeliveryEnvelopeCoverRenderer();
+  const templatePath = path.join(
+    bundledResourceRoot,
+    'Templates',
+    'FALL',
+    stage === 'makeup_day' ? 'Delivery_Form2.jpg' : 'Delivery_Form1.jpg'
+  );
+  if (!fs.existsSync(templatePath)) {
+    throw new Error(`Delivery envelope template was not found: ${templatePath}`);
+  }
+
+  await processOutput('java', [
+    '-cp',
+    path.join('tools'),
+    'DeliveryEnvelopeCoverRenderer',
+    templatePath,
+    absoluteOutputPath,
+    job.clientName || job.location || ''
+  ], { cwd: bundledResourceRoot });
+}
+
+function base64Arg(value) {
+  return Buffer.from(String(value || ''), 'utf8').toString('base64');
+}
+
+function absoluteWorkspacePath(filePath) {
+  const text = String(filePath || '').trim();
+  if (!text) {
+    return '';
+  }
+  return path.isAbsolute(text) ? text : path.join(projectRoot, text);
+}
+
+function tsvValue(value) {
+  return String(value || '').replace(/[\r\n\t]/g, ' ').trim();
+}
+
+function missingPhotoReportSubjects(subjects) {
+  return subjects
+    .filter((subject) => {
+      const hasName = Boolean(String(subject.firstName || subject.lastName || subject.displayName || '').trim());
+      const hasRef = Boolean(String(subject.ref || '').trim());
+      const photographed = Boolean(subject.imageFilename) && subject.photographedStatus === 'photographed';
+      return hasName && hasRef && !photographed;
+    })
+    .sort((first, second) => subjectSortValue(first, 'ref').localeCompare(subjectSortValue(second, 'ref'), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    }));
+}
+
+function writeMissingPhotoWorkbook(outputPath, subjects) {
+  const rows = missingPhotoReportSubjects(subjects).map((subject) => ({
+    'REF#': subject.ref,
+    Last: subject.lastName || '',
+    First: subject.firstName || '',
+    Grade: subject.grade || 'MISSING',
+    'ID Number': subject.externalId || 'MISSING',
+    Homeroom: subject.homeroom || 'MISSING',
+    Photographed: 'NOT PHOTOGRAPHED'
+  }));
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(rows, {
+    header: ['REF#', 'Last', 'First', 'Grade', 'ID Number', 'Homeroom', 'Photographed']
+  });
+  worksheet['!cols'] = [
+    { wch: 12 },
+    { wch: 22 },
+    { wch: 22 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 22 },
+    { wch: 20 }
+  ];
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
+  XLSX.writeFile(workbook, outputPath);
+  return rows.length;
+}
+
+function schoolDirectoryGroupLabel(subject, sortMethod) {
+  if (sortMethod === 'alpha_homeroom') {
+    return `Homeroom: ${subject.homeroom || ''}`;
+  }
+  if (sortMethod === 'alpha_school') {
+    return 'Alpha by School';
+  }
+  return `Grade: ${subject.grade || ''}`;
+}
+
+async function renderSchoolDirectory(job, subjects, options, listSubjectIds, outputPath, absoluteOutputPath) {
+  await ensureBundledJavaTool('SchoolDirectoryRenderer');
+  const outputFolder = path.dirname(absoluteOutputPath);
+  fs.mkdirSync(outputFolder, { recursive: true });
+
+  const directorySubjects = sortDirectorySubjects(
+    selectedDirectorySubjects(subjects, options, listSubjectIds),
+    options.directorySortMethod
+  );
+  const rows = directorySubjects.map((subject) => {
+    const image = subjectImageChoice(subject, 'medium');
+    return [
+      subject.ref,
+      subject.firstName,
+      subject.lastName,
+      subject.grade,
+      subject.homeroom,
+      subject.externalId,
+      schoolDirectoryGroupLabel(subject, options.directorySortMethod),
+      absoluteWorkspacePath(image.path),
+      image.path ? 'true' : 'false'
+    ].map(tsvValue).join('\t');
+  });
+
+  const tsvPath = path.join(outputFolder, `school-directory-${timestampForFolder(new Date())}.tsv`);
+  fs.writeFileSync(tsvPath, rows.join('\r\n'));
+
+  const templateDir = path.join(bundledResourceRoot, 'Templates', 'FALL');
+  await processOutput('java', [
+    '-cp',
+    path.join('tools'),
+    'SchoolDirectoryRenderer',
+    templateDir,
+    outputFolder,
+    base64Arg(job.clientName || job.location || ''),
+    base64Arg(options.directorySchoolYear),
+    base64Arg(options.directoryContactLine),
+    String(options.directorySortMethod !== 'alpha_school'),
+    tsvPath
+  ], { cwd: bundledResourceRoot });
+  if (fs.existsSync(tsvPath)) {
+    fs.unlinkSync(tsvPath);
+  }
+
+  const directoryOutput = buildSchoolDirectoryOutput(job, subjects, options, listSubjectIds);
+  fs.writeFileSync(
+    path.join(outputFolder, 'school-directory.manifest.json'),
+    JSON.stringify({
+      ...directoryOutput.manifest,
+      outputFolder,
+      coverPath: outputPath,
+      renderedFiles: fs.readdirSync(outputFolder).filter((name) => /^MugBook_.*\.jpg$/i.test(name)).sort()
+    }, null, 2)
+  );
+  return directorySubjects.length;
+}
+
 async function adminJobSummary(jobId) {
   const rows = await querySql(`
     SELECT
@@ -3200,7 +3409,7 @@ function buildStickerPrintOutput(job, subjects, options, listSubjectIds) {
 
 async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_day') {
   const jobId = numericId(jobIdValue);
-  const stage = normalizeShootStage(stageValue);
+  const stage = normalizeAdminShootStage(stageValue);
   const [job, subjects, listNames, batches] = await Promise.all([
     adminJobSummary(jobId),
     adminSubjectRows(jobId),
@@ -3260,7 +3469,7 @@ async function chooseAdminOutputFolder(event) {
 
 async function renderAdminItem(_event, jobIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
-  const stage = normalizeShootStage(input.stage);
+  const stage = normalizeAdminShootStage(input.stage);
   const type = normalizeAdminItemType(input.type, stage);
   const item = ADMIN_ITEM_TYPES.get(type);
   const options = {
@@ -3275,30 +3484,30 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     directorySource: normalizeDirectorySource(input.directorySource),
     directoryListName: optionalText(input.directoryListName, 255) || '',
     directorySortMethod: normalizeDirectorySortMethod(input.directorySortMethod),
-    directorySchoolYear: optionalText(input.directorySchoolYear, 255) || 'School Year: 2025 - 2026',
+    directorySchoolYear: normalizeDirectorySchoolYear(input.directorySchoolYear),
     directoryContactLine: optionalText(input.directoryContactLine, 255) || 'Island Photography: 559-456-1400',
     directoryPhotographedOnly: Boolean(input.directoryPhotographedOnly),
     stickerSource: normalizeStickerSource(input.stickerSource),
     stickerListName: optionalText(input.stickerListName, 255) || '',
     stickerCopies: normalizeStickerCopies(input.stickerCopies),
     stickerSortMethod: normalizeStickerSortMethod(input.stickerSortMethod),
-    stickerPhotographedOnly: Boolean(input.stickerPhotographedOnly)
+    stickerPhotographedOnly: Boolean(input.stickerPhotographedOnly),
+    outputFolder: optionalText(input.outputFolder, 1000) || ''
   };
   const job = await adminJobSummary(jobId);
   const subjects = await adminSubjectRows(jobId);
   const createdAt = new Date();
-  const outputPath = adminOutputRelativePath(job, stage, type, item.extension, createdAt);
+  const outputPath = adminOutputPathForRequest(job, stage, type, item.extension, options.outputFolder, createdAt);
   const absoluteOutputPath = adminOutputAbsolutePath(outputPath);
 
   fs.mkdirSync(path.dirname(absoluteOutputPath), { recursive: true });
-  if (type === 'school_directory') {
+  if (type === 'delivery_envelope_cover') {
+    await renderDeliveryEnvelopeCover(job, stage, absoluteOutputPath);
+  } else if (type === 'school_directory') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.directoryListName);
-    const directoryOutput = buildSchoolDirectoryOutput(job, subjects, options, listSubjectIds);
-    fs.writeFileSync(absoluteOutputPath, directoryOutput.csv);
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(directoryOutput.manifest, null, 2)
-    );
+    await renderSchoolDirectory(job, subjects, options, listSubjectIds, outputPath, absoluteOutputPath);
+  } else if (type === 'missing_photo_report') {
+    writeMissingPhotoWorkbook(absoluteOutputPath, subjects);
   } else if (type === 'sticker_prints') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.stickerListName);
     const stickerOutput = buildStickerPrintOutput(job, subjects, options, listSubjectIds);
@@ -3531,8 +3740,8 @@ function processOutput(command, args, options = {}) {
 }
 
 async function ensureAccessJobImportReader() {
-  const sourcePath = path.join(projectRoot, 'tools', 'AccessJobImportJson.java');
-  const classPath = path.join(projectRoot, 'tools', 'AccessJobImportJson.class');
+  const sourcePath = path.join(bundledResourceRoot, 'tools', 'AccessJobImportJson.java');
+  const classPath = path.join(bundledResourceRoot, 'tools', 'AccessJobImportJson.class');
   const sourceTime = fs.statSync(sourcePath).mtimeMs;
   const classTime = fs.existsSync(classPath) ? fs.statSync(classPath).mtimeMs : 0;
   if (classTime >= sourceTime) {
@@ -3547,7 +3756,7 @@ async function ensureAccessJobImportReader() {
       path.join('JARS', 'commons-logging-1.2.jar')
     ].join(path.delimiter),
     path.join('tools', 'AccessJobImportJson.java')
-  ]);
+  ], { cwd: bundledResourceRoot });
 }
 
 async function readPreviousTrecsAccessData(studentsDatabasePath) {
@@ -3562,7 +3771,7 @@ async function readPreviousTrecsAccessData(studentsDatabasePath) {
     ].join(path.delimiter),
     'AccessJobImportJson',
     studentsDatabasePath
-  ]);
+  ], { cwd: bundledResourceRoot });
   return JSON.parse(output);
 }
 

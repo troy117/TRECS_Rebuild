@@ -2122,7 +2122,7 @@ dd {
   border-bottom: 1px solid #edf1f5;
   display: grid;
   gap: 12px;
-  grid-template-columns: 180px 180px minmax(280px, 1fr);
+  grid-template-columns: 180px 180px 140px minmax(280px, 1fr);
   padding: 12px 14px;
 }
 
