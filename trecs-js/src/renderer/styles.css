@@ -2259,7 +2259,6 @@ dd {
   align-items: flex-start;
   display: flex;
   gap: 10px;
-  user-select: none;
 }
 
 .admin-item-check input {
