@@ -2216,6 +2216,25 @@ dd {
   margin-top: 4px;
 }
 
+.admin-render-toolbar {
+  align-items: center;
+  border-top: 1px solid #edf1f5;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.admin-render-toolbar div {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-render-toolbar span {
+  color: #617488;
+  font-size: 12px;
+}
+
 .admin-item-cards {
   display: grid;
   gap: 10px;
@@ -2230,6 +2249,35 @@ dd {
   gap: 14px;
   grid-template-columns: minmax(0, 1fr) auto;
   padding: 12px;
+}
+
+.admin-item-check-row {
+  min-width: 0;
+}
+
+.admin-item-check {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.admin-item-check input {
+  margin-top: 3px;
+}
+
+.admin-item-check span {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-item-check strong {
+  font-size: 15px;
+}
+
+.admin-item-check em {
+  color: #617488;
+  font-size: 13px;
+  font-style: normal;
 }
 
 .admin-item-card.expanded {

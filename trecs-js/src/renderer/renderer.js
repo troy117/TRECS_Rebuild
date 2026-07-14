@@ -204,6 +204,24 @@ let jobsState = {
   adminStage: 'original_picture_day',
   adminSortBy: 'grade',
   adminOutputFolder: '',
+  selectedAdminItems: {
+    original_picture_day: {
+      delivery_envelope_cover: true,
+      school_directory: true,
+      missing_photo_report: true,
+      id_cards: true,
+      administrative_exports: true
+    },
+    makeup_day: {
+      delivery_envelope_cover: true,
+      school_directory: true,
+      missing_photo_report: true,
+      id_cards: true,
+      sticker_prints: true,
+      staff_picture_packages: true,
+      administrative_exports: true
+    }
+  },
   expandedAdminItem: null,
   sisStudentCd: true,
   sisDestiny: false,
@@ -3691,6 +3709,47 @@ function adminItemHelp(type, stage) {
   return helps[type] || '';
 }
 
+function defaultAdminItemsForStage(stage) {
+  const items = stage === 'makeup_day'
+    ? [
+        'delivery_envelope_cover',
+        'school_directory',
+        'missing_photo_report',
+        'id_cards',
+        'sticker_prints',
+        'staff_picture_packages',
+        'administrative_exports'
+      ]
+    : [
+        'delivery_envelope_cover',
+        'school_directory',
+        'missing_photo_report',
+        'id_cards',
+        'administrative_exports'
+      ];
+  return items.map((type) => ({
+    type,
+    label: adminItemLabel(type)
+  }));
+}
+
+function adminItemsForCurrentStage(data) {
+  const backendItems = data && Array.isArray(data.items) ? data.items : [];
+  return backendItems.length ? backendItems : defaultAdminItemsForStage(jobsState.adminStage);
+}
+
+function isAdminItemSelected(type) {
+  const selected = jobsState.selectedAdminItems[jobsState.adminStage] || {};
+  return selected[type] !== false;
+}
+
+function setAdminItemSelected(type, selected) {
+  if (!jobsState.selectedAdminItems[jobsState.adminStage]) {
+    jobsState.selectedAdminItems[jobsState.adminStage] = {};
+  }
+  jobsState.selectedAdminItems[jobsState.adminStage][type] = selected;
+}
+
 function adminOutputOptions() {
   return {
     stage: adminOptionsForm.elements.stage.value,
@@ -4019,6 +4078,7 @@ function renderAdminItemsWorkspace() {
   const data = jobsState.adminItems;
   const metrics = data.metrics || {};
   const listNames = data.listNames || [];
+  const adminItems = adminItemsForCurrentStage(data);
   if (jobsState.directoryListName && !listNames.includes(jobsState.directoryListName)) {
     jobsState.directoryListName = '';
   }
@@ -4027,7 +4087,7 @@ function renderAdminItemsWorkspace() {
     <section class="admin-run-note">
       ${data.stage === 'makeup_day'
         ? 'Makeup-day admin items rerun the delivery set and add makeup-specific outputs.'
-        : 'First-run admin items match the Java “Administrative Items Before Makeup Day” workflow: delivery envelope, school directory, missing report, ID cards, and administrative exports.'}
+        : 'First-run admin items match the Java Administrative Items Before Makeup Day workflow: delivery envelope, school directory, missing report, ID cards, and administrative exports.'}
     </section>
     <section class="admin-metrics">
       <article><span>Subjects</span><strong>${formatNumber(metrics.subjects || 0)}</strong></article>
@@ -4035,19 +4095,30 @@ function renderAdminItemsWorkspace() {
       <article><span>Missing</span><strong>${formatNumber(metrics.missing || 0)}</strong></article>
       <article><span>Staff</span><strong>${formatNumber(metrics.staff || 0)}</strong></article>
     </section>
+    <section class="admin-render-toolbar">
+      <div>
+        <strong>Admin Items To Render</strong>
+        <span>${formatNumber(adminItems.filter((item) => isAdminItemSelected(item.type)).length)} selected</span>
+      </div>
+      <button class="primary" type="button" data-render-selected-admin-items>Render Selected</button>
+    </section>
     <div class="admin-item-cards">
-      ${(data.items || []).map((item) => `
+      ${adminItems.map((item) => `
         <article class="admin-item-card ${jobsState.expandedAdminItem === item.type ? 'expanded' : ''}">
-          <div>
-            <h3>${escapeHtml(item.label)}</h3>
-            <p>${escapeHtml(adminItemHelp(item.type, data.stage))}</p>
+          <div class="admin-item-check-row">
+            <label class="admin-item-check">
+              <input data-admin-item-check="${item.type}" type="checkbox" ${isAdminItemSelected(item.type) ? 'checked' : ''}>
+              <span>
+                <strong>${escapeHtml(item.label)}</strong>
+                <em>${escapeHtml(adminItemHelp(item.type, data.stage))}</em>
+              </span>
+            </label>
           </div>
           <div class="admin-item-actions">
             ${item.type === 'school_directory' ? '<button type="button" data-toggle-admin-item="school_directory">Options</button>' : ''}
             ${item.type === 'sis_export' || item.type === 'administrative_exports' ? `<button type="button" data-toggle-admin-item="${item.type}">Options</button>` : ''}
             ${item.type === 'id_cards' ? '<button type="button" data-toggle-admin-item="id_cards">Options</button>' : ''}
             ${item.type === 'sticker_prints' ? '<button type="button" data-toggle-admin-item="sticker_prints">Options</button>' : ''}
-            <button class="primary" type="button" data-render-admin-item="${item.type}">Render</button>
           </div>
           ${item.type === 'school_directory' && jobsState.expandedAdminItem === 'school_directory'
             ? renderDirectoryOptions(listNames)
@@ -4078,8 +4149,15 @@ function renderAdminItemsWorkspace() {
     `).join('')
     : '<div class="empty-state">No admin outputs yet.</div>';
 
-  adminItemsList.querySelectorAll('[data-render-admin-item]').forEach((button) => {
-    button.addEventListener('click', () => renderAdminItem(button));
+  adminItemsList.querySelectorAll('[data-render-selected-admin-items]').forEach((button) => {
+    button.addEventListener('click', () => renderSelectedAdminItems(button));
+  });
+
+  adminItemsList.querySelectorAll('[data-admin-item-check]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      setAdminItemSelected(checkbox.dataset.adminItemCheck, checkbox.checked);
+      renderAdminItemsWorkspace();
+    });
   });
 
   adminItemsList.querySelectorAll('[data-toggle-admin-item]').forEach((button) => {
@@ -4097,7 +4175,42 @@ function renderAdminItemsWorkspace() {
   bindStickerOptions();
 }
 
-async function renderAdminItem(button) {
+function adminRenderRequest(type) {
+  return {
+    type,
+    stage: jobsState.adminStage,
+    sortBy: jobsState.adminSortBy,
+    outputFolder: jobsState.adminOutputFolder,
+    sisFormats: selectedSisFormats(type !== 'administrative_exports'),
+    idCardSource: jobsState.idCardSource,
+    idCardListName: jobsState.idCardListName,
+    idCardLayout: jobsState.idCardLayout,
+    idCardReason: jobsState.idCardReason,
+    idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
+    directoryType: jobsState.directoryType,
+    directorySource: jobsState.directorySource,
+    directoryListName: jobsState.directoryListName,
+    directorySortMethod: jobsState.directorySortMethod,
+    directorySchoolYear: jobsState.directorySchoolYear,
+    directoryContactLine: jobsState.directoryContactLine,
+    directoryPhotographedOnly: jobsState.directoryPhotographedOnly,
+    stickerSource: jobsState.stickerSource,
+    stickerListName: jobsState.stickerListName,
+    stickerCopies: jobsState.stickerCopies,
+    stickerSortMethod: jobsState.stickerSortMethod,
+    stickerPhotographedOnly: jobsState.stickerPhotographedOnly,
+    adminExportStaff: {
+      staffMed: jobsState.adminExportStaffMed,
+      staffLarge: jobsState.adminExportStaffLarge
+    }
+  };
+}
+
+async function renderAdminItemType(type) {
+  await trecsApi('renderAdminItem').renderAdminItem(jobsState.selectedJobId, adminRenderRequest(type));
+}
+
+async function renderSelectedAdminItems(button) {
   if (!jobsState.adminOutputFolder) {
     adminItemsStatus.textContent = 'Choose an output folder first.';
     if (adminOutputFolderPath) {
@@ -4105,40 +4218,34 @@ async function renderAdminItem(button) {
     }
     return;
   }
+  const data = jobsState.adminItems || {};
+  const selectedItems = adminItemsForCurrentStage(data).filter((item) => isAdminItemSelected(item.type));
+  if (!selectedItems.length) {
+    adminItemsStatus.textContent = 'Select at least one admin item.';
+    return;
+  }
+  const confirmMessage = [
+    `Render ${selectedItems.length} admin item${selectedItems.length === 1 ? '' : 's'}?`,
+    '',
+    ...selectedItems.map((item) => `- ${item.label}`),
+    '',
+    `Output folder: ${jobsState.adminOutputFolder}`
+  ].join('\n');
+  if (!window.confirm(confirmMessage)) {
+    return;
+  }
+
   const originalText = button.textContent;
   button.disabled = true;
-  button.textContent = 'Rendering...';
+  button.textContent = 'Rendering Selected...';
   adminItemsStatus.textContent = 'Rendering...';
 
   try {
-    await trecsApi('renderAdminItem').renderAdminItem(jobsState.selectedJobId, {
-      type: button.dataset.renderAdminItem,
-      stage: jobsState.adminStage,
-      sortBy: jobsState.adminSortBy,
-      outputFolder: jobsState.adminOutputFolder,
-      sisFormats: selectedSisFormats(button.dataset.renderAdminItem !== 'administrative_exports'),
-      idCardSource: jobsState.idCardSource,
-      idCardListName: jobsState.idCardListName,
-      idCardLayout: jobsState.idCardLayout,
-      idCardReason: jobsState.idCardReason,
-      idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
-      directoryType: jobsState.directoryType,
-      directorySource: jobsState.directorySource,
-      directoryListName: jobsState.directoryListName,
-      directorySortMethod: jobsState.directorySortMethod,
-      directorySchoolYear: jobsState.directorySchoolYear,
-      directoryContactLine: jobsState.directoryContactLine,
-      directoryPhotographedOnly: jobsState.directoryPhotographedOnly,
-      stickerSource: jobsState.stickerSource,
-      stickerListName: jobsState.stickerListName,
-      stickerCopies: jobsState.stickerCopies,
-      stickerSortMethod: jobsState.stickerSortMethod,
-      stickerPhotographedOnly: jobsState.stickerPhotographedOnly,
-      adminExportStaff: {
-        staffMed: jobsState.adminExportStaffMed,
-        staffLarge: jobsState.adminExportStaffLarge
-      }
-    });
+    for (let index = 0; index < selectedItems.length; index += 1) {
+      const item = selectedItems[index];
+      adminItemsStatus.textContent = `Rendering ${index + 1} of ${selectedItems.length}: ${item.label}`;
+      await renderAdminItemType(item.type);
+    }
     jobsState.adminItems = null;
     await loadAdminItems();
   } catch (error) {
