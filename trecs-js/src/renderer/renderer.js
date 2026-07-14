@@ -4045,6 +4045,7 @@ async function loadAdminItems() {
 
   try {
     jobsState.adminItems = await trecsApi('getAdminItems').getAdminItems(jobsState.selectedJobId, jobsState.adminStage);
+    jobsState.adminItemsLoading = false;
     adminItemsStatus.textContent = shootStageLabel(jobsState.adminStage);
     renderAdminItemsWorkspace();
   } catch (error) {
@@ -4067,15 +4068,20 @@ function renderAdminItemsWorkspace() {
     adminOutputFolderPath.value = jobsState.adminOutputFolder || '';
   }
 
-  if (!jobsState.adminItems || jobsState.adminItems.stage !== jobsState.adminStage) {
+  const hasLoadedAdminItems = jobsState.adminItems && jobsState.adminItems.stage === jobsState.adminStage;
+  if (!hasLoadedAdminItems && !jobsState.adminItemsLoading) {
     loadAdminItems();
-    if (!jobsState.adminItemsLoading) {
-      adminItemsList.innerHTML = '<div class="empty-state">Loading admin items...</div>';
-    }
-    return;
   }
 
-  const data = jobsState.adminItems;
+  const data = hasLoadedAdminItems
+    ? jobsState.adminItems
+    : {
+        stage: jobsState.adminStage,
+        metrics: {},
+        listNames: [],
+        items: defaultAdminItemsForStage(jobsState.adminStage),
+        batches: []
+      };
   const metrics = data.metrics || {};
   const listNames = data.listNames || [];
   const adminItems = adminItemsForCurrentStage(data);
@@ -6732,9 +6738,8 @@ if (chooseAdminOutputFolderButton) {
       if (adminOutputFolderPath) {
         adminOutputFolderPath.value = choice.folderPath;
       }
-      adminItemsStatus.textContent = jobsState.adminItems
-        ? `${shootStageLabel(jobsState.adminStage)} / Output folder selected`
-        : 'Output folder selected';
+      adminItemsStatus.textContent = `${shootStageLabel(jobsState.adminStage)} / Output folder selected`;
+      renderAdminItemsWorkspace();
     } catch (error) {
       adminItemsStatus.textContent = error.message || 'Could not choose output folder';
       console.error(error);
