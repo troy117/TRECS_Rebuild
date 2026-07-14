@@ -2795,35 +2795,6 @@ async function adminListSubjectIds(jobId, listName) {
   return new Set(rows.map((row) => row.subjectId));
 }
 
-async function adminItemMetrics(jobId) {
-  const rows = await querySql(`
-    SELECT
-      COUNT(*) AS subjects,
-      SUM(CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END) AS photographed,
-      SUM(CASE
-        WHEN s.primary_image_asset_id IS NULL
-          OR s.photographed_status != 'photographed'
-        THEN 1
-        ELSE 0
-      END) AS missing,
-      SUM(CASE
-        WHEN UPPER(COALESCE(s.grade, '')) = 'FAC'
-          OR LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff')
-        THEN 1
-        ELSE 0
-      END) AS staff
-    FROM subjects s
-    WHERE s.job_id = ${jobId};
-  `);
-  const metrics = rows[0] || {};
-  return {
-    subjects: Number(metrics.subjects || 0),
-    photographed: Number(metrics.photographed || 0),
-    missing: Number(metrics.missing || 0),
-    staff: Number(metrics.staff || 0)
-  };
-}
-
 function adminItemDefinitionsForStage(stage) {
   return Array.from(ADMIN_ITEM_TYPES.entries())
     .filter(([_type, item]) => item.stages.includes(stage))
@@ -3294,9 +3265,9 @@ function buildStickerPrintOutput(job, subjects, options, listSubjectIds) {
 async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_day') {
   const jobId = numericId(jobIdValue);
   const stage = normalizeShootStage(stageValue);
-  const [job, metrics, listNames] = await Promise.all([
+  const [job, subjects, listNames] = await Promise.all([
     adminJobSummary(jobId),
-    adminItemMetrics(jobId),
+    adminSubjectRows(jobId),
     adminListNames(jobId)
   ]);
   let batches = [];
@@ -3322,10 +3293,18 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
     logStartup('admin item history unavailable', error);
   }
 
+  const photographed = subjects.filter((subject) => subject.imageFilename).length;
+  const missing = subjects.filter((subject) => !subject.imageFilename || subject.photographedStatus !== 'photographed').length;
+
   return {
     job,
     stage,
-    metrics,
+    metrics: {
+      subjects: subjects.length,
+      photographed,
+      missing,
+      staff: subjects.filter((subject) => ['faculty', 'staff'].includes(subject.subjectType)).length
+    },
     listNames,
     items: adminItemDefinitionsForStage(stage),
     batches

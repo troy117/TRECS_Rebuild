@@ -200,7 +200,6 @@ let jobsState = {
   showStudentEditForm: false,
   showAddRecordsModal: false,
   adminItems: null,
-  adminItemsLoading: false,
   adminStage: 'original_picture_day',
   adminSortBy: 'grade',
   adminOutputFolder: '',
@@ -3975,11 +3974,7 @@ async function loadAdminItems() {
   if (!jobsState.selectedJobId) {
     return;
   }
-  if (jobsState.adminItemsLoading) {
-    return;
-  }
 
-  jobsState.adminItemsLoading = true;
   adminItemsStatus.textContent = 'Loading...';
   const options = adminOutputOptions();
   applyAdminOptions(options);
@@ -3992,8 +3987,6 @@ async function loadAdminItems() {
     adminItemsStatus.textContent = 'Load failed';
     adminItemsList.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load admin items.')}</div>`;
     console.error(error);
-  } finally {
-    jobsState.adminItemsLoading = false;
   }
 }
 
@@ -4010,9 +4003,6 @@ function renderAdminItemsWorkspace() {
 
   if (!jobsState.adminItems || jobsState.adminItems.stage !== jobsState.adminStage) {
     loadAdminItems();
-    if (!jobsState.adminItemsLoading) {
-      adminItemsList.innerHTML = '<div class="empty-state">Loading admin items...</div>';
-    }
     return;
   }
 
@@ -6605,13 +6595,9 @@ if (workspaceAdminItemsButton) {
 
 adminOptionsForm.addEventListener('change', () => {
   const options = adminOutputOptions();
-  const stageChanged = options.stage !== jobsState.adminStage;
-  const sortChanged = options.sortBy !== jobsState.adminSortBy;
   applyAdminOptions(options);
-  if (stageChanged || sortChanged) {
-    jobsState.adminItems = null;
-    renderAdminItemsWorkspace();
-  }
+  jobsState.adminItems = null;
+  renderAdminItemsWorkspace();
 });
 
 if (chooseAdminOutputFolderButton) {
@@ -6625,9 +6611,7 @@ if (chooseAdminOutputFolderButton) {
       if (adminOutputFolderPath) {
         adminOutputFolderPath.value = choice.folderPath;
       }
-      adminItemsStatus.textContent = jobsState.adminItems
-        ? `${shootStageLabel(jobsState.adminStage)} / Output folder selected`
-        : 'Output folder selected';
+      renderAdminItemsWorkspace();
     } catch (error) {
       adminItemsStatus.textContent = error.message || 'Could not choose output folder';
       console.error(error);
