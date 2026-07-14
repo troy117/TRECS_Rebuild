@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('trecs', {
   loadOnsiteSetup: (input) => ipcRenderer.invoke('job:load-onsite-setup', input),
   loadOnsiteSetups: (input) => ipcRenderer.invoke('job:load-onsite-setups', input),
   getSystemInfo: () => ipcRenderer.invoke('app:system-info'),
+  focusWindow: () => ipcRenderer.invoke('app:focus-window'),
   chooseEndOfDayPackageFolder: () => ipcRenderer.invoke('end-of-day:choose-package-folder'),
   approveEndOfDayPackage: (input) => ipcRenderer.invoke('end-of-day:approve-package', input),
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),

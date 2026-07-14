@@ -673,6 +673,31 @@ function setCaptureLoginVisible(visible) {
   }
 }
 
+async function focusCaptureLoginPhotographer() {
+  const input = captureLoginForm.elements.photographerName;
+  if (!input || captureLoginModal.hidden) {
+    return;
+  }
+
+  try {
+    if (window.trecs && typeof window.trecs.focusWindow === 'function') {
+      await window.trecs.focusWindow();
+    }
+  } catch (error) {
+    console.warn('Could not focus TRECS window', error);
+  }
+
+  [0, 50, 150].forEach((delay) => {
+    setTimeout(() => {
+      if (captureLoginModal.hidden) {
+        return;
+      }
+      input.focus({ preventScroll: true });
+      input.select();
+    }, delay);
+  });
+}
+
 async function openCaptureLogin(jobId) {
   jobsState.pendingCaptureJobId = jobId;
   setCaptureLoginVisible(true);
@@ -692,10 +717,7 @@ async function openCaptureLogin(jobId) {
     console.error(error);
   }
 
-  setTimeout(() => {
-    captureLoginForm.elements.photographerName.focus();
-    captureLoginForm.elements.photographerName.select();
-  }, 0);
+  await focusCaptureLoginPhotographer();
 }
 
 async function submitCaptureLogin(event) {
@@ -2603,7 +2625,7 @@ function renderCapturePhotoCount() {
     return;
   }
   const summary = jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : {};
-  capturePhotoCount.textContent = `${formatNumber(summary.subjectsWithPrimaryImage || 0)} / ${formatNumber(summary.subjects || 0)} photographed`;
+  capturePhotoCount.textContent = `${formatNumber(summary.activeCaptureSubjects || 0)} / ${formatNumber(summary.subjects || 0)} photographed`;
 }
 
 async function setCaptureFileMode(fileMode) {

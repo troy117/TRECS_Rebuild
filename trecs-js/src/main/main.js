@@ -13,8 +13,26 @@ const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase(
 const portableMode = app.isPackaged || runningFromPortableFolder;
 const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
 const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
-const projectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
-const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : projectRoot;
+const defaultProjectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
+function dataRootFromPathFile() {
+  const pathFile = path.join(defaultProjectRoot, 'path.txt');
+  if (!fs.existsSync(pathFile) || !fs.statSync(pathFile).isFile()) {
+    return defaultProjectRoot;
+  }
+
+  const configuredPath = fs.readFileSync(pathFile, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^["']|["']$/g, ''))
+    .find((line) => line && !line.startsWith('#'));
+  if (!configuredPath) {
+    return defaultProjectRoot;
+  }
+
+  return path.resolve(defaultProjectRoot, configuredPath);
+}
+
+const projectRoot = dataRootFromPathFile();
+const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : defaultProjectRoot;
 const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
@@ -24,8 +42,22 @@ let sqlModulePromise;
 function systemInfo() {
   return {
     computerName: process.env.COMPUTERNAME || os.hostname() || '',
-    userName: process.env.USERNAME || os.userInfo().username || ''
+    userName: process.env.USERNAME || os.userInfo().username || '',
+    dataRoot: projectRoot,
+    defaultDataRoot: defaultProjectRoot,
+    pathFile: path.join(defaultProjectRoot, 'path.txt')
   };
+}
+
+function focusWindow(event) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (window) {
+    if (window.isMinimized()) {
+      window.restore();
+    }
+    window.focus();
+  }
+  return { focused: Boolean(window) };
 }
 
 function logStartup(message, error = null) {
@@ -583,11 +615,37 @@ function createProgramDatabaseSchema(database) {
   `);
 }
 
-async function writeJobDatabaseSnapshot(jobId) {
+function croppedMediumPrimaryImageBySubject(database, jobId) {
+  const rows = rowsFromDatabase(database, `
+    SELECT
+      si.subject_id AS subjectId,
+      si.image_asset_id AS imageAssetId
+    FROM subject_images si
+    JOIN subjects s ON s.id = si.subject_id
+    JOIN image_assets ia ON ia.id = si.image_asset_id
+    JOIN image_versions iv ON iv.image_asset_id = ia.id
+      AND iv.version_type = 'cropped_med'
+    WHERE s.job_id = ${jobId}
+      AND ia.job_id = ${jobId}
+      AND ia.status != 'rejected'
+    ORDER BY si.subject_id, si.selected DESC, si.sort_order, ia.id DESC;
+  `);
+  const imageBySubject = new Map();
+  rows.forEach((row) => {
+    const subjectId = Number(row.subjectId);
+    if (!imageBySubject.has(subjectId)) {
+      imageBySubject.set(subjectId, Number(row.imageAssetId));
+    }
+  });
+  return imageBySubject;
+}
+
+async function writeJobDatabaseSnapshot(jobId, options = {}) {
   const SQL = await getSqlModule();
   const databaseBytes = fs.readFileSync(prototypeDatabasePath);
   const sourceDatabase = new SQL.Database(databaseBytes);
   const jobDatabase = new SQL.Database();
+  const croppedMediumOnly = options.imageScope === 'cropped_med';
 
   try {
     const jobRows = rowsFromDatabase(sourceDatabase, `
@@ -608,16 +666,40 @@ async function writeJobDatabaseSnapshot(jobId) {
     jobDatabase.run('PRAGMA foreign_keys = OFF;');
     jobDatabase.run('BEGIN TRANSACTION;');
 
-    const subjectRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
+    let subjectRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
     const subjectIds = subjectRows.map((row) => row.id);
     const subjectIdList = subjectIds.length ? subjectIds.join(', ') : '0';
-    const imageRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_assets WHERE job_id = ${jobId};`);
+    let imageRows = croppedMediumOnly
+      ? rowsFromDatabase(sourceDatabase, `
+        SELECT DISTINCT ia.*
+        FROM image_assets ia
+        JOIN image_versions iv ON iv.image_asset_id = ia.id
+          AND iv.version_type = 'cropped_med'
+        WHERE ia.job_id = ${jobId}
+          AND ia.status != 'rejected';
+      `)
+      : rowsFromDatabase(sourceDatabase, `SELECT * FROM image_assets WHERE job_id = ${jobId};`);
     const imageIds = imageRows.map((row) => row.id);
     const imageIdList = imageIds.length ? imageIds.join(', ') : '0';
-    const captureSessionRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_sessions WHERE job_id = ${jobId};`);
+    const captureSessionRows = croppedMediumOnly
+      ? []
+      : rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_sessions WHERE job_id = ${jobId};`);
     const orderRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM orders WHERE job_id = ${jobId};`);
     const orderIds = orderRows.map((row) => row.id);
     const orderIdList = orderIds.length ? orderIds.join(', ') : '0';
+    const croppedPrimaryBySubject = croppedMediumOnly
+      ? croppedMediumPrimaryImageBySubject(sourceDatabase, jobId)
+      : new Map();
+    if (croppedMediumOnly) {
+      subjectRows = subjectRows.map((row) => {
+        const primaryImageId = croppedPrimaryBySubject.get(Number(row.id)) || null;
+        return {
+          ...row,
+          primary_image_asset_id: primaryImageId,
+          photographed_status: primaryImageId ? 'photographed' : 'unknown'
+        };
+      });
+    }
 
     insertRows(jobDatabase, 'jobs', Object.keys(jobRows[0]), jobRows);
     insertRows(jobDatabase, 'subjects', Object.keys(subjectRows[0] || {}), subjectRows);
@@ -631,9 +713,29 @@ async function writeJobDatabaseSnapshot(jobId) {
     insertRows(jobDatabase, 'subject_group_members', Object.keys(subjectGroupMemberRows[0] || {}), subjectGroupMemberRows);
     insertRows(jobDatabase, 'image_assets', Object.keys(imageRows[0] || {}), imageRows);
     insertRows(jobDatabase, 'capture_sessions', Object.keys(captureSessionRows[0] || {}), captureSessionRows);
-    const imageVersionRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_versions WHERE image_asset_id IN (${imageIdList});`);
+    const imageVersionRows = rowsFromDatabase(sourceDatabase, `
+      SELECT *
+      FROM image_versions
+      WHERE image_asset_id IN (${imageIdList})
+      ${croppedMediumOnly ? "AND version_type = 'cropped_med'" : ''};
+    `);
     insertRows(jobDatabase, 'image_versions', Object.keys(imageVersionRows[0] || {}), imageVersionRows);
-    const subjectImageRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subject_images WHERE subject_id IN (${subjectIdList});`);
+    const subjectImageRows = rowsFromDatabase(sourceDatabase, `
+      SELECT *
+      FROM subject_images
+      WHERE subject_id IN (${subjectIdList})
+        AND image_asset_id IN (${imageIdList});
+    `).map((row) => {
+      if (!croppedMediumOnly) {
+        return row;
+      }
+      const primaryImageId = croppedPrimaryBySubject.get(Number(row.subject_id)) || null;
+      return {
+        ...row,
+        selected: primaryImageId && Number(row.image_asset_id) === Number(primaryImageId) ? 1 : 0,
+        sort_order: primaryImageId && Number(row.image_asset_id) === Number(primaryImageId) ? 0 : row.sort_order
+      };
+    });
     insertRows(jobDatabase, 'subject_images', Object.keys(subjectImageRows[0] || {}), subjectImageRows);
     insertRows(jobDatabase, 'orders', Object.keys(orderRows[0] || {}), orderRows);
     const orderItemRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM order_items WHERE order_id IN (${orderIdList});`);
@@ -1199,7 +1301,7 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   fs.mkdirSync(setupCroppedMedFolder, { recursive: true });
   fs.mkdirSync(setupExportsFolder, { recursive: true });
 
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId, { imageScope: 'cropped_med' });
   const setupDatabasePath = path.join(setupDatabaseFolder, 'job.db');
   if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
     fs.copyFileSync(jobDatabasePath, setupDatabasePath);
@@ -1547,6 +1649,76 @@ function endOfDayPackageDisplayName(preview, createdAt) {
   return safeFolderName(`EOD - ${timestamp} - ${workstation} - ${photographer}`);
 }
 
+function clearPackagedCaptureLinks(database, jobId, copiedImages) {
+  const imageIds = copiedImages
+    .map((image) => Number(image.imageAssetId))
+    .filter(Boolean);
+  if (!imageIds.length) {
+    return { resetSubjects: 0 };
+  }
+
+  const imageIdList = imageIds.join(', ');
+  const subjectRows = rowsFromDatabase(database, `
+    SELECT DISTINCT subject_id AS subjectId
+    FROM subject_images
+    WHERE image_asset_id IN (${imageIdList});
+  `);
+  const subjectIds = subjectRows.map((row) => Number(row.subjectId)).filter(Boolean);
+
+  database.run(`
+    DELETE FROM subject_images
+    WHERE image_asset_id IN (${imageIdList});
+  `);
+
+  subjectIds.forEach((subjectId) => {
+    const croppedRows = rowsFromDatabase(database, `
+      SELECT si.image_asset_id AS imageAssetId
+      FROM subject_images si
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      JOIN image_versions iv ON iv.image_asset_id = ia.id
+        AND iv.version_type = 'cropped_med'
+      WHERE si.subject_id = ${subjectId}
+        AND ia.job_id = ${jobId}
+        AND ia.status != 'rejected'
+      ORDER BY si.selected DESC, si.sort_order, ia.id DESC
+      LIMIT 1;
+    `);
+    const croppedImageId = croppedRows.length ? Number(croppedRows[0].imageAssetId) : null;
+
+    database.run(`
+      UPDATE subject_images
+      SET selected = 0
+      WHERE subject_id = ?;
+    `, [subjectId]);
+
+    if (croppedImageId) {
+      database.run(`
+        UPDATE subject_images
+        SET selected = 1,
+            sort_order = 0
+        WHERE subject_id = ?
+          AND image_asset_id = ?;
+      `, [subjectId, croppedImageId]);
+    }
+
+    database.run(`
+      UPDATE subjects
+      SET primary_image_asset_id = ?,
+          photographed_status = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND job_id = ?;
+    `, [
+      croppedImageId,
+      croppedImageId ? 'photographed' : 'unknown',
+      subjectId,
+      jobId
+    ]);
+  });
+
+  return { resetSubjects: subjectIds.length };
+}
+
 function adjustedEndOfDaySubjectChanges(preview, adjustments = {}) {
   const subjectChanges = preview.subjectChanges || {};
   const newSubjectAdjustments = new Map((adjustments.newSubjects || []).map((subject) => [Number(subject.id), subject]));
@@ -1713,11 +1885,18 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
+  const cleanup = await writeSql((database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
+  const refreshedJobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+
   return {
     packagePath,
     manifestPath,
     databasePath: path.join(databaseFolder, 'job.db'),
-    counts: adjustedCounts
+    jobDatabasePath: refreshedJobDatabasePath,
+    counts: {
+      ...adjustedCounts,
+      resetSubjects: cleanup.resetSubjects || 0
+    }
   };
 }
 
@@ -4692,6 +4871,7 @@ ipcMain.handle('job:choose-onsite-setup-folder', chooseOnsiteSetupFolder);
 ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
 ipcMain.handle('job:load-onsite-setups', loadOnsiteSetups);
 ipcMain.handle('app:system-info', () => systemInfo());
+ipcMain.handle('app:focus-window', focusWindow);
 ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
 ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
@@ -5149,6 +5329,19 @@ async function getJobDetail(_event, jobIdValue) {
         LEFT JOIN subject_images si ON si.subject_id = s.id
         WHERE s.job_id = ${jobId}
         GROUP BY s.job_id
+      ),
+      active_capture_counts AS (
+        SELECT
+          s.job_id,
+          COUNT(DISTINCT si.subject_id) AS activeCaptureSubjects
+        FROM subject_images si
+        JOIN subjects s ON s.id = si.subject_id
+        JOIN image_assets ia ON ia.id = si.image_asset_id
+        WHERE s.job_id = ${jobId}
+          AND ia.job_id = ${jobId}
+          AND ia.source = 'capture_hot_folder'
+          AND ia.status NOT IN ('packaged', 'rejected')
+        GROUP BY s.job_id
       )
     SELECT
       j.id,
@@ -5164,7 +5357,8 @@ async function getJobDetail(_event, jobIdValue) {
       COALESCE(oc.orders, 0) AS orders,
       COALESCE(oic.orderItems, 0) AS orderItems,
       COALESCE(ic.images, 0) AS images,
-      COALESCE(sic.subjectImages, 0) AS subjectImages
+      COALESCE(sic.subjectImages, 0) AS subjectImages,
+      COALESCE(acc.activeCaptureSubjects, 0) AS activeCaptureSubjects
     FROM jobs j
     JOIN clients c ON c.id = j.client_id
     LEFT JOIN package_plans p ON p.id = j.package_plan_id
@@ -5173,6 +5367,7 @@ async function getJobDetail(_event, jobIdValue) {
     LEFT JOIN order_item_counts oic ON oic.job_id = j.id
     LEFT JOIN image_counts ic ON ic.job_id = j.id
     LEFT JOIN subject_image_counts sic ON sic.job_id = j.id
+    LEFT JOIN active_capture_counts acc ON acc.job_id = j.id
     WHERE j.id = ${jobId}
   `);
 
@@ -5433,6 +5628,7 @@ async function getJobDetail(_event, jobIdValue) {
         SELECT COUNT(*)
         FROM image_assets ia
         WHERE ia.job_id = ${jobId}
+          AND ia.status NOT IN ('packaged', 'rejected')
           AND NOT EXISTS (
             SELECT 1
             FROM subject_images si
@@ -5484,6 +5680,7 @@ async function getJobDetail(_event, jobIdValue) {
     LEFT JOIN subject_images si ON si.image_asset_id = ia.id
     LEFT JOIN subjects s ON s.id = si.subject_id
     WHERE ia.job_id = ${jobId}
+      AND ia.status NOT IN ('packaged', 'rejected')
     GROUP BY ia.id
     ORDER BY ia.id DESC
     LIMIT 80;
@@ -5507,6 +5704,7 @@ async function getJobDetail(_event, jobIdValue) {
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     LEFT JOIN subject_images si ON si.image_asset_id = ia.id
     WHERE ia.job_id = ${jobId}
+      AND ia.status NOT IN ('packaged', 'rejected')
     GROUP BY ia.id
     HAVING COUNT(DISTINCT si.subject_id) <> 1
     ORDER BY ia.id DESC
@@ -7304,7 +7502,8 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
           JOIN image_assets ia_selected ON ia_selected.id = si_selected.image_asset_id
           WHERE si_selected.subject_id = s.id
             AND si_selected.selected = 1
-            AND ia_selected.status != 'rejected'
+            AND ia_selected.source = 'capture_hot_folder'
+            AND ia_selected.status NOT IN ('packaged', 'rejected')
           ORDER BY si_selected.sort_order, ia_selected.id DESC
           LIMIT 1
         ) AS selectedImageId,
