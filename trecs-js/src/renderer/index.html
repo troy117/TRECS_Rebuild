@@ -476,8 +476,22 @@
                       <option value="ref">Reference</option>
                     </select>
                   </label>
+                  <label class="admin-output-field">
+                    <span>Output Folder</span>
+                    <div class="folder-picker">
+                      <input name="outputFolder" readonly placeholder="Choose where admin items will be created">
+                      <button id="browseAdminOutputFolderButton" type="button">Browse</button>
+                    </div>
+                  </label>
                 </form>
                 <div id="adminItemsList" class="admin-items-list"></div>
+                <div class="admin-run-footer">
+                  <div class="admin-progress-wrap">
+                    <progress id="adminItemsProgress" value="0" max="100"></progress>
+                    <span id="adminItemsProgressText">Ready</span>
+                  </div>
+                  <button class="primary" id="runAdminItemsButton" type="button">Run Selected Items</button>
+                </div>
               </section>
 
               <aside class="panel admin-items-history">

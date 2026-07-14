@@ -36,6 +36,8 @@ const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : d
 const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
+const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
+const LEGACY_IMAGE_FOLDER = 'Images';
 
 let sqlModulePromise;
 
@@ -55,7 +57,12 @@ function focusWindow(event) {
     if (window.isMinimized()) {
       window.restore();
     }
+    if (!window.isVisible()) {
+      window.show();
+    }
+    window.moveTop();
     window.focus();
+    window.webContents.focus();
   }
   return { focused: Boolean(window) };
 }
@@ -1531,6 +1538,14 @@ async function buildEndOfDayPreview(jobId) {
       WHERE job_id = ${jobId}
       ORDER BY legacy_ref_num, last_name, first_name, id;
     `);
+    const localCapture = await readLocalCaptureRows(jobId);
+    const localCaptureByImageId = new Map(localCapture.rows
+      .filter((row) => Number(row.image_asset_id))
+      .map((row) => [Number(row.image_asset_id), row]));
+    const localCaptureImageIds = Array.from(localCaptureByImageId.keys());
+    const capturedImageWhere = localCaptureImageIds.length
+      ? `AND ia.id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})`
+      : 'AND 1 = 0';
     const capturedImages = rowsFromDatabase(sourceDatabase, `
       SELECT
         ia.id,
@@ -1556,12 +1571,14 @@ async function buildEndOfDayPreview(jobId) {
       WHERE ia.job_id = ${jobId}
         AND ia.source = 'capture_hot_folder'
         AND ia.status != 'packaged'
+        ${capturedImageWhere}
       ORDER BY ia.captured_at, ia.id;
     `).map((row) => {
       const metadata = parseImageMetadata(row.metadataJson);
+      const localRow = localCaptureByImageId.get(Number(row.id)) || {};
       return {
         ...row,
-        rawPath: metadata.rawPath || null
+        rawPath: metadata.rawPath || localRow.cr3_path || null
       };
     });
 
@@ -1585,8 +1602,6 @@ async function buildEndOfDayPreview(jobId) {
           editedSubjects: [],
           deletedSubjects: []
         };
-    const localCapture = await readLocalCaptureRows(jobId);
-
     const photographerNames = Array.from(new Set(capturedImages.map((image) => image.photographerName).filter(Boolean)));
     const workstationNames = Array.from(new Set(capturedImages.map((image) => image.captureWorkstation).filter(Boolean)));
 
@@ -3227,6 +3242,22 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
   };
 }
 
+async function chooseAdminOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose Admin Items Output Folder',
+    properties: ['openDirectory', 'createDirectory']
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  return {
+    canceled: false,
+    folderPath: result.filePaths[0]
+  };
+}
+
 async function renderAdminItem(_event, jobIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
   const stage = normalizeShootStage(input.stage);
@@ -3346,6 +3377,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
 }
 
 ipcMain.handle('admin-items:get', getAdminItems);
+ipcMain.handle('admin-items:choose-output-folder', chooseAdminOutputFolder);
 ipcMain.handle('admin-items:render', renderAdminItem);
 ipcMain.handle('images:sync-cropped', syncCroppedImages);
 ipcMain.handle('images:generate-cropped-medium', generateCroppedMediumImages);
@@ -3462,7 +3494,12 @@ function defaultJobRootPath(client, jobName) {
 function ensureJobFolders(rootPathValue) {
   const rootPath = resolveProjectPath(rootPathValue);
   fs.mkdirSync(rootPath, { recursive: true });
-  ['Images', 'CroppedLarge', 'CroppedMed', 'Chosen', 'Exports', 'Database'].forEach((folder) => {
+  const legacyImagesPath = path.join(rootPath, LEGACY_IMAGE_FOLDER);
+  const unprocessedPath = path.join(rootPath, UNPROCESSED_IMAGE_FOLDER);
+  if (fs.existsSync(legacyImagesPath) && !fs.existsSync(unprocessedPath)) {
+    fs.renameSync(legacyImagesPath, unprocessedPath);
+  }
+  [UNPROCESSED_IMAGE_FOLDER, 'CroppedLarge', 'CroppedMed', 'Chosen', 'Exports', 'Database'].forEach((folder) => {
     fs.mkdirSync(path.join(rootPath, folder), { recursive: true });
   });
 }
@@ -3993,6 +4030,111 @@ function upsertImportedRowsById(database, tableName, rows) {
   }
 }
 
+function mergeImportedImageVersionRows(database, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const insertStatement = database.prepare(`
+    INSERT OR IGNORE INTO image_versions (
+      image_asset_id,
+      version_type,
+      path,
+      width,
+      height,
+      crop_json,
+      created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?);
+  `);
+  const updateStatement = database.prepare(`
+    UPDATE image_versions
+    SET width = ?,
+        height = ?,
+        crop_json = ?,
+        created_at = COALESCE(?, created_at)
+    WHERE image_asset_id = ?
+      AND version_type = ?
+      AND path = ?;
+  `);
+
+  try {
+    rows.forEach((row) => {
+      insertStatement.run([
+        row.image_asset_id,
+        row.version_type,
+        row.path,
+        row.width ?? null,
+        row.height ?? null,
+        row.crop_json ?? null,
+        row.created_at ?? null
+      ]);
+      updateStatement.run([
+        row.width ?? null,
+        row.height ?? null,
+        row.crop_json ?? null,
+        row.created_at ?? null,
+        row.image_asset_id,
+        row.version_type,
+        row.path
+      ]);
+    });
+  } finally {
+    insertStatement.free();
+    updateStatement.free();
+  }
+}
+
+function mergeImportedSubjectImageRows(database, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const insertStatement = database.prepare(`
+    INSERT OR IGNORE INTO subject_images (
+      subject_id,
+      image_asset_id,
+      role,
+      selected,
+      sort_order
+    )
+    VALUES (?, ?, ?, ?, ?);
+  `);
+  const updateStatement = database.prepare(`
+    UPDATE subject_images
+    SET selected = ?,
+        sort_order = ?
+    WHERE subject_id = ?
+      AND image_asset_id = ?
+      AND role = ?;
+  `);
+
+  try {
+    rows.forEach((row) => {
+      const role = row.role || 'capture';
+      const selected = Number(row.selected || 0);
+      const sortOrder = Number(row.sort_order || 0);
+      insertStatement.run([
+        row.subject_id,
+        row.image_asset_id,
+        role,
+        selected,
+        sortOrder
+      ]);
+      updateStatement.run([
+        selected,
+        sortOrder,
+        row.subject_id,
+        row.image_asset_id,
+        role
+      ]);
+    });
+  } finally {
+    insertStatement.free();
+    updateStatement.free();
+  }
+}
+
 function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
   const sourceFolder = path.join(setupFolder, 'CroppedMed');
   const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'CroppedMed');
@@ -4013,6 +4155,46 @@ function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
   });
 
   return copied;
+}
+
+function clearImportedJobRows(database, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  database.run(`
+    DELETE FROM sync_record_mappings WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
+    DELETE FROM sync_conflicts WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
+    DELETE FROM sync_packages WHERE job_id = ${jobId};
+    DELETE FROM render_tasks WHERE render_batch_id IN (SELECT id FROM render_batches WHERE job_id = ${jobId});
+    DELETE FROM render_batches WHERE job_id = ${jobId};
+    DELETE FROM exports WHERE job_id = ${jobId};
+    DELETE FROM admin_item_batches WHERE job_id = ${jobId};
+    DELETE FROM envelope_scans WHERE job_id = ${jobId};
+    DELETE FROM image_import_events WHERE job_id = ${jobId};
+    DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE job_id = ${jobId});
+    DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE job_id = ${jobId});
+    DELETE FROM orders WHERE job_id = ${jobId};
+    DELETE FROM subject_images
+    WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId})
+       OR image_asset_id IN (SELECT id FROM image_assets WHERE job_id = ${jobId});
+    DELETE FROM image_versions WHERE image_asset_id IN (SELECT id FROM image_assets WHERE job_id = ${jobId});
+    DELETE FROM image_assets WHERE job_id = ${jobId};
+    DELETE FROM capture_sessions WHERE job_id = ${jobId};
+    DELETE FROM subject_group_members WHERE group_id IN (SELECT id FROM subject_groups WHERE job_id = ${jobId});
+    DELETE FROM subject_groups WHERE job_id = ${jobId};
+    DELETE FROM subject_codes WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId});
+    DELETE FROM subject_field_values
+    WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId})
+       OR field_definition_id IN (SELECT id FROM job_field_definitions WHERE job_id = ${jobId});
+    DELETE FROM job_field_definitions WHERE job_id = ${jobId};
+    DELETE FROM subjects WHERE job_id = ${jobId};
+    DELETE FROM jobs WHERE id = ${jobId};
+  `);
+}
+
+function clearLocalCaptureDatabase(jobIdValue) {
+  const dbPath = localCaptureDatabasePath(numericId(jobIdValue));
+  if (fs.existsSync(dbPath)) {
+    fs.rmSync(dbPath, { force: true });
+  }
 }
 
 function readEndOfDayPackage(packageFolder) {
@@ -4092,7 +4274,7 @@ const END_OF_DAY_SUBJECT_FIELD_COLUMNS = {
 
 function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
   const copiedByImageId = new Map((packageInfo.manifest.copiedImages || []).map((image) => [Number(image.imageAssetId), image]));
-  const destinationFolder = path.join(resolveProjectPath(rootPathValue), 'Images');
+  const destinationFolder = path.join(resolveProjectPath(rootPathValue), UNPROCESSED_IMAGE_FOLDER);
   let copied = 0;
   const importedPathByImageId = new Map();
 
@@ -4220,8 +4402,8 @@ async function approveEndOfDayPackage(_event, input = {}) {
             homeroom: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'homeroom') ? manifestSubject.homeroom : row.homeroom
           };
         });
-      insertImportedRows(database, 'subjects', newSubjectRows);
-      insertImportedRows(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
+      upsertImportedRowsById(database, 'subjects', newSubjectRows);
+      upsertImportedRowsById(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
       upsertImportedRowsById(database, 'capture_sessions', packageTables.capture_sessions);
 
       editedSubjects.forEach((subject) => {
@@ -4247,8 +4429,8 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
 
       upsertImportedRowsById(database, 'image_assets', imageRows);
-      insertImportedRows(database, 'image_versions', imageVersionRows);
-      insertImportedRows(database, 'subject_images', packageTables.subject_images);
+      mergeImportedImageVersionRows(database, imageVersionRows);
+      mergeImportedSubjectImageRows(database, packageTables.subject_images);
 
       subjectRowsToImport
         .filter((row) => !newSubjectIds.has(Number(row.id)))
@@ -4356,8 +4538,10 @@ async function loadOnsiteSetup(_event, input = {}) {
         WHERE id = ${numericId(sourceJob.id)}
         LIMIT 1;
       `);
-      if (existingJobRows.length) {
-        throw new Error('This onsite setup is already loaded on this computer');
+      const refreshedExistingJob = existingJobRows.length > 0;
+      if (refreshedExistingJob) {
+        clearImportedJobRows(database, sourceJob.id);
+        clearLocalCaptureDatabase(sourceJob.id);
       }
 
       let clientRows = rowsFromDatabase(database, `
@@ -4442,6 +4626,7 @@ async function loadOnsiteSetup(_event, input = {}) {
         id: sourceJob.id,
         rootPath,
         setupFolder,
+        refreshedExistingJob,
         databasePath: setupCopyPath,
         counts: {
           subjects: importedTables.subjects.length,
@@ -5333,6 +5518,7 @@ async function getJobDetail(_event, jobIdValue) {
       active_capture_counts AS (
         SELECT
           s.job_id,
+          COUNT(DISTINCT ia.id) AS activeCaptureImages,
           COUNT(DISTINCT si.subject_id) AS activeCaptureSubjects
         FROM subject_images si
         JOIN subjects s ON s.id = si.subject_id
@@ -5358,6 +5544,7 @@ async function getJobDetail(_event, jobIdValue) {
       COALESCE(oic.orderItems, 0) AS orderItems,
       COALESCE(ic.images, 0) AS images,
       COALESCE(sic.subjectImages, 0) AS subjectImages,
+      COALESCE(acc.activeCaptureImages, 0) AS activeCaptureImages,
       COALESCE(acc.activeCaptureSubjects, 0) AS activeCaptureSubjects
     FROM jobs j
     JOIN clients c ON c.id = j.client_id
@@ -5710,6 +5897,20 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY ia.id DESC
     LIMIT 100;
   `);
+
+  const localCapture = await readLocalCaptureRows(jobId);
+  const activeCaptureImageIds = new Set(localCapture.rows.map((row) => Number(row.image_asset_id)).filter(Boolean));
+  const activeCaptureSubjectIds = new Set(localCapture.rows.map((row) => Number(row.subject_id)).filter(Boolean));
+  if (summary[0]) {
+    summary[0].activeCaptureImages = activeCaptureImageIds.size;
+    summary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
+    summary[0].activeCaptureEvents = localCapture.rows.length;
+  }
+  if (captureSummary[0]) {
+    captureSummary[0].activeCaptureImages = activeCaptureImageIds.size;
+    captureSummary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
+    captureSummary[0].activeCaptureEvents = localCapture.rows.length;
+  }
 
   const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
 
@@ -7211,7 +7412,7 @@ function renameUnlinkedCaptureImage(database, input) {
     return null;
   }
 
-  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), 'Images');
+  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), UNPROCESSED_IMAGE_FOLDER);
   const currentFolder = path.dirname(currentPath);
   if (path.resolve(currentFolder).toLowerCase() !== path.resolve(jobImagesFolder).toLowerCase()) {
     return null;
@@ -7319,7 +7520,7 @@ function renameLinkedCaptureImage(database, input) {
     return null;
   }
 
-  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), 'Images');
+  const jobImagesFolder = path.join(resolveWorkspacePath(row.rootPath), UNPROCESSED_IMAGE_FOLDER);
   const currentFolder = path.dirname(currentPath);
   if (path.resolve(currentFolder).toLowerCase() !== path.resolve(jobImagesFolder).toLowerCase()) {
     return null;
@@ -7521,7 +7722,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
 
     const row = rows[0];
     const jobRoot = resolveWorkspacePath(row.rootPath);
-    const imageFolder = path.join(jobRoot, 'Images');
+    const imageFolder = path.join(jobRoot, UNPROCESSED_IMAGE_FOLDER);
     fs.mkdirSync(imageFolder, { recursive: true });
     const filename = captureDestinationName(row.ref, sourcePath);
     const destinationPath = uniquePath(imageFolder, filename);
@@ -8428,7 +8629,7 @@ async function saveCropToolImage(_event, input = {}) {
 
   const outputFolder = String(input.outputFolder || '').trim();
   const outputBaseName = input.sourcePath
-    ? `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`
+    ? `${path.basename(input.sourcePath, path.extname(input.sourcePath))}.jpg`
     : '8x10-crop.jpg';
   let filePath = null;
 
@@ -8437,7 +8638,7 @@ async function saveCropToolImage(_event, input = {}) {
     filePath = uniquePath(outputFolder, outputBaseName);
   } else {
     const defaultPath = input.sourcePath
-      ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}-8x10.jpg`)
+      ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}.jpg`)
       : '8x10-crop.jpg';
     const result = await dialog.showSaveDialog({
       title: 'Save 8x10 Crop',

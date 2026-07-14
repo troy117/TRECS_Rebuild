@@ -134,6 +134,10 @@ const adminItemsWorkspace = document.getElementById('adminItemsWorkspace');
 const adminOptionsForm = document.getElementById('adminOptionsForm');
 const adminItemsStatus = document.getElementById('adminItemsStatus');
 const adminItemsList = document.getElementById('adminItemsList');
+const browseAdminOutputFolderButton = document.getElementById('browseAdminOutputFolderButton');
+const runAdminItemsButton = document.getElementById('runAdminItemsButton');
+const adminItemsProgress = document.getElementById('adminItemsProgress');
+const adminItemsProgressText = document.getElementById('adminItemsProgressText');
 const adminItemsHistoryCount = document.getElementById('adminItemsHistoryCount');
 const adminItemsHistory = document.getElementById('adminItemsHistory');
 const newSchoolButton = document.getElementById('newSchoolButton');
@@ -198,9 +202,25 @@ let jobsState = {
   showStudentEditForm: false,
   showAddRecordsModal: false,
   adminItems: null,
+  adminItemsLoading: false,
   adminStage: 'original_picture_day',
   adminSortBy: 'grade',
   expandedAdminItem: null,
+  adminOutputFolder: '',
+  selectedAdminItems: [
+    'delivery_envelope_cover',
+    'school_directory',
+    'missing_photo_report',
+    'id_cards',
+    'sis_student_cd',
+    'sis_powerschool',
+    'staff_med'
+  ],
+  adminRunStatus: {
+    running: false,
+    progress: 0,
+    message: 'Ready'
+  },
   sisStudentCd: true,
   sisDestiny: false,
   sisPowerSchool: false,
@@ -687,7 +707,7 @@ async function focusCaptureLoginPhotographer() {
     console.warn('Could not focus TRECS window', error);
   }
 
-  [0, 50, 150].forEach((delay) => {
+  [0, 50, 150, 300, 600, 1000].forEach((delay) => {
     setTimeout(() => {
       if (captureLoginModal.hidden) {
         return;
@@ -695,6 +715,13 @@ async function focusCaptureLoginPhotographer() {
       input.focus({ preventScroll: true });
       input.select();
     }, delay);
+  });
+
+  requestAnimationFrame(() => {
+    if (!captureLoginModal.hidden) {
+      input.focus({ preventScroll: true });
+      input.select();
+    }
   });
 }
 
@@ -880,7 +907,7 @@ function endOfDayEditedSubjectAdjustment(subjectId) {
 function renderEndOfDaySection(sectionId, title, count, contentHtml) {
   const collapsed = jobsState.endOfDayCollapsed[sectionId] === true;
   return `
-    <section class="end-of-day-section ${collapsed ? 'collapsed' : ''}" data-end-of-day-section="${sectionId}">
+    <section class="end-of-day-section ${sectionId === 'editedSubjects' ? 'database-edits' : ''} ${collapsed ? 'collapsed' : ''}" data-end-of-day-section="${sectionId}">
       <button class="end-of-day-section-heading" type="button" data-end-of-day-toggle="${sectionId}">
         <span>${escapeHtml(title)}</span>
         <strong>${formatNumber(count || 0)}</strong>
@@ -1006,10 +1033,8 @@ function renderEndOfDayEditedSubjects(editedSubjects) {
 function renderEndOfDayReview(review) {
   const counts = review.counts || {};
   const changes = review.subjectChanges || {};
-  const capturedImages = review.capturedImages || [];
   const newSubjects = changes.newSubjects || [];
   const editedSubjects = changes.editedSubjects || [];
-  const deletedSubjects = changes.deletedSubjects || [];
   const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
   const includedEditedSubjectCount = includedEndOfDayEditedSubjectCount(editedSubjects);
 
@@ -1021,22 +1046,7 @@ function renderEndOfDayReview(review) {
       <article><span>Student Edits Exported</span><strong>${formatNumber(includedEditedSubjectCount)}</strong></article>
     </div>
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
-    ${renderEndOfDaySection('capturedImages', 'Captured Images', capturedImages.length, renderEndOfDayCapturedImages(capturedImages))}
-    ${renderEndOfDaySection('newSubjects', 'New Camera Cards', newSubjects.length, renderEndOfDayNewSubjects(newSubjects))}
     ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
-    ${deletedSubjects.length ? `
-      <section>
-        <h3>Deleted Records</h3>
-        <ul class="end-of-day-list">
-          ${deletedSubjects.map((subject) => `
-            <li>
-              <strong>${escapeHtml(subject.ref || '')}</strong>
-              <span>${escapeHtml(subject.name || '')}</span>
-            </li>
-          `).join('')}
-        </ul>
-      </section>
-    ` : ''}
   `;
   bindEndOfDayReviewControls(review);
 }
@@ -1619,7 +1629,7 @@ function renderWorkspaceStudentDetail(subject) {
     <form class="notes-form" data-note-form="subject" data-note-id="${subject.id}">
       <label>
         <span>Notes</span>
-        <textarea name="notes" rows="4">${escapeHtml(subject.notes)}</textarea>
+        <textarea name="notes" rows="2">${escapeHtml(subject.notes)}</textarea>
       </label>
       <div class="form-actions">
         <span data-note-status></span>
@@ -2006,21 +2016,18 @@ function availabilityMark(value) {
 }
 
 function linkedImageAvailabilityTable(image) {
-  const hasImage = Number(image.hasOriginal || 0) > 0 || Boolean(image.currentPath);
   return `
     <table class="linked-image-availability">
       <thead>
         <tr>
-          <th>Image Sources</th>
           <th>Image</th>
-          <th>Cropped Large</th>
-          <th>CroppedMed</th>
+          <th>Large</th>
+          <th>Med</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td>${escapeHtml(image.source || image.captureFileMode || 'capture')}</td>
-          <td>${availabilityMark(hasImage)}</td>
+          <td>${availabilityMark(Number(image.hasOriginal || 0) > 0)}</td>
           <td>${availabilityMark(Number(image.hasCroppedLarge || 0) > 0)}</td>
           <td>${availabilityMark(Number(image.hasCroppedMed || 0) > 0)}</td>
         </tr>
@@ -2596,7 +2603,6 @@ function renderCaptureSessionMeta() {
   const job = jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : {};
   captureSessionMeta.textContent = [
     job.location && job.job ? `${job.location} / ${job.job}` : '',
-    formatType(job.type),
     captureShootStageLabel(),
     jobsState.captureSession && jobsState.captureSession.photographerName,
     jobsState.captureSession && jobsState.captureSession.workstationName
@@ -2625,7 +2631,11 @@ function renderCapturePhotoCount() {
     return;
   }
   const summary = jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : {};
-  capturePhotoCount.textContent = `${formatNumber(summary.activeCaptureSubjects || 0)} / ${formatNumber(summary.subjects || 0)} photographed`;
+  const jpgCount = Number(summary.activeCaptureImages || 0);
+  const sessionStudents = Number(summary.activeCaptureSubjects || 0);
+  const totalPhotographed = Number(summary.subjectsWithPrimaryImage || 0);
+  const totalRecords = Number(summary.subjects || 0);
+  capturePhotoCount.textContent = `${formatNumber(jpgCount)} JPG / ${formatNumber(sessionStudents)} students / ${formatNumber(totalPhotographed)} photo / ${formatNumber(totalRecords)} records`;
 }
 
 async function setCaptureFileMode(fileMode) {
@@ -3221,6 +3231,7 @@ async function selectCaptureImage(imageId, control) {
       selected: Number(image.id) === Number(imageId)
     }));
     renderCaptureCompare();
+    focusCaptureBarcode(true);
   } catch (error) {
     captureEntryStatus.textContent = error.message || 'Could not select image';
     console.error(error);
@@ -3673,17 +3684,104 @@ async function submitEnvelopeOrder(event) {
   }
 }
 
+const MAIN_PICTURE_DAY_ADMIN_ITEMS = [
+  {
+    type: 'delivery_envelope_cover',
+    label: 'Delivery Envelope Cover',
+    group: 'Forms',
+    detail: 'Creates the first delivery envelope cover using the fall delivery form template.'
+  },
+  {
+    type: 'school_directory',
+    label: 'School Directory',
+    group: 'Reports',
+    detail: 'Creates the first-pass school directory from photographed students.'
+  },
+  {
+    type: 'missing_photo_report',
+    label: 'Missing Photo Report',
+    group: 'Reports',
+    detail: 'Lists students and staff who still need a usable photo before makeup day.'
+  },
+  {
+    type: 'id_cards',
+    label: 'Student & Staff IDs',
+    group: 'Cards',
+    detail: 'Prepares the original picture-day ID card batch.'
+  },
+  {
+    type: 'sis_student_cd',
+    label: 'Student CD',
+    group: 'Administrative CDs',
+    detail: 'Exports student photo/data files for the standard student CD.'
+  },
+  {
+    type: 'sis_sasi',
+    label: 'SASI',
+    group: 'Administrative CDs',
+    detail: 'Exports the SASI admin data set.'
+  },
+  {
+    type: 'sis_destiny',
+    label: 'Destiny',
+    group: 'Administrative CDs',
+    detail: 'Exports the library/Destiny image and data set.'
+  },
+  {
+    type: 'sis_powerschool',
+    label: 'PowerSchool',
+    group: 'Administrative CDs',
+    detail: 'Exports the PowerSchool admin data set.'
+  },
+  {
+    type: 'staff_large',
+    label: 'Staff Large',
+    group: 'Staff Exports',
+    detail: 'Exports staff images from CroppedLarge.'
+  },
+  {
+    type: 'staff_med',
+    label: 'Staff Med',
+    group: 'Staff Exports',
+    detail: 'Exports staff images from CroppedMed.'
+  }
+];
+
+const MAKEUP_DAY_ADMIN_ITEMS = [
+  ...MAIN_PICTURE_DAY_ADMIN_ITEMS,
+  {
+    type: 'sticker_prints',
+    label: 'Sticker Prints',
+    group: 'Makeup Day',
+    detail: 'Prepares makeup-day sticker prints.'
+  },
+  {
+    type: 'staff_picture_packages',
+    label: 'Staff Picture Packages',
+    group: 'Makeup Day',
+    detail: 'Prepares staff package units.'
+  },
+  {
+    type: 'yearbook_small',
+    label: 'Yearbook Small',
+    group: 'Yearbook',
+    detail: 'Exports the small yearbook CD set.'
+  },
+  {
+    type: 'yearbook_large',
+    label: 'Yearbook Large',
+    group: 'Yearbook',
+    detail: 'Exports the large yearbook CD set.'
+  }
+];
+
+function adminItemDefinitionsForUi(stage = 'original_picture_day') {
+  return stage === 'makeup_day' ? MAKEUP_DAY_ADMIN_ITEMS : MAIN_PICTURE_DAY_ADMIN_ITEMS;
+}
+
 function adminItemLabel(type) {
-  const labels = {
-    delivery_envelope_cover: 'Delivery Envelope Cover',
-    school_directory: 'School Directory',
-    missing_photo_report: 'Missing Photo Report',
-    sis_export: 'SIS Export',
-    id_cards: 'ID Cards',
-    sticker_prints: 'Sticker Prints',
-    staff_picture_packages: 'Staff Picture Packages'
-  };
-  return labels[type] || formatType(type);
+  const item = [...MAIN_PICTURE_DAY_ADMIN_ITEMS, ...MAKEUP_DAY_ADMIN_ITEMS].find((candidate) => candidate.type === type);
+  return item ? item.label : formatType(type);
 }
 
 function shootStageLabel(stage) {
@@ -3705,16 +3803,54 @@ function adminItemHelp(type, stage) {
   return helps[type] || '';
 }
 
+function ensureAdminOutputControls() {
+  if (!adminOptionsForm) {
+    return;
+  }
+
+  if (!adminOptionsForm.elements.outputFolder) {
+    adminOptionsForm.insertAdjacentHTML('beforeend', `
+      <label class="admin-output-field">
+        <span>Output Folder</span>
+        <div class="folder-picker">
+          <input name="outputFolder" readonly placeholder="Choose where admin items will be created">
+          <button id="browseAdminOutputFolderButton" type="button">Browse</button>
+        </div>
+      </label>
+    `);
+  }
+
+  if (adminItemsList && !document.getElementById('adminItemsProgress')) {
+    adminItemsList.insertAdjacentHTML('afterend', `
+      <div class="admin-run-footer">
+        <div class="admin-progress-wrap">
+          <progress id="adminItemsProgress" value="0" max="100"></progress>
+          <span id="adminItemsProgressText">Ready</span>
+        </div>
+        <button class="primary" id="runAdminItemsButton" type="button">Run Selected Items</button>
+      </div>
+    `);
+  }
+}
+
+function adminOutputFolderInput() {
+  ensureAdminOutputControls();
+  return adminOptionsForm && adminOptionsForm.elements ? adminOptionsForm.elements.outputFolder : null;
+}
+
 function adminOutputOptions() {
+  const outputInput = adminOutputFolderInput();
   return {
     stage: adminOptionsForm.elements.stage.value,
-    sortBy: adminOptionsForm.elements.sortBy.value
+    sortBy: adminOptionsForm.elements.sortBy.value,
+    outputFolder: outputInput ? outputInput.value : ''
   };
 }
 
 function applyAdminOptions(options) {
   jobsState.adminStage = options.stage;
   jobsState.adminSortBy = options.sortBy;
+  jobsState.adminOutputFolder = options.outputFolder || '';
 }
 
 function renderDirectoryOptions(listNames) {
@@ -3966,7 +4102,11 @@ async function loadAdminItems() {
   if (!jobsState.selectedJobId) {
     return;
   }
+  if (jobsState.adminItemsLoading) {
+    return;
+  }
 
+  jobsState.adminItemsLoading = true;
   adminItemsStatus.textContent = 'Loading...';
   const options = adminOutputOptions();
   applyAdminOptions(options);
@@ -3976,9 +4116,17 @@ async function loadAdminItems() {
     adminItemsStatus.textContent = shootStageLabel(jobsState.adminStage);
     renderAdminItemsWorkspace();
   } catch (error) {
-    adminItemsStatus.textContent = 'Load failed';
-    adminItemsList.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load admin items.')}</div>`;
+    adminItemsStatus.textContent = 'Checklist ready';
+    jobsState.adminItems = {
+      stage: jobsState.adminStage,
+      metrics: {},
+      batches: [],
+      error: error.message || 'Could not load admin item history.'
+    };
+    renderAdminItemsWorkspace();
     console.error(error);
+  } finally {
+    jobsState.adminItemsLoading = false;
   }
 }
 
@@ -3987,21 +4135,32 @@ function renderAdminItemsWorkspace() {
     return;
   }
 
+  ensureAdminOutputControls();
   adminOptionsForm.elements.stage.value = jobsState.adminStage;
   adminOptionsForm.elements.sortBy.value = jobsState.adminSortBy;
+  const outputInput = adminOutputFolderInput();
+  if (outputInput) {
+    outputInput.value = jobsState.adminOutputFolder || '';
+  }
 
+  const data = jobsState.adminItems && jobsState.adminItems.stage === jobsState.adminStage
+    ? jobsState.adminItems
+    : {
+      stage: jobsState.adminStage,
+      metrics: {},
+      batches: []
+    };
   if (!jobsState.adminItems || jobsState.adminItems.stage !== jobsState.adminStage) {
     loadAdminItems();
-    return;
   }
 
-  const data = jobsState.adminItems;
   const metrics = data.metrics || {};
-  const listNames = data.listNames || [];
-  if (jobsState.directoryListName && !listNames.includes(jobsState.directoryListName)) {
-    jobsState.directoryListName = '';
-  }
-  adminItemsStatus.textContent = shootStageLabel(data.stage);
+  const items = adminItemDefinitionsForUi(jobsState.adminStage);
+  const selectedItems = new Set(jobsState.selectedAdminItems || []);
+  const groups = Array.from(new Set(items.map((item) => item.group)));
+  const selectedCount = items.filter((item) => selectedItems.has(item.type)).length;
+  const allSelected = selectedCount === items.length;
+  adminItemsStatus.textContent = jobsState.adminItemsLoading ? 'Loading history...' : shootStageLabel(data.stage);
   adminItemsList.innerHTML = `
     <section class="admin-metrics">
       <article><span>Subjects</span><strong>${formatNumber(metrics.subjects || 0)}</strong></article>
@@ -4009,35 +4168,37 @@ function renderAdminItemsWorkspace() {
       <article><span>Missing</span><strong>${formatNumber(metrics.missing || 0)}</strong></article>
       <article><span>Staff</span><strong>${formatNumber(metrics.staff || 0)}</strong></article>
     </section>
-    <div class="admin-item-cards">
-      ${(data.items || []).map((item) => `
-        <article class="admin-item-card ${jobsState.expandedAdminItem === item.type ? 'expanded' : ''}">
-          <div>
-            <h3>${escapeHtml(item.label)}</h3>
-            <p>${escapeHtml(adminItemHelp(item.type, data.stage))}</p>
-          </div>
-          <div class="admin-item-actions">
-            ${item.type === 'school_directory' ? '<button type="button" data-toggle-admin-item="school_directory">Options</button>' : ''}
-            ${item.type === 'sis_export' ? '<button type="button" data-toggle-admin-item="sis_export">Options</button>' : ''}
-            ${item.type === 'id_cards' ? '<button type="button" data-toggle-admin-item="id_cards">Options</button>' : ''}
-            ${item.type === 'sticker_prints' ? '<button type="button" data-toggle-admin-item="sticker_prints">Options</button>' : ''}
-            <button class="primary" type="button" data-render-admin-item="${item.type}">Render</button>
-          </div>
-          ${item.type === 'school_directory' && jobsState.expandedAdminItem === 'school_directory'
-            ? renderDirectoryOptions(listNames)
-            : ''}
-          ${item.type === 'sticker_prints' && jobsState.expandedAdminItem === 'sticker_prints'
-            ? renderStickerOptions(listNames)
-            : ''}
-          ${item.type === 'sis_export' && jobsState.expandedAdminItem === 'sis_export'
-            ? renderSisOptions()
-            : ''}
-          ${item.type === 'id_cards' && jobsState.expandedAdminItem === 'id_cards'
-            ? renderIdCardOptions(listNames)
-            : ''}
-        </article>
+    <section class="admin-batch-summary">
+      <div>
+        <h3>${escapeHtml(shootStageLabel(data.stage))}</h3>
+        <p>${formatNumber(selectedCount)} of ${formatNumber(items.length)} admin items selected</p>
+      </div>
+      <label class="checkbox-label admin-select-all">
+        <input data-admin-select-all type="checkbox" ${allSelected ? 'checked' : ''}>
+        <span>Select all</span>
+      </label>
+    </section>
+    <div class="admin-checklist">
+      ${groups.map((group) => `
+        <section class="admin-checklist-group">
+          <h3>${escapeHtml(group)}</h3>
+          ${items.filter((item) => item.group === group).map((item) => `
+            <label class="admin-check-row">
+              <input data-admin-item-checkbox="${escapeHtml(item.type)}" type="checkbox" ${selectedItems.has(item.type) ? 'checked' : ''}>
+              <span>
+                <strong>${escapeHtml(item.label)}</strong>
+                <em>${escapeHtml(item.detail)}</em>
+              </span>
+            </label>
+          `).join('')}
+        </section>
       `).join('')}
     </div>
+    <section class="admin-design-note">
+      <strong>Design preview only</strong>
+      <span>The Run button currently validates the selection and shows progress. The individual admin item actions will be wired next.</span>
+      ${data.error ? `<span>${escapeHtml(data.error)}</span>` : ''}
+    </section>
   `;
 
   const batches = data.batches || [];
@@ -4052,23 +4213,111 @@ function renderAdminItemsWorkspace() {
     `).join('')
     : '<div class="empty-state">No admin outputs yet.</div>';
 
-  adminItemsList.querySelectorAll('[data-render-admin-item]').forEach((button) => {
-    button.addEventListener('click', () => renderAdminItem(button));
-  });
-
-  adminItemsList.querySelectorAll('[data-toggle-admin-item]').forEach((button) => {
-    button.addEventListener('click', () => {
-      jobsState.expandedAdminItem = jobsState.expandedAdminItem === button.dataset.toggleAdminItem
-        ? null
-        : button.dataset.toggleAdminItem;
+  adminItemsList.querySelectorAll('[data-admin-item-checkbox]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const nextSelected = new Set(jobsState.selectedAdminItems || []);
+      if (input.checked) {
+        nextSelected.add(input.dataset.adminItemCheckbox);
+      } else {
+        nextSelected.delete(input.dataset.adminItemCheckbox);
+      }
+      jobsState.selectedAdminItems = Array.from(nextSelected);
       renderAdminItemsWorkspace();
     });
   });
 
-  bindDirectoryOptions();
-  bindSisOptions();
-  bindIdCardOptions();
-  bindStickerOptions();
+  const selectAll = adminItemsList.querySelector('[data-admin-select-all]');
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      jobsState.selectedAdminItems = selectAll.checked ? items.map((item) => item.type) : [];
+      renderAdminItemsWorkspace();
+    });
+  }
+
+  renderAdminRunState();
+}
+
+function renderAdminRunState() {
+  const state = jobsState.adminRunStatus || {};
+  const visibleItemTypes = new Set(adminItemDefinitionsForUi(jobsState.adminStage).map((item) => item.type));
+  const selectedCount = (jobsState.selectedAdminItems || []).filter((type) => visibleItemTypes.has(type)).length;
+  const progress = adminItemsProgress || document.getElementById('adminItemsProgress');
+  const progressText = adminItemsProgressText || document.getElementById('adminItemsProgressText');
+  const runButton = runAdminItemsButton || document.getElementById('runAdminItemsButton');
+  if (progress) {
+    progress.value = Number(state.progress || 0);
+  }
+  if (progressText) {
+    progressText.textContent = state.message || 'Ready';
+  }
+  if (runButton) {
+    runButton.disabled = Boolean(state.running) || !selectedCount || !jobsState.adminOutputFolder;
+    runButton.textContent = state.running ? 'Running...' : 'Run Selected Items';
+  }
+}
+
+async function chooseAdminOutputFolder() {
+  try {
+    const result = await trecsApi('chooseAdminOutputFolder').chooseAdminOutputFolder();
+    if (!result || result.canceled) {
+      return;
+    }
+    jobsState.adminOutputFolder = result.folderPath || '';
+    const outputInput = adminOutputFolderInput();
+    if (outputInput) {
+      outputInput.value = jobsState.adminOutputFolder;
+    }
+    jobsState.adminRunStatus = {
+      running: false,
+      progress: 0,
+      message: jobsState.adminOutputFolder ? 'Output folder selected' : 'Ready'
+    };
+    renderAdminRunState();
+  } catch (error) {
+    adminItemsStatus.textContent = error.message || 'Could not choose output folder';
+    console.error(error);
+  }
+}
+
+async function runSelectedAdminItems() {
+  const selectedItems = adminItemDefinitionsForUi(jobsState.adminStage)
+    .filter((item) => (jobsState.selectedAdminItems || []).includes(item.type));
+  if (!selectedItems.length) {
+    jobsState.adminRunStatus = { running: false, progress: 0, message: 'Select at least one admin item' };
+    renderAdminRunState();
+    return;
+  }
+  if (!jobsState.adminOutputFolder) {
+    jobsState.adminRunStatus = { running: false, progress: 0, message: 'Choose an output folder' };
+    renderAdminRunState();
+    return;
+  }
+
+  jobsState.adminRunStatus = {
+    running: true,
+    progress: 0,
+    message: `Preparing ${formatNumber(selectedItems.length)} admin item${selectedItems.length === 1 ? '' : 's'}...`
+  };
+  adminItemsStatus.textContent = 'Design preview';
+  renderAdminRunState();
+
+  for (let index = 0; index < selectedItems.length; index += 1) {
+    const item = selectedItems[index];
+    jobsState.adminRunStatus = {
+      running: true,
+      progress: Math.round(((index + 1) / selectedItems.length) * 100),
+      message: `Queued ${item.label}`
+    };
+    renderAdminRunState();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+
+  jobsState.adminRunStatus = {
+    running: false,
+    progress: 100,
+    message: `Ready to build ${formatNumber(selectedItems.length)} selected item${selectedItems.length === 1 ? '' : 's'} when actions are wired`
+  };
+  renderAdminRunState();
 }
 
 async function renderAdminItem(button) {
@@ -6569,7 +6818,48 @@ adminOptionsForm.addEventListener('change', () => {
   const options = adminOutputOptions();
   applyAdminOptions(options);
   jobsState.adminItems = null;
+  jobsState.adminItemsLoading = false;
+  jobsState.adminRunStatus = { running: false, progress: 0, message: 'Ready' };
   renderAdminItemsWorkspace();
+});
+
+if (browseAdminOutputFolderButton) {
+  browseAdminOutputFolderButton.addEventListener('click', chooseAdminOutputFolder);
+}
+
+if (runAdminItemsButton) {
+  runAdminItemsButton.addEventListener('click', () => {
+    runSelectedAdminItems().catch((error) => {
+      jobsState.adminRunStatus = {
+        running: false,
+        progress: 0,
+        message: error.message || 'Admin item run failed'
+      };
+      renderAdminRunState();
+      console.error(error);
+    });
+  });
+}
+
+document.addEventListener('click', (event) => {
+  const browseButton = event.target.closest ? event.target.closest('#browseAdminOutputFolderButton') : null;
+  if (browseButton && browseButton !== browseAdminOutputFolderButton) {
+    chooseAdminOutputFolder();
+    return;
+  }
+
+  const runButton = event.target.closest ? event.target.closest('#runAdminItemsButton') : null;
+  if (runButton && runButton !== runAdminItemsButton) {
+    runSelectedAdminItems().catch((error) => {
+      jobsState.adminRunStatus = {
+        running: false,
+        progress: 0,
+        message: error.message || 'Admin item run failed'
+      };
+      renderAdminRunState();
+      console.error(error);
+    });
+  }
 });
 
 if (workspaceAddBlankButton) {
@@ -6893,7 +7183,17 @@ endOfDayModal.addEventListener('wheel', (event) => {
   }
 
   const target = event.target instanceof Element ? event.target : event.target.parentElement;
-  const scrollTarget = target ? target.closest('.end-of-day-section-body, .end-of-day-review') : null;
+  const candidates = target
+    ? Array.from(target.closest('.end-of-day-card')?.querySelectorAll('.end-of-day-section-body, .end-of-day-review') || [])
+    : [];
+  const nearestScrollable = target ? target.closest('.end-of-day-section-body, .end-of-day-review') : null;
+  const scrollTarget = [nearestScrollable, ...candidates]
+    .filter(Boolean)
+    .find((candidate) => {
+      const canScrollDown = event.deltaY > 0 && candidate.scrollTop + candidate.clientHeight < candidate.scrollHeight - 1;
+      const canScrollUp = event.deltaY < 0 && candidate.scrollTop > 0;
+      return canScrollDown || canScrollUp;
+    });
   if (!scrollTarget) {
     event.preventDefault();
     event.stopPropagation();
@@ -6911,6 +7211,11 @@ browseSchoolDataButton.addEventListener('click', browseSchoolDataFile);
 confirmSchoolDataButton.addEventListener('click', confirmSchoolDataImport);
 captureLoginForm.addEventListener('submit', submitCaptureLogin);
 cancelCaptureLoginButton.addEventListener('click', () => setCaptureLoginVisible(false));
+window.addEventListener('focus', () => {
+  if (!captureLoginModal.hidden) {
+    focusCaptureLoginPhotographer();
+  }
+});
 refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
 if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
   window.trecs.onEnvelopeScanImported(handleEnvelopeScanImported);

@@ -610,6 +610,7 @@ dd {
   gap: 14px;
   grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
+  min-height: 0;
 }
 
 .job-student-workspace[hidden] {
@@ -1014,12 +1015,15 @@ dd {
 }
 
 .end-of-day-review {
-  align-content: start;
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 14px;
   min-height: 0;
   overscroll-behavior: contain;
-  overflow: visible;
+  overflow: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .end-of-day-card > .modal-heading,
@@ -1068,7 +1072,14 @@ dd {
 .end-of-day-section {
   border: 1px solid #d7e0e8;
   border-radius: 8px;
+  min-height: 0;
   overflow: hidden;
+}
+
+.end-of-day-section.database-edits {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 
 .end-of-day-section-heading {
@@ -1106,13 +1117,19 @@ dd {
 }
 
 .end-of-day-section-body {
-  height: 220px;
-  max-height: 48vh;
+  height: auto;
+  max-height: min(420px, 46vh);
   min-height: 0;
   overscroll-behavior: contain;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 10px;
   resize: vertical;
+  scrollbar-gutter: stable;
+}
+
+.end-of-day-section.database-edits .end-of-day-section-body {
+  flex: 1 1 auto;
+  max-height: none;
 }
 
 .end-of-day-list,
@@ -1435,10 +1452,10 @@ dd {
 }
 
 .student-workspace-grid {
-  align-items: start;
+  align-items: stretch;
   display: grid;
   gap: 14px;
-  grid-template-columns: 300px minmax(440px, 1fr) 330px;
+  grid-template-columns: 250px minmax(440px, 0.85fr) minmax(420px, 1.15fr);
   height: 100%;
   min-height: 0;
 }
@@ -1446,7 +1463,7 @@ dd {
 .admin-items-workspace {
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   height: 100%;
   min-height: 0;
 }
@@ -1895,8 +1912,8 @@ dd {
   border: 1px solid #bfd8f4;
   border-radius: 999px;
   color: #1d4f7a;
-  font-size: 12px;
-  padding: 5px 9px;
+  font-size: 11px;
+  padding: 4px 8px;
   white-space: nowrap;
 }
 
@@ -2091,7 +2108,9 @@ dd {
 }
 
 .admin-items-main {
-  overflow: auto;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .admin-items-history {
@@ -2103,8 +2122,12 @@ dd {
   border-bottom: 1px solid #edf1f5;
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  grid-template-columns: 180px 180px minmax(280px, 1fr);
   padding: 12px 14px;
+}
+
+.admin-output-field {
+  min-width: 0;
 }
 
 .directory-options,
@@ -2159,6 +2182,11 @@ dd {
   height: 34px;
   padding: 0 9px;
   width: 100%;
+}
+
+.admin-items-list {
+  min-height: 0;
+  overflow: auto;
 }
 
 .checkbox-label {
@@ -2257,6 +2285,124 @@ dd {
   grid-column: 1 / -1;
 }
 
+.admin-batch-summary {
+  align-items: center;
+  border-bottom: 1px solid #edf1f5;
+  border-top: 1px solid #edf1f5;
+  display: flex;
+  justify-content: space-between;
+  margin: 0 14px 12px;
+  padding: 10px 0;
+}
+
+.admin-batch-summary h3 {
+  font-size: 15px;
+  margin: 0 0 2px;
+}
+
+.admin-batch-summary p {
+  color: #617488;
+  font-size: 13px;
+}
+
+.admin-select-all {
+  padding-top: 0;
+}
+
+.admin-checklist {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.admin-checklist-group {
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.admin-checklist-group h3 {
+  background: #f7fafc;
+  border-bottom: 1px solid #d7e0e8;
+  color: #40556b;
+  font-size: 13px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.admin-check-row {
+  align-items: flex-start;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  padding: 10px;
+}
+
+.admin-check-row + .admin-check-row {
+  border-top: 1px solid #edf1f5;
+}
+
+.admin-check-row input {
+  margin: 2px 0 0;
+}
+
+.admin-check-row strong {
+  display: block;
+  font-size: 14px;
+}
+
+.admin-check-row em {
+  color: #617488;
+  display: block;
+  font-size: 12px;
+  font-style: normal;
+  margin-top: 2px;
+}
+
+.admin-design-note {
+  background: #f7fafc;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  margin: 0 14px 14px;
+  padding: 10px;
+}
+
+.admin-design-note strong {
+  font-size: 13px;
+}
+
+.admin-design-note span {
+  color: #617488;
+  font-size: 12px;
+}
+
+.admin-run-footer {
+  align-items: center;
+  border-top: 1px solid #edf1f5;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px 14px;
+}
+
+.admin-progress-wrap {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.admin-progress-wrap progress {
+  height: 12px;
+  width: 100%;
+}
+
+.admin-progress-wrap span {
+  color: #617488;
+  font-size: 12px;
+}
+
 .admin-items-history > div:last-child {
   height: calc(100% - 51px);
   overflow: auto;
@@ -2284,6 +2430,8 @@ dd {
 .student-list-panel,
 .current-student-panel,
 .student-orders-panel {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -2292,28 +2440,30 @@ dd {
 .workspace-search {
   border-bottom: 1px solid #edf1f5;
   display: block;
-  padding: 12px 14px;
+  padding: 8px 12px;
 }
 
 .workspace-search span {
   color: #617488;
   display: block;
   font-size: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .workspace-search input {
   border: 1px solid #cbd5df;
   border-radius: 6px;
   font: inherit;
-  height: 34px;
+  height: 30px;
   padding: 0 9px;
   width: 100%;
 }
 
 .workspace-student-list {
-  height: calc(100% - 113px);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .workspace-student-list button {
@@ -2323,8 +2473,8 @@ dd {
   border-radius: 0;
   display: block;
   height: auto;
-  min-height: 66px;
-  padding: 10px 14px;
+  min-height: 52px;
+  padding: 7px 12px;
   text-align: left;
   width: 100%;
 }
@@ -2338,14 +2488,14 @@ dd {
 .workspace-student-list em {
   color: #617488;
   display: block;
-  font-size: 12px;
+  font-size: 11px;
   font-style: normal;
 }
 
 .workspace-student-list strong {
   display: block;
-  font-size: 14px;
-  margin: 2px 0;
+  font-size: 13px;
+  margin: 1px 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2355,20 +2505,27 @@ dd {
   align-items: flex-start;
   border-bottom: 1px solid #d7e0e8;
   display: flex;
+  gap: 12px;
   justify-content: space-between;
-  padding: 10px 14px;
+  min-width: 0;
+  padding: 7px 12px;
+}
+
+.workspace-student-header > div {
+  min-width: 0;
 }
 
 .workspace-student-header span:first-child {
   color: #617488;
   display: block;
   font-size: 12px;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
 }
 
 .workspace-student-header h2 {
-  font-size: 21px;
+  font-size: 18px;
   line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
 .workspace-photo {
@@ -2377,9 +2534,9 @@ dd {
   border-bottom: 1px solid #d7e0e8;
   display: flex;
   justify-content: center;
-  height: min(45vh, 400px);
-  min-height: 260px;
-  padding: 10px;
+  height: clamp(210px, 34vh, 300px);
+  min-height: 210px;
+  padding: 6px;
 }
 
 .workspace-photo img {
@@ -2397,7 +2554,7 @@ dd {
   max-height: none;
   max-width: none;
   transform: rotate(-90deg);
-  width: min(39vh, 375px);
+  width: min(31vh, 285px);
 }
 
 [data-hover-image-id] {
@@ -2487,18 +2644,22 @@ dd {
   border: 1px solid #edf1f5;
   border-radius: 6px;
   overflow: hidden;
+  table-layout: fixed;
+  width: 100%;
 }
 
 .linked-image-availability th,
 .linked-image-availability td {
   font-size: 11px;
-  padding: 6px 7px;
+  padding: 6px 4px;
   text-align: center;
+  white-space: normal;
+  word-break: normal;
 }
 
 .linked-image-availability th:first-child,
 .linked-image-availability td:first-child {
-  text-align: left;
+  text-align: center;
 }
 
 .availability-mark {
@@ -2544,15 +2705,15 @@ dd {
 .workspace-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));
-  padding: 0 14px 8px;
+  padding: 0 12px 4px;
 }
 
 .workspace-fields div {
-  padding: 9px 14px 9px 0;
+  padding: 6px 12px 6px 0;
 }
 
 .workspace-fields dd {
-  font-size: 14px;
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
 
@@ -2640,7 +2801,9 @@ dd {
 
 .current-student-panel > div {
   height: 100%;
-  overflow: auto;
+  min-width: 0;
+  overflow: hidden;
+  overflow-x: hidden;
 }
 
 .tabs {
@@ -2795,8 +2958,8 @@ dd {
 .notes-form {
   border-top: 1px solid #edf1f5;
   display: grid;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 6px;
+  padding: 7px 12px;
 }
 
 .image-link-form {
@@ -2817,8 +2980,8 @@ dd {
 .notes-form label span,
 .image-link-form label span {
   color: #617488;
-  font-size: 13px;
-  margin-bottom: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
 }
 
 .notes-form textarea,
@@ -2826,13 +2989,13 @@ dd {
   border: 1px solid #cbd5df;
   border-radius: 6px;
   font: inherit;
-  padding: 9px;
+  padding: 7px;
   width: 100%;
 }
 
 .notes-form textarea {
-  line-height: 1.4;
-  min-height: 76px;
+  line-height: 1.25;
+  min-height: 46px;
   resize: vertical;
 }
 

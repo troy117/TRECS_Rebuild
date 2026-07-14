@@ -37,5 +37,6 @@ AdminItems/
 .env
 .env.*
 *.log
+path.txt
 Thumbs.db
 Desktop.ini
