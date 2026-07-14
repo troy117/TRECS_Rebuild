@@ -3750,6 +3750,22 @@ function setAdminItemSelected(type, selected) {
   jobsState.selectedAdminItems[jobsState.adminStage][type] = selected;
 }
 
+function ensureAdminItemSelection(items) {
+  if (!jobsState.selectedAdminItems[jobsState.adminStage]) {
+    jobsState.selectedAdminItems[jobsState.adminStage] = {};
+  }
+  const selected = jobsState.selectedAdminItems[jobsState.adminStage];
+  items.forEach((item) => {
+    if (selected[item.type] === undefined) {
+      selected[item.type] = true;
+    }
+  });
+}
+
+function selectedAdminItemCount(items) {
+  return items.filter((item) => isAdminItemSelected(item.type)).length;
+}
+
 function adminOutputOptions() {
   return {
     stage: adminOptionsForm.elements.stage.value,
@@ -4085,6 +4101,7 @@ function renderAdminItemsWorkspace() {
   const metrics = data.metrics || {};
   const listNames = data.listNames || [];
   const adminItems = adminItemsForCurrentStage(data);
+  ensureAdminItemSelection(adminItems);
   if (jobsState.directoryListName && !listNames.includes(jobsState.directoryListName)) {
     jobsState.directoryListName = '';
   }
@@ -4104,7 +4121,7 @@ function renderAdminItemsWorkspace() {
     <section class="admin-render-toolbar">
       <div>
         <strong>Admin Items To Render</strong>
-        <span>${formatNumber(adminItems.filter((item) => isAdminItemSelected(item.type)).length)} selected</span>
+        <span data-admin-selected-count>${formatNumber(selectedAdminItemCount(adminItems))} selected</span>
       </div>
       <button class="primary" type="button" data-render-selected-admin-items>Render Selected</button>
     </section>
@@ -4160,9 +4177,15 @@ function renderAdminItemsWorkspace() {
   });
 
   adminItemsList.querySelectorAll('[data-admin-item-check]').forEach((checkbox) => {
+    checkbox.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
     checkbox.addEventListener('change', () => {
       setAdminItemSelected(checkbox.dataset.adminItemCheck, checkbox.checked);
-      renderAdminItemsWorkspace();
+      const countLabel = adminItemsList.querySelector('[data-admin-selected-count]');
+      if (countLabel) {
+        countLabel.textContent = `${formatNumber(selectedAdminItemCount(adminItems))} selected`;
+      }
     });
   });
 
