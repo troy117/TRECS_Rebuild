@@ -3766,15 +3766,6 @@ function selectedAdminItemCount(items) {
   return items.filter((item) => isAdminItemSelected(item.type)).length;
 }
 
-function updateAdminSelectedCountFromDom() {
-  const countLabel = adminItemsList ? adminItemsList.querySelector('[data-admin-selected-count]') : null;
-  if (!countLabel) {
-    return;
-  }
-  const checkedCount = adminItemsList.querySelectorAll('[data-admin-item-check]:checked').length;
-  countLabel.textContent = `${formatNumber(checkedCount)} selected`;
-}
-
 function adminOutputOptions() {
   return {
     stage: adminOptionsForm.elements.stage.value,
@@ -3960,8 +3951,8 @@ function bindSisOptions() {
       const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
       if (!selectedSisFormats(false).length && !hasStaffExport) {
         jobsState[control.dataset.sisOption] = true;
-        control.checked = true;
       }
+      renderAdminItemsWorkspace();
     });
   });
   adminItemsList.querySelectorAll('[data-admin-export-option]').forEach((control) => {
@@ -3971,6 +3962,7 @@ function bindSisOptions() {
       if (!selectedSisFormats(false).length && !hasStaffExport) {
         jobsState.sisStudentCd = true;
       }
+      renderAdminItemsWorkspace();
     });
   });
 }
@@ -4188,18 +4180,11 @@ function renderAdminItemsWorkspace() {
     checkbox.addEventListener('click', (event) => {
       event.stopPropagation();
     });
-    checkbox.addEventListener('change', (event) => {
-      try {
-        const control = event.currentTarget;
-        const itemType = control && control.dataset ? control.dataset.adminItemCheck : '';
-        if (!itemType) {
-          return;
-        }
-        setAdminItemSelected(itemType, Boolean(control.checked));
-        updateAdminSelectedCountFromDom();
-      } catch (error) {
-        adminItemsStatus.textContent = error.message || 'Could not update admin item selection';
-        console.error(error);
+    checkbox.addEventListener('change', () => {
+      setAdminItemSelected(checkbox.dataset.adminItemCheck, checkbox.checked);
+      const countLabel = adminItemsList.querySelector('[data-admin-selected-count]');
+      if (countLabel) {
+        countLabel.textContent = `${formatNumber(selectedAdminItemCount(adminItems))} selected`;
       }
     });
   });
