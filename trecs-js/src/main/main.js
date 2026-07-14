@@ -1941,11 +1941,6 @@ const ADMIN_ITEM_TYPES = new Map([
   ['sis_export', {
     label: 'SIS Export',
     extension: 'csv',
-    stages: []
-  }],
-  ['administrative_exports', {
-    label: 'Administrative Exports',
-    extension: 'csv',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['id_cards', {
@@ -2076,7 +2071,7 @@ const SIS_EXPORT_FORMATS = new Map([
   }]
 ]);
 
-function normalizeSisFormats(value, allowEmpty = false) {
+function normalizeSisFormats(value) {
   const rawFormats = Array.isArray(value) ? value : [value || 'student_cd'];
   const formats = rawFormats
     .map((format) => String(format || '').trim())
@@ -2092,17 +2087,7 @@ function normalizeSisFormats(value, allowEmpty = false) {
     }
   });
 
-  if (unique.length) {
-    return unique;
-  }
-  return allowEmpty ? [] : ['student_cd'];
-}
-
-function normalizeAdminExportStaffOptions(input = {}) {
-  return {
-    staffLarge: Boolean(input.staffLarge),
-    staffMed: Boolean(input.staffMed)
-  };
+  return unique.length ? unique : ['student_cd'];
 }
 
 function normalizeIdCardSource(value) {
@@ -2846,16 +2831,6 @@ function outputFileName(baseName, outputStem) {
   return `${name}-${outputStem}${extension}`;
 }
 
-function adminImageCopySource(subject, purpose = 'medium') {
-  const image = subjectImageChoice(subject, purpose);
-  const sourcePath = image.path ? resolveProjectPath(image.path) : '';
-  return {
-    image,
-    sourcePath,
-    exists: Boolean(sourcePath && fs.existsSync(sourcePath) && fs.statSync(sourcePath).isFile())
-  };
-}
-
 function buildSisExportOutput(job, subjects, options, outputStem) {
   const selectedSubjects = sisExportSubjects(subjects);
   const formats = normalizeSisFormats(options.sisFormats);
@@ -2923,121 +2898,6 @@ function buildSisExportOutput(job, subjects, options, outputStem) {
     summaryCsv,
     files,
     manifest
-  };
-}
-
-function staffExportSubjects(subjects) {
-  return subjects
-    .filter((subject) => {
-      const hasName = Boolean(String(subject.firstName || subject.lastName || subject.displayName || '').trim());
-      const type = String(subject.subjectType || '').toLowerCase();
-      const grade = String(subject.grade || '').toUpperCase();
-      return hasName && (grade === 'FAC' || type === 'faculty' || type === 'staff');
-    })
-    .sort(sisSubjectSort);
-}
-
-function buildStaffExportPlan(subjects, options) {
-  const staff = staffExportSubjects(subjects);
-  const rows = [];
-  const copies = [];
-  const selected = [];
-  if (options.staffMed) {
-    selected.push({ key: 'staff_med', label: 'Staff Med', folder: 'StaffMed', purpose: 'medium' });
-  }
-  if (options.staffLarge) {
-    selected.push({ key: 'staff_large', label: 'Staff Large', folder: 'StaffLarge', purpose: 'production' });
-  }
-
-  selected.forEach((exportType) => {
-    let count = 0;
-    staff.forEach((subject) => {
-      const source = adminImageCopySource(subject, exportType.purpose);
-      const filename = `${safeFolderName(subject.lastName || 'Last')}_${safeFolderName(subject.firstName || 'First')}_${count}.jpg`;
-      const status = source.exists ? 'Ready' : 'Missing Image';
-      rows.push({
-        Export: exportType.label,
-        Status: status,
-        Ref: subject.ref,
-        First: subject.firstName,
-        Last: subject.lastName,
-        Grade: subject.grade,
-        Homeroom: subject.homeroom,
-        'Image Source': source.image.path || source.image.filename || '',
-        'Image Target': path.join(exportType.folder, filename),
-        Message: status === 'Ready' ? '' : 'No cropped image found'
-      });
-      if (source.exists) {
-        copies.push({
-          sourcePath: source.sourcePath,
-          relativePath: path.join(exportType.folder, filename)
-        });
-        count += 1;
-      }
-    });
-  });
-
-  return {
-    selected: selected.map((item) => item.key),
-    rows,
-    copies
-  };
-}
-
-function buildAdministrativeExportOutput(job, subjects, options, outputStem) {
-  const sisOutput = buildSisExportOutput(job, subjects, options, outputStem);
-  const staffOutput = buildStaffExportPlan(subjects, options);
-  const summaryRows = [
-    ...sisOutput.manifest.formats.map((format) => ({
-      Export: format.label,
-      Status: 'Map Files',
-      Ref: '',
-      First: '',
-      Last: '',
-      Grade: '',
-      Homeroom: '',
-      'Image Source': '',
-      'Image Target': '',
-      Message: `${format.ready} ready, ${format.exceptions} exceptions`
-    })),
-    ...staffOutput.rows
-  ];
-  const summaryCsv = csvRows([
-    'Export',
-    'Status',
-    'Ref',
-    'First',
-    'Last',
-    'Grade',
-    'Homeroom',
-    'Image Source',
-    'Image Target',
-    'Message'
-  ], summaryRows);
-
-  return {
-    summaryCsv,
-    files: sisOutput.files,
-    copies: staffOutput.copies,
-    manifest: {
-      job: {
-        id: job.id,
-        location: job.location,
-        name: job.job
-      },
-      selectedSisFormats: sisOutput.manifest.selectedFormats,
-      selectedStaffExports: staffOutput.selected,
-      sis: sisOutput.manifest,
-      staff: {
-        rows: staffOutput.rows.length,
-        copiedImages: staffOutput.copies.length,
-        legacyBehavior: {
-          staffSelection: 'Grade FAC or staff/faculty subject type',
-          staffMedFolder: 'StaffMed',
-          staffLargeFolder: 'StaffLarge'
-        }
-      }
-    }
   };
 }
 
@@ -3195,7 +3055,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   const item = ADMIN_ITEM_TYPES.get(type);
   const options = {
     sortBy: normalizeDirectorySort(input.sortBy),
-    sisFormats: normalizeSisFormats(input.sisFormats || input.sisFormat, type === 'administrative_exports'),
+    sisFormats: normalizeSisFormats(input.sisFormats || input.sisFormat),
     idCardSource: normalizeIdCardSource(input.idCardSource),
     idCardListName: optionalText(input.idCardListName, 255) || '',
     idCardLayout: normalizeIdCardLayout(input.idCardLayout),
@@ -3212,8 +3072,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     stickerListName: optionalText(input.stickerListName, 255) || '',
     stickerCopies: normalizeStickerCopies(input.stickerCopies),
     stickerSortMethod: normalizeStickerSortMethod(input.stickerSortMethod),
-    stickerPhotographedOnly: Boolean(input.stickerPhotographedOnly),
-    ...normalizeAdminExportStaffOptions(input.adminExportStaff || input)
+    stickerPhotographedOnly: Boolean(input.stickerPhotographedOnly)
   };
   const job = await adminJobSummary(jobId);
   const subjects = await adminSubjectRows(jobId);
@@ -3251,26 +3110,6 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     fs.writeFileSync(
       absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
       JSON.stringify(sisOutput.manifest, null, 2)
-    );
-  } else if (type === 'administrative_exports') {
-    const outputStem = path.basename(outputPath, path.extname(outputPath));
-    const exportOutput = buildAdministrativeExportOutput(job, subjects, options, outputStem);
-    fs.writeFileSync(absoluteOutputPath, exportOutput.summaryCsv);
-    exportOutput.files.forEach((file) => {
-      const filePath = path.join(path.dirname(outputPath), file.relativePath);
-      const absoluteFilePath = adminOutputAbsolutePath(filePath);
-      fs.mkdirSync(path.dirname(absoluteFilePath), { recursive: true });
-      fs.writeFileSync(absoluteFilePath, file.content);
-    });
-    exportOutput.copies.forEach((copy) => {
-      const filePath = path.join(path.dirname(outputPath), copy.relativePath);
-      const absoluteFilePath = adminOutputAbsolutePath(filePath);
-      fs.mkdirSync(path.dirname(absoluteFilePath), { recursive: true });
-      fs.copyFileSync(copy.sourcePath, absoluteFilePath);
-    });
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(exportOutput.manifest, null, 2)
     );
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);

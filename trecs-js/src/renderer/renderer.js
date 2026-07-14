@@ -205,8 +205,6 @@ let jobsState = {
   sisDestiny: false,
   sisPowerSchool: false,
   sisSasi: false,
-  adminExportStaffMed: false,
-  adminExportStaffLarge: false,
   idCardSource: 'all',
   idCardListName: '',
   idCardLayout: 'standard',
@@ -3659,7 +3657,6 @@ function adminItemLabel(type) {
     school_directory: 'School Directory',
     missing_photo_report: 'Missing Photo Report',
     sis_export: 'SIS Export',
-    administrative_exports: 'Administrative Exports',
     id_cards: 'ID Cards',
     sticker_prints: 'Sticker Prints',
     staff_picture_packages: 'Staff Picture Packages'
@@ -3668,7 +3665,7 @@ function adminItemLabel(type) {
 }
 
 function shootStageLabel(stage) {
-  return stage === 'makeup_day' ? 'Makeup Day' : 'First Run / Before Makeup Day';
+  return stage === 'makeup_day' ? 'Makeup Day' : 'Original Picture Day';
 }
 
 function adminItemHelp(type, stage) {
@@ -3677,7 +3674,6 @@ function adminItemHelp(type, stage) {
     school_directory: 'Exports a school directory using the selected sort/group option.',
     missing_photo_report: 'Lists students who still have no usable linked photo.',
     sis_export: 'Exports student data and linked image filenames for SIS import.',
-    administrative_exports: 'Creates the first-run administrative export folders, map files, exception files, and optional staff image exports.',
     id_cards: stage === 'makeup_day'
       ? 'Creates the makeup-day ID card work list.'
       : 'Creates the original picture-day ID card work list.',
@@ -3833,7 +3829,6 @@ function bindStickerOptions() {
 function renderSisOptions() {
   return `
     <section class="sis-options">
-      <div class="admin-option-group-title">Student data exports</div>
       <label class="checkbox-label">
         <input data-sis-option="sisStudentCd" type="checkbox" ${jobsState.sisStudentCd ? 'checked' : ''}>
         <span>Student CD</span>
@@ -3850,15 +3845,6 @@ function renderSisOptions() {
         <input data-sis-option="sisSasi" type="checkbox" ${jobsState.sisSasi ? 'checked' : ''}>
         <span>SASI</span>
       </label>
-      <div class="admin-option-group-title">Staff image exports</div>
-      <label class="checkbox-label">
-        <input data-admin-export-option="adminExportStaffMed" type="checkbox" ${jobsState.adminExportStaffMed ? 'checked' : ''}>
-        <span>Staff Med</span>
-      </label>
-      <label class="checkbox-label">
-        <input data-admin-export-option="adminExportStaffLarge" type="checkbox" ${jobsState.adminExportStaffLarge ? 'checked' : ''}>
-        <span>Staff Large</span>
-      </label>
     </section>
   `;
 }
@@ -3867,19 +3853,8 @@ function bindSisOptions() {
   adminItemsList.querySelectorAll('[data-sis-option]').forEach((control) => {
     control.addEventListener('change', () => {
       jobsState[control.dataset.sisOption] = control.checked;
-      const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
-      if (!selectedSisFormats(false).length && !hasStaffExport) {
+      if (!selectedSisFormats(false).length) {
         jobsState[control.dataset.sisOption] = true;
-      }
-      renderAdminItemsWorkspace();
-    });
-  });
-  adminItemsList.querySelectorAll('[data-admin-export-option]').forEach((control) => {
-    control.addEventListener('change', () => {
-      jobsState[control.dataset.adminExportOption] = control.checked;
-      const hasStaffExport = jobsState.adminExportStaffMed || jobsState.adminExportStaffLarge;
-      if (!selectedSisFormats(false).length && !hasStaffExport) {
-        jobsState.sisStudentCd = true;
       }
       renderAdminItemsWorkspace();
     });
@@ -4006,11 +3981,6 @@ function renderAdminItemsWorkspace() {
   }
   adminItemsStatus.textContent = shootStageLabel(data.stage);
   adminItemsList.innerHTML = `
-    <section class="admin-run-note">
-      ${data.stage === 'makeup_day'
-        ? 'Makeup-day admin items rerun the delivery set and add makeup-specific outputs.'
-        : 'First-run admin items match the Java “Administrative Items Before Makeup Day” workflow: delivery envelope, school directory, missing report, ID cards, and administrative exports.'}
-    </section>
     <section class="admin-metrics">
       <article><span>Subjects</span><strong>${formatNumber(metrics.subjects || 0)}</strong></article>
       <article><span>Photographed</span><strong>${formatNumber(metrics.photographed || 0)}</strong></article>
@@ -4026,7 +3996,7 @@ function renderAdminItemsWorkspace() {
           </div>
           <div class="admin-item-actions">
             ${item.type === 'school_directory' ? '<button type="button" data-toggle-admin-item="school_directory">Options</button>' : ''}
-            ${item.type === 'sis_export' || item.type === 'administrative_exports' ? `<button type="button" data-toggle-admin-item="${item.type}">Options</button>` : ''}
+            ${item.type === 'sis_export' ? '<button type="button" data-toggle-admin-item="sis_export">Options</button>' : ''}
             ${item.type === 'id_cards' ? '<button type="button" data-toggle-admin-item="id_cards">Options</button>' : ''}
             ${item.type === 'sticker_prints' ? '<button type="button" data-toggle-admin-item="sticker_prints">Options</button>' : ''}
             <button class="primary" type="button" data-render-admin-item="${item.type}">Render</button>
@@ -4037,7 +4007,7 @@ function renderAdminItemsWorkspace() {
           ${item.type === 'sticker_prints' && jobsState.expandedAdminItem === 'sticker_prints'
             ? renderStickerOptions(listNames)
             : ''}
-          ${(item.type === 'sis_export' || item.type === 'administrative_exports') && jobsState.expandedAdminItem === item.type
+          ${item.type === 'sis_export' && jobsState.expandedAdminItem === 'sis_export'
             ? renderSisOptions()
             : ''}
           ${item.type === 'id_cards' && jobsState.expandedAdminItem === 'id_cards'
@@ -4090,7 +4060,7 @@ async function renderAdminItem(button) {
       type: button.dataset.renderAdminItem,
       stage: jobsState.adminStage,
       sortBy: jobsState.adminSortBy,
-      sisFormats: selectedSisFormats(button.dataset.renderAdminItem !== 'administrative_exports'),
+      sisFormats: selectedSisFormats(),
       idCardSource: jobsState.idCardSource,
       idCardListName: jobsState.idCardListName,
       idCardLayout: jobsState.idCardLayout,
@@ -4107,11 +4077,7 @@ async function renderAdminItem(button) {
       stickerListName: jobsState.stickerListName,
       stickerCopies: jobsState.stickerCopies,
       stickerSortMethod: jobsState.stickerSortMethod,
-      stickerPhotographedOnly: jobsState.stickerPhotographedOnly,
-      adminExportStaff: {
-        staffMed: jobsState.adminExportStaffMed,
-        staffLarge: jobsState.adminExportStaffLarge
-      }
+      stickerPhotographedOnly: jobsState.stickerPhotographedOnly
     });
     jobsState.adminItems = null;
     await loadAdminItems();
