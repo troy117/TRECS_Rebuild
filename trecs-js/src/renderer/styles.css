@@ -2176,6 +2176,20 @@ dd {
   margin: 0 !important;
 }
 
+.admin-run-note {
+  color: #52677a;
+  font-size: 13px;
+  padding: 12px 14px 0;
+}
+
+.admin-option-group-title {
+  color: #26394a;
+  font-size: 12px;
+  font-weight: 700;
+  grid-column: 1 / -1;
+  text-transform: uppercase;
+}
+
 .admin-metrics {
   display: grid;
   gap: 10px;
