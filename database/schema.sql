@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS template_elements (
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS id_card_templates (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  template_type TEXT NOT NULL CHECK (template_type IN ('student', 'staff')),
+  template_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(name, template_type)
+);
+
 CREATE TABLE IF NOT EXISTS package_plans (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,

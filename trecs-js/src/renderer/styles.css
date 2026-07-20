@@ -719,6 +719,16 @@ dd {
   width: 360px;
 }
 
+.edit-job-card {
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  width: min(92vw, 780px);
+}
+
+.edit-job-card .new-job-form {
+  padding: 0;
+}
+
 .job-student-workspace.capture-mode .workspace-header {
   display: none;
 }
@@ -1468,6 +1478,14 @@ dd {
   min-height: 0;
 }
 
+.id-template-workspace {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 300px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
 .envelope-workspace {
   display: grid;
   gap: 14px;
@@ -2113,6 +2131,12 @@ dd {
   overflow: hidden;
 }
 
+.admin-heading-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
 .admin-items-history {
   overflow: hidden;
 }
@@ -2122,12 +2146,195 @@ dd {
   border-bottom: 1px solid #edf1f5;
   display: grid;
   gap: 12px;
-  grid-template-columns: 180px 180px 140px minmax(280px, 1fr);
+  grid-template-columns: 180px 180px minmax(420px, 1fr);
   padding: 12px 14px;
 }
 
 .admin-output-field {
   min-width: 0;
+}
+
+.admin-options .folder-picker {
+  grid-template-columns: minmax(0, 1fr) 82px;
+}
+
+.id-template-sidebar,
+.id-template-designer {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.id-template-sidebar {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.id-template-list {
+  border-bottom: 1px solid #edf1f5;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+}
+
+.id-template-list button {
+  background: #fff;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  display: block;
+  margin-bottom: 8px;
+  padding: 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.id-template-list button.active {
+  border-color: #13768b;
+  box-shadow: 0 0 0 2px rgba(19, 118, 139, 0.14);
+}
+
+.id-template-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.id-template-form label,
+.id-template-form label span {
+  display: block;
+}
+
+.id-template-form label span,
+.id-template-properties label span {
+  color: #617488;
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.id-template-form input,
+.id-template-form select,
+.id-template-properties input,
+.id-template-properties select {
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  font: inherit;
+  min-height: 34px;
+  padding: 7px 9px;
+  width: 100%;
+}
+
+.id-template-body {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+}
+
+.id-template-stage-wrap {
+  align-items: center;
+  background: #eef3f6;
+  border: 1px solid #d7e0e8;
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.id-template-stage {
+  aspect-ratio: 1128 / 702;
+  background: #fff;
+  background-position: center;
+  background-size: cover;
+  border: 1px solid #9fb0bf;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  max-height: 100%;
+  max-width: 100%;
+  min-width: 560px;
+  position: relative;
+  width: 100%;
+}
+
+.id-template-stage.vertical {
+  aspect-ratio: 702 / 1128;
+  min-width: 360px;
+  width: min(100%, 520px);
+}
+
+.id-template-element {
+  align-items: center;
+  border: 2px solid rgba(19, 118, 139, 0.85);
+  color: #102132;
+  cursor: move;
+  display: flex;
+  font-weight: 700;
+  justify-content: center;
+  overflow: hidden;
+  position: absolute;
+  user-select: none;
+}
+
+.id-template-element.text {
+  border-style: dashed;
+  justify-content: flex-start;
+  padding: 0 6px;
+}
+
+.id-template-element.photo {
+  background: rgba(19, 118, 139, 0.08);
+}
+
+.id-template-element.qr {
+  background: repeating-linear-gradient(45deg, #fff 0, #fff 6px, #dce7ef 6px, #dce7ef 12px);
+}
+
+.id-template-element.barcode {
+  background: #fff;
+  border-style: solid;
+  padding: 7px 10px;
+}
+
+.id-template-barcode-preview {
+  align-items: stretch;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  overflow: hidden;
+  width: 100%;
+}
+
+.id-template-barcode-preview i {
+  background: #000;
+  display: block;
+  flex: 0 0 auto;
+  height: 100%;
+}
+
+.id-template-element.selected {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.22);
+}
+
+.id-template-properties {
+  border-left: 1px solid #edf1f5;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-left: 12px;
+}
+
+.id-template-properties h3 {
+  margin: 0;
+}
+
+.id-template-property-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
 }
 
 .directory-options,
@@ -2331,32 +2538,46 @@ dd {
 }
 
 .admin-check-row {
-  align-items: flex-start;
-  display: grid;
-  gap: 10px;
-  grid-template-columns: 18px minmax(0, 1fr);
   padding: 10px;
+}
+
+.directory-options .directory-contact-field {
+  grid-column: span 3;
 }
 
 .admin-check-row + .admin-check-row {
   border-top: 1px solid #edf1f5;
 }
 
-.admin-check-row input {
+.admin-check-label {
+  align-items: flex-start;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.admin-check-label input {
   margin: 2px 0 0;
 }
 
-.admin-check-row strong {
+.admin-check-label strong {
   display: block;
   font-size: 14px;
 }
 
-.admin-check-row em {
+.admin-check-label em {
   color: #617488;
   display: block;
   font-size: 12px;
   font-style: normal;
   margin-top: 2px;
+}
+
+.admin-check-row .directory-options,
+.admin-check-row .id-card-options,
+.admin-check-row .sis-options,
+.admin-check-row .sticker-options {
+  margin: 10px 0 0 28px;
 }
 
 .admin-design-note {
@@ -3416,4 +3637,10 @@ dd {
 .image-review-preview {
   align-self: stretch;
   padding-bottom: 10px;
+}
+
+@media (max-width: 760px) {
+  .edit-job-card .new-job-form {
+    grid-template-columns: 1fr;
+  }
 }

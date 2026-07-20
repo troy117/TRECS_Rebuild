@@ -569,6 +569,17 @@ function createProgramDatabaseSchema(database) {
       sort_order INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS id_card_templates (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      template_type TEXT NOT NULL CHECK (template_type IN ('student', 'staff')),
+      template_json TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT,
+      updated_at TEXT,
+      UNIQUE(name, template_type)
+    );
+
     CREATE TABLE IF NOT EXISTS package_plans (
       id INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
@@ -620,6 +631,71 @@ function createProgramDatabaseSchema(database) {
       sort_order INTEGER NOT NULL DEFAULT 0
     );
   `);
+}
+
+function migrateExistingIdTemplateFiles(database) {
+  const jobsFolder = path.join(projectRoot, 'JOBS');
+  if (!fs.existsSync(jobsFolder)) {
+    return false;
+  }
+
+  let changed = false;
+  const stack = [jobsFolder];
+  while (stack.length) {
+    const currentFolder = stack.pop();
+    const entries = fs.readdirSync(currentFolder, { withFileTypes: true });
+    entries.forEach((entry) => {
+      const entryPath = path.join(currentFolder, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'ID_Templates') {
+          fs.readdirSync(entryPath)
+            .filter((name) => name.toLowerCase().endsWith('.json'))
+            .forEach((fileName) => {
+              try {
+                const template = JSON.parse(fs.readFileSync(path.join(entryPath, fileName), 'utf8'));
+                const name = String(template.name || path.basename(fileName, '.json') || 'ID Template').trim();
+                const templateType = normalizeIdTemplateType(template.templateType || name);
+                const existing = rowsFromDatabase(database, `
+                  SELECT id
+                  FROM id_card_templates
+                  WHERE name = ${sqlLiteral(name)}
+                    AND template_type = ${sqlLiteral(templateType)}
+                  LIMIT 1;
+                `);
+                if (existing.length) {
+                  return;
+                }
+                template.name = name;
+                template.templateType = templateType;
+                database.run(`
+                  INSERT INTO id_card_templates (
+                    name,
+                    template_type,
+                    template_json,
+                    active,
+                    created_at,
+                    updated_at
+                  ) VALUES (
+                    ${sqlLiteral(name)},
+                    ${sqlLiteral(templateType)},
+                    ${sqlLiteral(JSON.stringify(template))},
+                    1,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                  );
+                `);
+                changed = true;
+              } catch (_error) {
+                // Skip old or partial design files that are not valid template JSON.
+              }
+            });
+        } else {
+          stack.push(entryPath);
+        }
+      }
+    });
+  }
+  return changed;
 }
 
 function croppedMediumPrimaryImageBySubject(database, jobId) {
@@ -785,6 +861,7 @@ async function writeProgramDatabaseSnapshot() {
       'jobs',
       'templates',
       'template_elements',
+      'id_card_templates',
       'package_plans',
       'products',
       'product_aliases',
@@ -913,15 +990,29 @@ async function ensurePrototypeDatabaseShape() {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS id_card_templates (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        template_type TEXT NOT NULL CHECK (template_type IN ('student', 'staff')),
+        template_json TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(name, template_type)
+      );
+
     `);
     changed = true;
 
     changed = ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'") || changed;
+    changed = ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER') || changed;
+    changed = ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT') || changed;
+    changed = migrateExistingIdTemplateFiles(database) || changed;
 
     database.run(`
       CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
@@ -2037,6 +2128,8 @@ async function getJobsData() {
       j.name AS job,
       j.type,
       j.status,
+      j.student_id_template_id AS studentIdTemplateId,
+      j.faculty_id_template_id AS facultyIdTemplateId,
       j.root_path AS rootPath,
       COALESCE(p.name, '') AS packagePlan,
       COALESCE(sc.subjects, 0) AS subjects,
@@ -2076,11 +2169,22 @@ async function getJobsData() {
     ORDER BY name, version;
   `);
 
+  const idCardTemplates = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType
+    FROM id_card_templates
+    WHERE active = 1
+    ORDER BY template_type, name;
+  `);
+
   return {
     jobs,
     types,
     clients,
     packagePlans,
+    idCardTemplates,
     databasePath: prototypeDatabasePath
   };
 }
@@ -2139,7 +2243,7 @@ const ADMIN_ITEM_TYPES = new Map([
   }],
   ['id_cards', {
     label: 'ID Cards',
-    extension: 'csv',
+    extension: 'jpg',
     stages: ['original_picture_day', 'makeup_day']
   }],
   ['sticker_prints', {
@@ -2321,6 +2425,15 @@ function normalizeIdCardReason(value) {
     throw new Error('Invalid ID card reason');
   }
   return reason;
+}
+
+function normalizeIdCardSortMethod(value) {
+  const sort = String(value || 'alpha_grade').trim();
+  const allowed = new Set(['alpha_grade', 'alpha_homeroom', 'alpha_school']);
+  if (!allowed.has(sort)) {
+    throw new Error('Invalid ID card sort method');
+  }
+  return sort;
 }
 
 function csvValue(value) {
@@ -2738,7 +2851,7 @@ function selectedIdCardSubjects(subjects, options, listSubjectIds) {
 }
 
 function buildIdCardRows(subjects, options) {
-  return sortDirectorySubjects(subjects, 'alpha_school').map((subject, index) => {
+  return sortDirectorySubjects(subjects, options.idCardSortMethod).map((subject, index) => {
     const image = subjectImageChoice(subject, 'production');
     return {
       Card: index + 1,
@@ -2749,8 +2862,8 @@ function buildIdCardRows(subjects, options) {
       Homeroom: subject.homeroom,
       Track: subject.track,
       Type: subject.subjectType,
-      Layout: options.idCardLayout,
       Reason: options.idCardReason,
+      Sort: options.idCardSortMethod,
       Image: image.filename,
       'Image Path': image.path,
       Status: subject.imageFilename ? 'ready' : 'missing_photo'
@@ -2769,8 +2882,8 @@ function buildIdCardOutput(job, subjects, options) {
     'Homeroom',
     'Track',
     'Type',
-    'Layout',
     'Reason',
+    'Sort',
     'Image',
     'Image Path',
     'Status'
@@ -2783,14 +2896,14 @@ function buildIdCardOutput(job, subjects, options) {
     },
     idCardSource: options.idCardSource,
     idCardListName: options.idCardSource === 'list' ? options.idCardListName : '',
-    layout: options.idCardLayout,
     reason: options.idCardReason,
+    sortMethod: options.idCardSortMethod,
     photographedOnly: options.idCardPhotographedOnly,
     selectedSubjects: subjects.length,
     cards: rows.length,
     legacyBehavior: {
       imageFolder: 'CroppedMed',
-      rendering: 'Prototype creates an ID-card work list and manifest; print-ready card layout rendering will replace this CSV output.'
+      rendering: 'Creates 21-up JPG sheets matching the legacy ID card sheet layout and a combined PDF for review/printing.'
     }
   };
 
@@ -2838,7 +2951,7 @@ function adminOutputPathForRequest(job, stage, type, extension, outputFolderValu
   return path.join(schoolOutputFolder, filename);
 }
 
-async function ensureBundledJavaTool(className) {
+async function ensureBundledJavaTool(className, classpath = '') {
   const sourcePath = path.join(bundledResourceRoot, 'tools', `${className}.java`);
   const classPath = path.join(bundledResourceRoot, 'tools', `${className}.class`);
   const sourceExists = fs.existsSync(sourcePath);
@@ -2859,9 +2972,10 @@ async function ensureBundledJavaTool(className) {
     return;
   }
 
-  await processOutput('javac', [
-    path.join('tools', `${className}.java`)
-  ], { cwd: bundledResourceRoot });
+  const args = classpath
+    ? ['-cp', classpath, path.join('tools', `${className}.java`)]
+    : [path.join('tools', `${className}.java`)];
+  await processOutput('javac', args, { cwd: bundledResourceRoot });
 }
 
 async function ensureDeliveryEnvelopeCoverRenderer() {
@@ -3015,6 +3129,279 @@ async function renderSchoolDirectory(job, subjects, options, listSubjectIds, out
   return directorySubjects.length;
 }
 
+async function ensureIdCardSheetRenderer() {
+  await ensureBundledJavaTool('IdCardSheetRenderer', idCardJavaClasspath());
+}
+
+function idCardJavaClasspath() {
+  return [
+    'tools',
+    path.join('JARS', 'zxing-core-1.7.jar'),
+    path.join('JARS', 'json-20210307.jar')
+  ].join(path.delimiter);
+}
+
+async function activeIdCardTemplate(templateType, preferredId = null) {
+  const idFilter = preferredId ? `AND id = ${numericId(preferredId)}` : '';
+  const rows = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      template_json AS templateJson
+    FROM id_card_templates
+    WHERE active = 1
+      AND template_type = ${sqlLiteral(templateType)}
+      ${idFilter}
+    ORDER BY
+      CASE
+        WHEN lower(name) = ${sqlLiteral(templateType === 'staff' ? 'staff id' : 'student id')} THEN 0
+        ELSE 1
+      END,
+      updated_at DESC,
+      id DESC
+    LIMIT 1;
+  `);
+  if (!rows.length) {
+    if (preferredId) {
+      return activeIdCardTemplate(templateType, null);
+    }
+    throw new Error(`No ${templateType === 'staff' ? 'Staff ID' : 'Student ID'} template has been saved`);
+  }
+  return {
+    id: Number(rows[0].id),
+    name: rows[0].name,
+    templateType: rows[0].templateType,
+    template: JSON.parse(rows[0].templateJson)
+  };
+}
+
+function idCardSchoolYear(value) {
+  return String(value || '2025-2026')
+    .replace(/^school year:\s*/i, '')
+    .replace(/\s+-\s+/g, '-')
+    .trim() || '2025-2026';
+}
+
+function idCardSubjectTsvRow(subject) {
+  const image = subjectImageChoice(subject, 'medium');
+  return [
+    subject.ref,
+    subject.firstName,
+    subject.lastName,
+    subject.externalId,
+    subject.grade,
+    subject.homeroom,
+    subject.track,
+    subject.team,
+    subject.subjectType,
+    absoluteWorkspacePath(image.path)
+  ].map(tsvValue).join('\t');
+}
+
+function jpegDimensions(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  let offset = 2;
+  while (offset < buffer.length) {
+    if (buffer[offset] !== 0xFF) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    const length = buffer.readUInt16BE(offset + 2);
+    if (marker >= 0xC0 && marker <= 0xC3) {
+      return {
+        height: buffer.readUInt16BE(offset + 5),
+        width: buffer.readUInt16BE(offset + 7)
+      };
+    }
+    offset += 2 + length;
+  }
+  return { width: 3600, height: 5400 };
+}
+
+function pdfObject(objectNumber, content) {
+  return Buffer.concat([
+    Buffer.from(`${objectNumber} 0 obj\n`, 'binary'),
+    Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'binary'),
+    Buffer.from('\nendobj\n', 'binary')
+  ]);
+}
+
+function pdfStream(dictionary, streamBuffer) {
+  return Buffer.concat([
+    Buffer.from(`${dictionary}\nstream\n`, 'binary'),
+    streamBuffer,
+    Buffer.from('\nendstream', 'binary')
+  ]);
+}
+
+function writeJpegSheetsPdf(pdfPath, jpgPaths) {
+  if (!jpgPaths.length) {
+    return null;
+  }
+  const pageWidthPoints = 864;
+  const pageHeightPoints = 1296;
+  const objects = [];
+  const pageObjectNumbers = [];
+
+  objects.push(pdfObject(1, '<< /Type /Catalog /Pages 2 0 R >>'));
+  objects.push(null);
+
+  jpgPaths.forEach((jpgPath, index) => {
+    const pageObjectNumber = 3 + (index * 3);
+    const contentObjectNumber = pageObjectNumber + 1;
+    const imageObjectNumber = pageObjectNumber + 2;
+    const imageName = `Im${index + 1}`;
+    const imageBuffer = fs.readFileSync(jpgPath);
+    const image = jpegDimensions(jpgPath);
+    pageObjectNumbers.push(pageObjectNumber);
+
+    objects.push(pdfObject(pageObjectNumber, [
+      '<< /Type /Page',
+      '/Parent 2 0 R',
+      `/MediaBox [0 0 ${pageWidthPoints} ${pageHeightPoints}]`,
+      `/Resources << /XObject << /${imageName} ${imageObjectNumber} 0 R >> >>`,
+      `/Contents ${contentObjectNumber} 0 R`,
+      '>>'
+    ].join(' ')));
+
+    const content = Buffer.from(`q\n${pageWidthPoints} 0 0 ${pageHeightPoints} 0 0 cm\n/${imageName} Do\nQ\n`, 'binary');
+    objects.push(pdfObject(contentObjectNumber, pdfStream(`<< /Length ${content.length} >>`, content)));
+    objects.push(pdfObject(imageObjectNumber, pdfStream([
+      '<< /Type /XObject',
+      '/Subtype /Image',
+      `/Width ${image.width}`,
+      `/Height ${image.height}`,
+      '/ColorSpace /DeviceRGB',
+      '/BitsPerComponent 8',
+      '/Filter /DCTDecode',
+      `/Length ${imageBuffer.length}`,
+      '>>'
+    ].join(' '), imageBuffer)));
+  });
+
+  objects[1] = pdfObject(2, `<< /Type /Pages /Kids [${pageObjectNumbers.map((number) => `${number} 0 R`).join(' ')}] /Count ${pageObjectNumbers.length} >>`);
+
+  const header = Buffer.from('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n', 'binary');
+  const offsets = [0];
+  let offset = header.length;
+  objects.forEach((object) => {
+    offsets.push(offset);
+    offset += object.length;
+  });
+  const xrefOffset = offset;
+  const xrefRows = [
+    'xref',
+    `0 ${objects.length + 1}`,
+    '0000000000 65535 f ',
+    ...offsets.slice(1).map((value) => `${String(value).padStart(10, '0')} 00000 n `),
+    'trailer',
+    `<< /Size ${objects.length + 1} /Root 1 0 R >>`,
+    'startxref',
+    String(xrefOffset),
+    '%%EOF'
+  ].join('\n');
+
+  fs.writeFileSync(pdfPath, Buffer.concat([
+    header,
+    ...objects,
+    Buffer.from(xrefRows, 'binary')
+  ]));
+  return pdfPath;
+}
+
+async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOutputPath) {
+  await ensureIdCardSheetRenderer();
+  const outputFolder = path.dirname(absoluteOutputPath);
+  fs.mkdirSync(outputFolder, { recursive: true });
+
+  const idCardSubjects = sortDirectorySubjects(subjects, options.idCardSortMethod);
+  if (!idCardSubjects.length) {
+    throw new Error('No students matched the ID card render options');
+  }
+
+  const [studentTemplate, staffTemplate] = await Promise.all([
+    activeIdCardTemplate('student', job.studentIdTemplateId),
+    activeIdCardTemplate('staff', job.facultyIdTemplateId).catch(async () => activeIdCardTemplate('student', job.studentIdTemplateId))
+  ]);
+  const timestamp = timestampForFolder(new Date());
+  const studentTemplatePath = path.join(outputFolder, `id-card-student-template-${timestamp}.json`);
+  const staffTemplatePath = path.join(outputFolder, `id-card-staff-template-${timestamp}.json`);
+  const tsvPath = path.join(outputFolder, `id-card-subjects-${timestamp}.tsv`);
+  fs.writeFileSync(studentTemplatePath, JSON.stringify(studentTemplate.template, null, 2));
+  fs.writeFileSync(staffTemplatePath, JSON.stringify(staffTemplate.template, null, 2));
+  fs.writeFileSync(tsvPath, idCardSubjects.map(idCardSubjectTsvRow).join('\r\n'));
+
+  await processOutput('java', [
+    '-cp',
+    idCardJavaClasspath(),
+    'IdCardSheetRenderer',
+    resolveProjectPath(job.rootPath),
+    absoluteOutputPath,
+    studentTemplatePath,
+    staffTemplatePath,
+    tsvPath,
+    base64Arg(idCardSchoolYear(options.directorySchoolYear)),
+    '',
+    'false'
+  ], { cwd: bundledResourceRoot });
+
+  const stem = path.basename(absoluteOutputPath, path.extname(absoluteOutputPath));
+  const renderedFiles = fs.readdirSync(outputFolder)
+    .filter((name) => name === path.basename(absoluteOutputPath) || (name.startsWith(`${stem}_`) && name.toLowerCase().endsWith('.jpg')))
+    .sort();
+  const pdfPath = path.join(outputFolder, `${stem}.pdf`);
+  writeJpegSheetsPdf(pdfPath, renderedFiles.map((name) => path.join(outputFolder, name)));
+  const idCardOutput = buildIdCardOutput(job, idCardSubjects, options);
+  const manifest = {
+    ...idCardOutput.manifest,
+    templates: {
+      student: { id: studentTemplate.id, name: studentTemplate.name },
+      staff: { id: staffTemplate.id, name: staffTemplate.name }
+    },
+    backgroundFolder: path.join(job.rootPath, 'ID_Templates'),
+    gradeBackgrounds: {
+      TK: 'TK.jpg',
+      KIN: 'KIN.jpg',
+      '01': '01.jpg',
+      '02': '02.jpg',
+      '03': '03.jpg',
+      '04': '04.jpg',
+      '05': '05.jpg',
+      '06': '06.jpg',
+      '07': '07.jpg',
+      '08': '08.jpg',
+      '09': '09.jpg',
+      '10': '10.jpg',
+      '11': '11.jpg',
+      '12': '12.jpg',
+      FAC: 'FAC.jpg'
+    },
+    outputFolder,
+    outputPath,
+    pdfPath,
+    renderedFiles
+  };
+  fs.writeFileSync(
+    path.join(outputFolder, `${stem}.manifest.json`),
+    JSON.stringify(manifest, null, 2)
+  );
+  fs.writeFileSync(
+    path.join(outputFolder, `${stem}.worklist.csv`),
+    idCardOutput.csv
+  );
+  [studentTemplatePath, staffTemplatePath, tsvPath].forEach((filePath) => {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  });
+  return {
+    subjects: idCardSubjects.length,
+    renderedFiles
+  };
+}
+
 async function adminJobSummary(jobId) {
   const rows = await querySql(`
     SELECT
@@ -3022,8 +3409,11 @@ async function adminJobSummary(jobId) {
       j.name AS job,
       j.type,
       j.root_path AS rootPath,
+      j.student_id_template_id AS studentIdTemplateId,
+      j.faculty_id_template_id AS facultyIdTemplateId,
       j.shoot_date AS shootDate,
       j.retake_date AS retakeDate,
+      j.notes,
       c.display_name AS clientName,
       COALESCE(c.trecs_name, c.display_name, '') AS location
     FROM jobs j
@@ -3036,6 +3426,183 @@ async function adminJobSummary(jobId) {
   }
 
   return rows[0];
+}
+
+async function idTemplateFolderForJob(jobId) {
+  const job = await adminJobSummary(jobId);
+  const folder = path.join(projectRoot, job.rootPath, 'ID_Templates');
+  fs.mkdirSync(folder, { recursive: true });
+  return { job, folder };
+}
+
+function idTemplateDataUrl(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return '';
+  }
+  return `data:${mimeTypeFor(filePath)};base64,${fs.readFileSync(filePath).toString('base64')}`;
+}
+
+function normalizeIdTemplateType(value) {
+  const text = String(value || '').toLowerCase();
+  return text.includes('staff') || text.includes('faculty') ? 'staff' : 'student';
+}
+
+async function listIdTemplates(_event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const { folder } = await idTemplateFolderForJob(jobId);
+  const templateRows = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      updated_at AS updatedAt
+    FROM id_card_templates
+    WHERE active = 1
+    ORDER BY template_type, name;
+  `);
+  const templates = templateRows
+    .map((row) => ({
+      id: Number(row.id),
+      fileName: String(row.id),
+      name: row.name,
+      templateType: row.templateType,
+      updatedAt: row.updatedAt
+    }))
+    .sort((first, second) => first.name.localeCompare(second.name, undefined, { sensitivity: 'base' }));
+  const files = fs.readdirSync(folder);
+  const backgrounds = files
+    .filter((name) => /\.(bmp|jpe?g|png)$/i.test(name))
+    .map((name) => ({
+      fileName: name,
+      path: path.relative(projectRoot, path.join(folder, name)),
+      dataUrl: idTemplateDataUrl(path.join(folder, name))
+    }))
+    .sort((first, second) => first.fileName.localeCompare(second.fileName, undefined, { sensitivity: 'base' }));
+  return {
+    folder: path.relative(projectRoot, folder),
+    templates,
+    backgrounds
+  };
+}
+
+async function chooseIdTemplateBackground(event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const { folder } = await idTemplateFolderForJob(jobId);
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose ID Card Background',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'bmp'] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+  const sourcePath = result.filePaths[0];
+  const destinationPath = uniquePath(folder, path.basename(sourcePath));
+  fs.copyFileSync(sourcePath, destinationPath);
+  return {
+    canceled: false,
+    fileName: path.basename(destinationPath),
+    path: path.relative(projectRoot, destinationPath),
+    dataUrl: idTemplateDataUrl(destinationPath)
+  };
+}
+
+async function loadIdTemplate(_event, jobIdValue, fileNameValue) {
+  numericId(jobIdValue);
+  const templateId = numericId(fileNameValue);
+  const rows = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      template_json AS templateJson
+    FROM id_card_templates
+    WHERE id = ${templateId}
+      AND active = 1;
+  `);
+  if (!rows.length) {
+    throw new Error('ID template was not found');
+  }
+  const data = JSON.parse(rows[0].templateJson);
+  return {
+    fileName: String(templateId),
+    template: data
+  };
+}
+
+async function saveIdTemplate(_event, jobIdValue, input = {}) {
+  const jobId = numericId(jobIdValue);
+  await idTemplateFolderForJob(jobId);
+  const template = input.template || {};
+  const name = normalizeText(template.name || input.name, 'Template name', 80);
+  const templateType = normalizeIdTemplateType(template.templateType || input.templateType);
+  const orientation = template.card && template.card.orientation === 'vertical' ? 'vertical' : 'horizontal';
+  const cardSize = orientation === 'vertical'
+    ? { width: 702, height: 1128 }
+    : { width: 1128, height: 702 };
+  const payload = {
+    schema: 'trecs.id-card-template.v1',
+    name,
+    templateType,
+    card: {
+      ...cardSize,
+      orientation
+    },
+    background: template.background || '',
+    backgroundRules: template.backgroundRules || null,
+    elements: template.elements || {},
+    updatedAt: new Date().toISOString()
+  };
+  const savedId = await writeSql((database) => {
+    const existingId = input.id
+      ? Number(input.id)
+      : Number(rowsFromDatabase(database, `
+        SELECT id
+        FROM id_card_templates
+        WHERE name = ${sqlLiteral(name)}
+          AND template_type = ${sqlLiteral(templateType)}
+        LIMIT 1;
+      `)[0]?.id || 0);
+    if (existingId) {
+      database.run(`
+        UPDATE id_card_templates
+        SET
+          name = ${sqlLiteral(name)},
+          template_type = ${sqlLiteral(templateType)},
+          template_json = ${sqlLiteral(JSON.stringify(payload))},
+          active = 1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${existingId};
+      `);
+      return existingId;
+    }
+    database.run(`
+      INSERT INTO id_card_templates (
+        name,
+        template_type,
+        template_json,
+        active,
+        created_at,
+        updated_at
+      ) VALUES (
+        ${sqlLiteral(name)},
+        ${sqlLiteral(templateType)},
+        ${sqlLiteral(JSON.stringify(payload))},
+        1,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      );
+    `);
+    return Number(rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id);
+  });
+  return {
+    id: savedId,
+    fileName: String(savedId),
+    template: payload,
+    path: `database:id_card_templates/${savedId}`
+  };
 }
 
 async function adminSubjectRows(jobId) {
@@ -3477,8 +4044,8 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     sisFormats: normalizeSisFormats(input.sisFormats || input.sisFormat),
     idCardSource: normalizeIdCardSource(input.idCardSource),
     idCardListName: optionalText(input.idCardListName, 255) || '',
-    idCardLayout: normalizeIdCardLayout(input.idCardLayout),
     idCardReason: normalizeIdCardReason(input.idCardReason || (stage === 'makeup_day' ? 'makeup_day' : 'admin_batch')),
+    idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false,
     directoryType: normalizeDirectoryType(input.directoryType),
     directorySource: normalizeDirectorySource(input.directorySource),
@@ -3533,12 +4100,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
-    const idCardOutput = buildIdCardOutput(job, idCardSubjects, options);
-    fs.writeFileSync(absoluteOutputPath, idCardOutput.csv);
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(idCardOutput.manifest, null, 2)
-    );
+    await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
   } else {
     const content = buildAdminContent(type, stage, job, subjects, options);
     fs.writeFileSync(absoluteOutputPath, content);
@@ -3588,6 +4150,10 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
 ipcMain.handle('admin-items:get', getAdminItems);
 ipcMain.handle('admin-items:choose-output-folder', chooseAdminOutputFolder);
 ipcMain.handle('admin-items:render', renderAdminItem);
+ipcMain.handle('id-templates:list', listIdTemplates);
+ipcMain.handle('id-templates:choose-background', chooseIdTemplateBackground);
+ipcMain.handle('id-templates:load', loadIdTemplate);
+ipcMain.handle('id-templates:save', saveIdTemplate);
 ipcMain.handle('images:sync-cropped', syncCroppedImages);
 ipcMain.handle('images:generate-cropped-medium', generateCroppedMediumImages);
 
@@ -3597,8 +4163,8 @@ async function renderSubjectIdCard(_event, jobIdValue, subjectIdValue, input = {
   const options = {
     idCardSource: 'single',
     idCardListName: '',
-    idCardLayout: normalizeIdCardLayout(input.idCardLayout),
     idCardReason: normalizeIdCardReason(input.idCardReason || 'replacement_request'),
+    idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false
   };
   const job = await adminJobSummary(jobId);
@@ -3698,6 +4264,46 @@ function defaultJobRootPath(client, jobName) {
     safeFolderName(client.trecsName || client.displayName || 'Client'),
     safeFolderName(jobName)
   );
+}
+
+function validateJobPlanSelections(database, packagePlanId, studentIdTemplateId, facultyIdTemplateId) {
+  if (packagePlanId) {
+    const packageRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM package_plans
+      WHERE id = ${packagePlanId}
+        AND active = 1;
+    `);
+    if (!packageRows.length) {
+      throw new Error('Package plan not found');
+    }
+  }
+
+  if (studentIdTemplateId) {
+    const templateRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM id_card_templates
+      WHERE id = ${studentIdTemplateId}
+        AND template_type = 'student'
+        AND active = 1;
+    `);
+    if (!templateRows.length) {
+      throw new Error('Student ID template not found');
+    }
+  }
+
+  if (facultyIdTemplateId) {
+    const templateRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM id_card_templates
+      WHERE id = ${facultyIdTemplateId}
+        AND template_type = 'staff'
+        AND active = 1;
+    `);
+    if (!templateRows.length) {
+      throw new Error('Staff ID template not found');
+    }
+  }
 }
 
 function ensureJobFolders(rootPathValue) {
@@ -4859,6 +5465,8 @@ async function createJob(_event, input = {}) {
   const name = normalizeText(input.name, 'Job name');
   const type = normalizeJobType(input.type || 'fall');
   const packagePlanId = normalizeNullableId(input.packagePlanId, 'package plan');
+  const studentIdTemplateId = normalizeNullableId(input.studentIdTemplateId, 'student ID template');
+  const facultyIdTemplateId = normalizeNullableId(input.facultyIdTemplateId, 'staff ID template');
   const shootDate = optionalText(input.shootDate, 30);
   const retakeDate = optionalText(input.retakeDate, 30);
   const notes = optionalText(input.notes, 5000);
@@ -4874,17 +5482,7 @@ async function createJob(_event, input = {}) {
       throw new Error('Client not found');
     }
 
-    if (packagePlanId) {
-      const packageRows = rowsFromDatabase(database, `
-        SELECT id
-        FROM package_plans
-        WHERE id = ${packagePlanId}
-          AND active = 1;
-      `);
-      if (!packageRows.length) {
-        throw new Error('Package plan not found');
-      }
-    }
+    validateJobPlanSelections(database, packagePlanId, studentIdTemplateId, facultyIdTemplateId);
 
     const rootPath = optionalText(input.rootPath, 1000) || defaultJobRootPath(clientRows[0], name);
     const statement = database.prepare(`
@@ -4894,13 +5492,15 @@ async function createJob(_event, input = {}) {
         type,
         status,
         package_plan_id,
+        student_id_template_id,
+        faculty_id_template_id,
         root_path,
         legacy_folder_layout,
         shoot_date,
         retake_date,
         notes
       )
-      VALUES (?, ?, ?, 'active', ?, ?, 'trecs_v7', ?, ?, ?);
+      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 'trecs_v7', ?, ?, ?);
     `);
 
     try {
@@ -4909,6 +5509,8 @@ async function createJob(_event, input = {}) {
         name,
         type,
         packagePlanId,
+        studentIdTemplateId,
+        facultyIdTemplateId,
         rootPath,
         shootDate,
         retakeDate,
@@ -4930,6 +5532,74 @@ async function createJob(_event, input = {}) {
 }
 
 ipcMain.handle('job:create', createJob);
+
+async function updateJob(_event, jobIdValue, input = {}) {
+  const jobId = numericId(jobIdValue);
+  const name = normalizeText(input.name, 'Job name');
+  const type = normalizeJobType(input.type || 'fall');
+  const packagePlanId = normalizeNullableId(input.packagePlanId, 'package plan');
+  const studentIdTemplateId = normalizeNullableId(input.studentIdTemplateId, 'student ID template');
+  const facultyIdTemplateId = normalizeNullableId(input.facultyIdTemplateId, 'staff ID template');
+  const rootPath = normalizeText(input.rootPath, 'Root path', 1000);
+  const shootDate = optionalText(input.shootDate, 30);
+  const retakeDate = optionalText(input.retakeDate, 30);
+  const notes = optionalText(input.notes, 5000);
+
+  const result = await writeSql((database) => {
+    const jobRows = rowsFromDatabase(database, `
+      SELECT id
+      FROM jobs
+      WHERE id = ${jobId};
+    `);
+    if (!jobRows.length) {
+      throw new Error('Job not found');
+    }
+
+    validateJobPlanSelections(database, packagePlanId, studentIdTemplateId, facultyIdTemplateId);
+
+    const statement = database.prepare(`
+      UPDATE jobs
+      SET
+        name = ?,
+        type = ?,
+        package_plan_id = ?,
+        student_id_template_id = ?,
+        faculty_id_template_id = ?,
+        root_path = ?,
+        shoot_date = ?,
+        retake_date = ?,
+        notes = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?;
+    `);
+
+    try {
+      statement.run([
+        name,
+        type,
+        packagePlanId,
+        studentIdTemplateId,
+        facultyIdTemplateId,
+        rootPath,
+        shootDate,
+        retakeDate,
+        notes,
+        jobId
+      ]);
+    } finally {
+      statement.free();
+    }
+
+    ensureJobFolders(rootPath);
+    return { id: jobId, rootPath };
+  });
+
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+ipcMain.handle('job:update', updateJob);
 
 async function importPreviousTrecsJob(_event, input = {}) {
   const clientId = numericId(input.clientId);

@@ -161,6 +161,14 @@
                 <select name="packagePlanId"></select>
               </label>
               <label>
+                <span>Student ID Template</span>
+                <select name="studentIdTemplateId"></select>
+              </label>
+              <label>
+                <span>Staff ID Template</span>
+                <select name="facultyIdTemplateId"></select>
+              </label>
+              <label>
                 <span>Shoot Date</span>
                 <input name="shootDate" type="date">
               </label>
@@ -308,6 +316,7 @@
                 <p id="workspaceJobMeta"></p>
               </div>
               <div class="workspace-actions">
+                <button id="workspaceEditJobButton" type="button">Edit Job</button>
                 <button id="workspaceEditStudentButton" type="button">Edit Student</button>
                 <button id="workspacePreviousButton" type="button">Previous</button>
                 <button id="workspaceNextButton" type="button">Next</button>
@@ -456,7 +465,10 @@
               <section class="panel admin-items-main">
                 <div class="panel-heading">
                   <h2>Admin Items</h2>
-                  <span id="adminItemsStatus"></span>
+                  <div class="admin-heading-actions">
+                    <span id="adminItemsStatus"></span>
+                    <button class="secondary small" id="openIdTemplateDesignerButton" type="button">ID Template Designer</button>
+                  </div>
                 </div>
                 <form class="admin-options" id="adminOptionsForm">
                   <label>
@@ -464,16 +476,6 @@
                     <select name="stage">
                       <option value="original_picture_day">Original Picture Day</option>
                       <option value="makeup_day">Makeup Day</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>Directory Sort</span>
-                    <select name="sortBy">
-                      <option value="grade">Grade</option>
-                      <option value="homeroom">Homeroom</option>
-                      <option value="track">Track</option>
-                      <option value="name">Name</option>
-                      <option value="ref">Reference</option>
                     </select>
                   </label>
                   <label>
@@ -507,6 +509,62 @@
               </aside>
             </section>
 
+            <section class="id-template-workspace" id="idTemplateWorkspace" hidden>
+              <aside class="panel id-template-sidebar">
+                <div class="panel-heading">
+                  <h2>ID Templates</h2>
+                  <div class="admin-heading-actions">
+                    <button class="secondary small" id="newIdTemplateButton" type="button">New</button>
+                    <button class="secondary small" id="idTemplateBackButton" type="button">Back</button>
+                  </div>
+                </div>
+                <div class="id-template-list" id="idTemplateList">
+                  <div class="empty-state">Loading templates...</div>
+                </div>
+                <form class="id-template-form" id="idTemplateForm">
+                  <label>
+                    <span>Template Name</span>
+                    <input name="templateName" placeholder="Student ID">
+                  </label>
+                  <label>
+                    <span>Template Type</span>
+                    <select name="templateType">
+                      <option value="student">Student ID</option>
+                      <option value="staff">Staff ID</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Orientation</span>
+                    <select name="orientation">
+                      <option value="horizontal">Horizontal</option>
+                      <option value="vertical">Vertical</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Background</span>
+                    <select name="background"></select>
+                  </label>
+                  <button id="chooseIdTemplateBackgroundButton" type="button">Import Background</button>
+                  <button class="primary" id="saveIdTemplateButton" type="submit">Save Template</button>
+                  <p id="idTemplateStatus"></p>
+                </form>
+              </aside>
+              <section class="panel id-template-designer">
+                <div class="panel-heading">
+                  <h2>Template Designer</h2>
+                  <span id="idTemplateFolderLabel"></span>
+                </div>
+                <div class="id-template-body">
+                  <div class="id-template-stage-wrap">
+                    <div class="id-template-stage" id="idTemplateStage"></div>
+                  </div>
+                  <aside class="id-template-properties" id="idTemplateProperties">
+                    <div class="empty-state">Select an element to edit its position and style.</div>
+                  </aside>
+                </div>
+              </section>
+            </section>
+
             <div class="modal-backdrop" id="addRecordsModal" hidden>
               <form class="modal-card" id="addRecordsForm">
                 <div class="modal-heading">
@@ -521,6 +579,66 @@
                 <div class="form-actions">
                   <span>Reference numbers will continue from the largest current ref.</span>
                   <button class="primary" type="submit">Add Records</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="modal-backdrop" id="editJobModal" hidden>
+              <form class="modal-card edit-job-card" id="editJobForm">
+                <div class="modal-heading">
+                  <h2>Edit Job</h2>
+                  <button id="cancelEditJobButton" type="button">Cancel</button>
+                </div>
+                <div class="new-job-form">
+                  <label>
+                    <span>Job Name</span>
+                    <input name="name" required>
+                  </label>
+                  <label>
+                    <span>Type</span>
+                    <select name="type">
+                      <option value="fall">Fall</option>
+                      <option value="spring">Spring</option>
+                      <option value="sports">Sports</option>
+                      <option value="seniors">Seniors</option>
+                      <option value="event">Event</option>
+                      <option value="qr_event">QR Event</option>
+                      <option value="league">League</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Package Plan</span>
+                    <select name="packagePlanId"></select>
+                  </label>
+                  <label>
+                    <span>Student ID Template</span>
+                    <select name="studentIdTemplateId"></select>
+                  </label>
+                  <label>
+                    <span>Staff ID Template</span>
+                    <select name="facultyIdTemplateId"></select>
+                  </label>
+                  <label>
+                    <span>Shoot Date</span>
+                    <input name="shootDate" type="date">
+                  </label>
+                  <label>
+                    <span>Retake Date</span>
+                    <input name="retakeDate" type="date">
+                  </label>
+                  <label class="wide-field">
+                    <span>Root Path</span>
+                    <input name="rootPath">
+                  </label>
+                  <label class="wide-field">
+                    <span>Notes</span>
+                    <textarea name="notes" rows="3"></textarea>
+                  </label>
+                </div>
+                <p id="editJobStatus"></p>
+                <div class="form-actions">
+                  <span>Updates apply to this job and its job database snapshot.</span>
+                  <button class="primary" type="submit">Save Job</button>
                 </div>
               </form>
             </div>

@@ -26,6 +26,7 @@ const workspaceEnvelopeButton = document.getElementById('workspaceEnvelopeButton
 const workspaceAdminItemsButton = document.getElementById('workspaceAdminItemsButton');
 const workspaceAddBlankButton = document.getElementById('workspaceAddBlankButton');
 const workspaceEditStudentButton = document.getElementById('workspaceEditStudentButton');
+const workspaceEditJobButton = document.getElementById('workspaceEditJobButton');
 const workspacePreviousButton = document.getElementById('workspacePreviousButton');
 const workspaceNextButton = document.getElementById('workspaceNextButton');
 const workspaceStudentCount = document.getElementById('workspaceStudentCount');
@@ -140,6 +141,17 @@ const adminItemsProgress = document.getElementById('adminItemsProgress');
 const adminItemsProgressText = document.getElementById('adminItemsProgressText');
 const adminItemsHistoryCount = document.getElementById('adminItemsHistoryCount');
 const adminItemsHistory = document.getElementById('adminItemsHistory');
+const openIdTemplateDesignerButton = document.getElementById('openIdTemplateDesignerButton');
+const idTemplateWorkspace = document.getElementById('idTemplateWorkspace');
+const idTemplateBackButton = document.getElementById('idTemplateBackButton');
+const newIdTemplateButton = document.getElementById('newIdTemplateButton');
+const idTemplateList = document.getElementById('idTemplateList');
+const idTemplateForm = document.getElementById('idTemplateForm');
+const chooseIdTemplateBackgroundButton = document.getElementById('chooseIdTemplateBackgroundButton');
+const idTemplateStatus = document.getElementById('idTemplateStatus');
+const idTemplateStage = document.getElementById('idTemplateStage');
+const idTemplateProperties = document.getElementById('idTemplateProperties');
+const idTemplateFolderLabel = document.getElementById('idTemplateFolderLabel');
 const newSchoolButton = document.getElementById('newSchoolButton');
 const newSchoolPanel = document.getElementById('newSchoolPanel');
 const newSchoolForm = document.getElementById('newSchoolForm');
@@ -158,12 +170,17 @@ const importPreviousJobForm = document.getElementById('importPreviousJobForm');
 const cancelImportPreviousJobButton = document.getElementById('cancelImportPreviousJobButton');
 const browsePreviousJobFolderButton = document.getElementById('browsePreviousJobFolderButton');
 const importPreviousJobStatus = document.getElementById('importPreviousJobStatus');
+const editJobModal = document.getElementById('editJobModal');
+const editJobForm = document.getElementById('editJobForm');
+const cancelEditJobButton = document.getElementById('cancelEditJobButton');
+const editJobStatus = document.getElementById('editJobStatus');
 
 let jobsState = {
   jobs: [],
   types: [],
   clients: [],
   packagePlans: [],
+  idCardTemplates: [],
   selectedType: 'all',
   sortKey: 'location',
   sortDirection: 'asc',
@@ -221,14 +238,24 @@ let jobsState = {
     progress: 0,
     message: 'Ready'
   },
+  idTemplateDesigner: {
+    loaded: false,
+    folder: '',
+    templates: [],
+    backgrounds: [],
+    template: null,
+    selectedTemplateId: null,
+    selectedElement: 'photo',
+    drag: null
+  },
   sisStudentCd: true,
   sisDestiny: false,
   sisPowerSchool: false,
   sisSasi: false,
   idCardSource: 'all',
   idCardListName: '',
-  idCardLayout: 'standard',
   idCardReason: 'admin_batch',
+  idCardSortMethod: 'alpha_grade',
   idCardPhotographedOnly: true,
   directoryType: 'mugbook',
   directorySource: 'all',
@@ -785,6 +812,7 @@ function setWorkspaceMode(mode) {
   const captureOpen = mode === 'capture';
   const envelopeOpen = mode === 'envelope';
   const adminOpen = mode === 'admin';
+  const idTemplateOpen = mode === 'idTemplates';
   const imageReviewOpen = mode === 'imageReview';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
   jobStudentWorkspace.classList.toggle('capture-mode', captureOpen);
@@ -792,7 +820,14 @@ function setWorkspaceMode(mode) {
   imageReviewWorkspace.hidden = !imageReviewOpen;
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
-  backToJobsButton.textContent = (captureOpen || envelopeOpen || imageReviewOpen) ? 'Back to Students' : 'Back to Jobs';
+  if (idTemplateWorkspace) {
+    idTemplateWorkspace.hidden = !idTemplateOpen;
+  }
+  backToJobsButton.textContent = (captureOpen || envelopeOpen || imageReviewOpen)
+    ? 'Back to Students'
+    : (adminOpen || idTemplateOpen)
+      ? 'Back to School'
+      : 'Back to Jobs';
   if (workspaceStudentsButton) {
     workspaceStudentsButton.classList.toggle('active', studentsOpen);
   }
@@ -827,6 +862,8 @@ function setWorkspaceMode(mode) {
     renderImageReviewWorkspace();
   } else if (envelopeOpen) {
     renderEnvelopeWorkspace();
+  } else if (idTemplateOpen) {
+    renderIdTemplateDesigner();
   } else {
     renderAdminItemsWorkspace();
   }
@@ -3884,7 +3921,7 @@ function adminOutputOptions() {
   const outputInput = adminOutputFolderInput();
   return {
     stage: adminOptionsForm.elements.stage.value,
-    sortBy: adminOptionsForm.elements.sortBy.value,
+    sortBy: adminOptionsForm.elements.sortBy ? adminOptionsForm.elements.sortBy.value : jobsState.adminSortBy,
     schoolYear: adminOptionsForm.elements.schoolYear ? adminOptionsForm.elements.schoolYear.value : jobsState.directorySchoolYear,
     outputFolder: outputInput ? outputInput.value : ''
   };
@@ -3936,7 +3973,7 @@ function renderDirectoryOptions(listNames) {
           <option value="alpha_school" ${jobsState.directorySortMethod === 'alpha_school' ? 'selected' : ''}>Alpha by School</option>
         </select>
       </label>
-      <label>
+      <label class="directory-contact-field">
         <span>Contact Line</span>
         <input data-directory-option="directoryContactLine" value="${escapeHtml(jobsState.directoryContactLine)}">
       </label>
@@ -4084,20 +4121,20 @@ function renderIdCardOptions(listNames) {
         </select>
       </label>
       <label>
-        <span>Layout</span>
-        <select data-id-card-option="idCardLayout">
-          <option value="standard" ${jobsState.idCardLayout === 'standard' ? 'selected' : ''}>Standard Student</option>
-          <option value="staff" ${jobsState.idCardLayout === 'staff' ? 'selected' : ''}>Staff</option>
-          <option value="temporary" ${jobsState.idCardLayout === 'temporary' ? 'selected' : ''}>Temporary</option>
-        </select>
-      </label>
-      <label>
         <span>Reason</span>
         <select data-id-card-option="idCardReason">
           <option value="admin_batch" ${jobsState.idCardReason === 'admin_batch' ? 'selected' : ''}>Admin Batch</option>
           <option value="makeup_day" ${jobsState.idCardReason === 'makeup_day' ? 'selected' : ''}>Makeup Day</option>
           <option value="replacement_request" ${jobsState.idCardReason === 'replacement_request' ? 'selected' : ''}>Replacement Request</option>
           <option value="school_request" ${jobsState.idCardReason === 'school_request' ? 'selected' : ''}>School Request</option>
+        </select>
+      </label>
+      <label>
+        <span>Sort</span>
+        <select data-id-card-option="idCardSortMethod">
+          <option value="alpha_grade" ${jobsState.idCardSortMethod === 'alpha_grade' ? 'selected' : ''}>Alpha by Grade</option>
+          <option value="alpha_homeroom" ${jobsState.idCardSortMethod === 'alpha_homeroom' ? 'selected' : ''}>Alpha by Homeroom</option>
+          <option value="alpha_school" ${jobsState.idCardSortMethod === 'alpha_school' ? 'selected' : ''}>Alpha by School</option>
         </select>
       </label>
       <label class="checkbox-label">
@@ -4119,6 +4156,371 @@ function bindIdCardOptions() {
       renderAdminItemsWorkspace();
     });
   });
+}
+
+const ID_TEMPLATE_ELEMENT_DEFINITIONS = [
+  { key: 'photo', label: 'Photo', kind: 'photo', x: 70, y: 86, w: 260, h: 325 },
+  { key: 'name', label: 'Full Name', kind: 'text', field: 'fullName', x: 390, y: 155, w: 580, h: 70, size: 54, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'first', label: 'First Name', kind: 'text', field: 'firstName', x: 390, y: 240, w: 420, h: 50, size: 38, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'last', label: 'Last Name', kind: 'text', field: 'lastName', x: 390, y: 300, w: 420, h: 50, size: 38, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'barcode', label: 'Barcode', kind: 'barcode', symbology: 'code128', x: 390, y: 545, w: 420, h: 70, size: 70 },
+  { key: 'homeroom', label: 'Homeroom', kind: 'text', field: 'homeroom', x: 390, y: 370, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'studentId', label: 'Student ID', kind: 'text', field: 'studentId', x: 390, y: 425, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'extra1', label: 'Extra 1', kind: 'text', field: 'extra1', x: 390, y: 480, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'extra2', label: 'Extra 2', kind: 'text', field: 'extra2', x: 760, y: 480, w: 260, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'year', label: 'School Year', kind: 'text', field: 'year', x: 830, y: 620, w: 230, h: 48, size: 34, color: '#000000', font: 'Myriad Pro', align: 'left' },
+  { key: 'qr', label: 'QR Code', kind: 'qr', x: 930, y: 90, w: 120, h: 120 }
+];
+
+const ID_TEMPLATE_GRADE_BACKGROUNDS = {
+  TK: 'TK.jpg',
+  KIN: 'KIN.jpg',
+  K: 'KIN.jpg',
+  '1': '01.jpg',
+  '01': '01.jpg',
+  '2': '02.jpg',
+  '02': '02.jpg',
+  '3': '03.jpg',
+  '03': '03.jpg',
+  '4': '04.jpg',
+  '04': '04.jpg',
+  '5': '05.jpg',
+  '05': '05.jpg',
+  '6': '06.jpg',
+  '06': '06.jpg',
+  '7': '07.jpg',
+  '07': '07.jpg',
+  '8': '08.jpg',
+  '08': '08.jpg',
+  '9': '09.jpg',
+  '09': '09.jpg',
+  '10': '10.jpg',
+  '11': '11.jpg',
+  '12': '12.jpg',
+  FAC: 'FAC.jpg',
+  FACULTY: 'FAC.jpg',
+  STAFF: 'FAC.jpg'
+};
+
+function createDefaultIdTemplate() {
+  return {
+    schema: 'trecs.id-card-template.v1',
+    name: 'Student ID',
+    templateType: 'student',
+    card: {
+      width: 1128,
+      height: 702,
+      orientation: 'horizontal'
+    },
+    background: '',
+    backgroundRules: {
+      mode: 'grade',
+      gradeBackgrounds: ID_TEMPLATE_GRADE_BACKGROUNDS,
+      allowSingleCardOverride: true
+    },
+    elements: Object.fromEntries(ID_TEMPLATE_ELEMENT_DEFINITIONS.map((definition) => [
+      definition.key,
+      {
+        ...definition,
+        enabled: true
+      }
+    ]))
+  };
+}
+
+function normalizeIdTemplateForDesigner(template) {
+  const nextTemplate = template || createDefaultIdTemplate();
+  nextTemplate.elements = nextTemplate.elements || {};
+  nextTemplate.card = nextTemplate.card || {};
+  nextTemplate.templateType = nextTemplate.templateType === 'staff' ? 'staff' : 'student';
+  nextTemplate.backgroundRules = {
+    mode: 'grade',
+    gradeBackgrounds: {
+      ...ID_TEMPLATE_GRADE_BACKGROUNDS,
+      ...((nextTemplate.backgroundRules && nextTemplate.backgroundRules.gradeBackgrounds) || {})
+    },
+    allowSingleCardOverride: true,
+    ...(nextTemplate.backgroundRules || {})
+  };
+  const orientation = nextTemplate.card.orientation === 'vertical' ? 'vertical' : 'horizontal';
+  const size = idTemplateCardSize({ card: { orientation } });
+  nextTemplate.card = {
+    ...nextTemplate.card,
+    orientation,
+    width: size.width,
+    height: size.height
+  };
+  const defaultBarcode = ID_TEMPLATE_ELEMENT_DEFINITIONS.find((element) => element.key === 'barcode');
+  const barcode = nextTemplate.elements.barcode || {};
+  nextTemplate.elements.barcode = {
+    ...defaultBarcode,
+    ...barcode,
+    kind: 'barcode',
+    field: undefined,
+    font: undefined,
+    color: undefined,
+    symbology: 'code128',
+    size: Number(barcode.size || barcode.h || defaultBarcode.size)
+  };
+  Object.values(nextTemplate.elements).forEach((element) => {
+    if (element && element.kind === 'text') {
+      element.align = ['left', 'center', 'right'].includes(element.align) ? element.align : 'left';
+    }
+  });
+  return nextTemplate;
+}
+
+function idTemplateCardSize(template) {
+  const orientation = template && template.card && template.card.orientation === 'vertical' ? 'vertical' : 'horizontal';
+  return orientation === 'vertical'
+    ? { width: 702, height: 1128, orientation }
+    : { width: 1128, height: 702, orientation };
+}
+
+function setIdTemplateOrientation(template, orientationValue) {
+  const current = idTemplateCardSize(template);
+  const next = idTemplateCardSize({ card: { orientation: orientationValue } });
+  template.card = template.card || {};
+  if (current.orientation !== next.orientation && template.elements) {
+    const scaleX = next.width / current.width;
+    const scaleY = next.height / current.height;
+    Object.values(template.elements).forEach((element) => {
+      element.x = Math.round(Number(element.x || 0) * scaleX);
+      element.y = Math.round(Number(element.y || 0) * scaleY);
+      element.w = Math.round(Number(element.w || 0) * scaleX);
+      element.h = Math.round(Number(element.h || 0) * scaleY);
+    });
+  }
+  template.card = {
+    ...template.card,
+    width: next.width,
+    height: next.height,
+    orientation: next.orientation
+  };
+  return template;
+}
+
+function idTemplateBackgroundDataUrl(backgroundName) {
+  const match = (jobsState.idTemplateDesigner.backgrounds || [])
+    .find((background) => background.fileName === backgroundName);
+  return match ? match.dataUrl : '';
+}
+
+function renderIdTemplateDesigner() {
+  const designer = jobsState.idTemplateDesigner;
+  if (!designer.loaded) {
+    loadIdTemplateDesigner().catch((error) => {
+      idTemplateStatus.textContent = error.message || 'Could not load ID templates';
+      console.error(error);
+    });
+    return;
+  }
+  const template = designer.template || createDefaultIdTemplate();
+  designer.template = normalizeIdTemplateForDesigner(template);
+
+  idTemplateFolderLabel.textContent = designer.folder ? designer.folder : '';
+  idTemplateList.innerHTML = designer.templates.length
+    ? designer.templates.map((item) => `
+      <button class="${Number(item.id) === Number(designer.selectedTemplateId) ? 'active' : ''}" data-id-template-file="${escapeHtml(item.fileName)}" type="button">
+        <strong>${escapeHtml(item.name)}</strong>
+        <span>${escapeHtml(item.templateType === 'staff' ? 'Staff ID' : 'Student ID')}</span>
+      </button>
+    `).join('')
+    : '<div class="empty-state">No saved templates yet.</div>';
+
+  idTemplateForm.elements.templateName.value = template.name || '';
+  idTemplateForm.elements.templateType.value = template.templateType === 'staff' ? 'staff' : 'student';
+  idTemplateForm.elements.orientation.value = template.card && template.card.orientation === 'vertical' ? 'vertical' : 'horizontal';
+  idTemplateForm.elements.background.innerHTML = [
+    '<option value="">No background</option>',
+    ...designer.backgrounds.map((background) => `
+      <option value="${escapeHtml(background.fileName)}" ${template.background === background.fileName ? 'selected' : ''}>
+        ${escapeHtml(background.fileName)}
+      </option>
+    `)
+  ].join('');
+  renderIdTemplateStage();
+  renderIdTemplateProperties();
+}
+
+function renderIdTemplateStage() {
+  const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
+  const card = idTemplateCardSize(template);
+  const background = idTemplateBackgroundDataUrl(template.background);
+  idTemplateStage.style.backgroundImage = background ? `url("${background}")` : '';
+  idTemplateStage.style.aspectRatio = `${card.width} / ${card.height}`;
+  idTemplateStage.classList.toggle('vertical', card.orientation === 'vertical');
+  const elements = template.elements || {};
+  idTemplateStage.innerHTML = Object.entries(elements)
+    .filter(([_key, element]) => element.enabled !== false)
+    .map(([key, element]) => {
+      const left = (Number(element.x || 0) / card.width) * 100;
+      const top = (Number(element.y || 0) / card.height) * 100;
+      const width = (Number(element.w || 120) / card.width) * 100;
+      const height = (Number(element.h || 40) / card.height) * 100;
+      const selected = key === jobsState.idTemplateDesigner.selectedElement;
+      const text = element.kind === 'photo' ? 'Photo' : element.kind === 'qr' ? 'QR' : element.kind === 'barcode' ? '' : sampleIdTemplateText(element);
+      const barcodeMarkup = element.kind === 'barcode' ? renderCode128PreviewBars() : '';
+      const align = ['left', 'center', 'right'].includes(element.align) ? element.align : 'left';
+      const justifyContent = align === 'right' ? 'flex-end' : align === 'center' ? 'center' : 'flex-start';
+      return `
+        <div class="id-template-element ${escapeHtml(element.kind || 'text')} ${selected ? 'selected' : ''}"
+          data-id-template-element="${escapeHtml(key)}"
+          style="left:${left}%;top:${top}%;width:${width}%;height:${height}%;font-size:${Math.max(10, Number(element.size || 28) / 2)}px;color:${escapeHtml(element.color || '#000000')};font-family:${escapeHtml(element.font || 'Arial')};text-align:${align};justify-content:${justifyContent};">
+          ${barcodeMarkup || escapeHtml(text)}
+        </div>
+      `;
+    }).join('');
+}
+
+function renderCode128PreviewBars() {
+  const bars = [2, 1, 1, 2, 3, 1, 2, 2, 1, 1, 3, 2, 1, 2, 2, 3, 1, 1, 2, 1, 3, 2, 2, 1, 1, 3, 1, 2, 2, 2, 1, 1];
+  return `
+    <div class="id-template-barcode-preview" aria-label="CODE128 barcode preview">
+      ${bars.map((width, index) => `<i style="width:${width * 2}px;${index % 2 ? 'background:transparent;' : ''}"></i>`).join('')}
+    </div>
+  `;
+}
+
+function sampleIdTemplateText(element) {
+  const samples = {
+    fullName: 'Alex Student',
+    firstName: 'Alex',
+    lastName: 'Student',
+    homeroom: 'HR: Martinez',
+    studentId: 'ID #: 123456',
+    extra1: 'Grade 5',
+    extra2: 'Track A',
+    year: jobsState.directorySchoolYear || '2025-2026'
+  };
+  return samples[element.field] || element.label || 'Text';
+}
+
+function renderIdTemplateProperties() {
+  const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
+  const key = jobsState.idTemplateDesigner.selectedElement;
+  const element = template.elements && template.elements[key];
+  if (!element) {
+    idTemplateProperties.innerHTML = '<div class="empty-state">Select an element to edit its position and style.</div>';
+    return;
+  }
+  const isText = element.kind === 'text';
+  const isBarcode = element.kind === 'barcode';
+  idTemplateProperties.innerHTML = `
+    <h3>${escapeHtml(element.label || key)}</h3>
+    <label class="checkbox-label">
+      <input data-id-template-property="enabled" type="checkbox" ${element.enabled !== false ? 'checked' : ''}>
+      <span>Show element</span>
+    </label>
+    <div class="id-template-property-grid">
+      ${['x', 'y', 'w', 'h'].map((property) => `
+        <label>
+          <span>${property.toUpperCase()}</span>
+          <input data-id-template-property="${property}" type="number" value="${Number(element[property] || 0)}">
+        </label>
+      `).join('')}
+    </div>
+    ${isBarcode ? `
+      <label>
+        <span>Symbology</span>
+        <input value="CODE128" disabled>
+      </label>
+      <label>
+        <span>Barcode Height</span>
+        <input data-id-template-property="size" type="number" min="20" max="220" value="${Number(element.size || element.h || 70)}">
+      </label>
+    ` : ''}
+    ${isText ? `
+      <label>
+        <span>Field</span>
+        <select data-id-template-property="field">
+          ${['fullName', 'firstName', 'lastName', 'homeroom', 'studentId', 'extra1', 'extra2', 'year'].map((field) => `
+            <option value="${field}" ${element.field === field ? 'selected' : ''}>${escapeHtml(formatType(field))}</option>
+          `).join('')}
+        </select>
+      </label>
+      <div class="id-template-property-grid">
+        <label>
+          <span>Font</span>
+          <input data-id-template-property="font" value="${escapeHtml(element.font || 'Arial')}">
+        </label>
+        <label>
+          <span>Size</span>
+          <input data-id-template-property="size" type="number" value="${Number(element.size || 32)}">
+        </label>
+        <label>
+          <span>Color</span>
+          <input data-id-template-property="color" type="color" value="${escapeHtml(element.color || '#000000')}">
+        </label>
+        <label>
+          <span>Alignment</span>
+          <select data-id-template-property="align">
+            ${['left', 'center', 'right'].map((align) => `
+              <option value="${align}" ${element.align === align ? 'selected' : ''}>${escapeHtml(formatType(align))}</option>
+            `).join('')}
+          </select>
+        </label>
+      </div>
+    ` : ''}
+  `;
+}
+
+async function loadIdTemplateDesigner() {
+  const payload = await trecsApi('listIdTemplates').listIdTemplates(jobsState.selectedJobId);
+  jobsState.idTemplateDesigner = {
+    ...jobsState.idTemplateDesigner,
+    loaded: true,
+    folder: payload.folder || '',
+    templates: payload.templates || [],
+    backgrounds: payload.backgrounds || [],
+    template: jobsState.idTemplateDesigner.template || createDefaultIdTemplate()
+  };
+  renderIdTemplateDesigner();
+}
+
+async function loadIdTemplateFile(fileName) {
+  const result = await trecsApi('loadIdTemplate').loadIdTemplate(jobsState.selectedJobId, fileName);
+  jobsState.idTemplateDesigner.selectedFileName = result.fileName;
+  jobsState.idTemplateDesigner.selectedTemplateId = Number(result.fileName);
+  jobsState.idTemplateDesigner.template = normalizeIdTemplateForDesigner(result.template);
+  jobsState.idTemplateDesigner.selectedElement = 'photo';
+  renderIdTemplateDesigner();
+}
+
+async function saveCurrentIdTemplate() {
+  const designer = jobsState.idTemplateDesigner;
+  const template = normalizeIdTemplateForDesigner(designer.template || createDefaultIdTemplate());
+  template.name = idTemplateForm.elements.templateName.value.trim() || 'Student ID';
+  template.templateType = idTemplateForm.elements.templateType.value === 'staff' ? 'staff' : 'student';
+  setIdTemplateOrientation(template, idTemplateForm.elements.orientation.value);
+  template.background = idTemplateForm.elements.background.value || '';
+  const result = await trecsApi('saveIdTemplate').saveIdTemplate(jobsState.selectedJobId, {
+    id: designer.selectedTemplateId,
+    template
+  });
+  designer.template = result.template;
+  designer.selectedFileName = result.fileName;
+  designer.selectedTemplateId = result.id;
+  designer.loaded = false;
+  idTemplateStatus.textContent = `Saved ${result.fileName}`;
+  await loadIdTemplateDesigner();
+}
+
+function updateSelectedIdTemplateElement(property, value, inputType) {
+  const template = jobsState.idTemplateDesigner.template;
+  const element = template && template.elements && template.elements[jobsState.idTemplateDesigner.selectedElement];
+  if (!element) {
+    return;
+  }
+  if (property === 'enabled') {
+    element.enabled = Boolean(value);
+  } else if (['x', 'y', 'w', 'h', 'size'].includes(property)) {
+    element[property] = Number(value || 0);
+  } else {
+    element[property] = inputType === 'color' ? value : String(value || '');
+  }
+  renderIdTemplateStage();
+  renderIdTemplateProperties();
 }
 
 function selectedSisFormats(useFallback = true) {
@@ -4147,8 +4549,8 @@ function adminRenderRequest(type) {
     sisFormats: selectedSisFormats(),
     idCardSource: jobsState.idCardSource,
     idCardListName: jobsState.idCardListName,
-    idCardLayout: jobsState.idCardLayout,
     idCardReason: jobsState.idCardReason,
+    idCardSortMethod: jobsState.idCardSortMethod,
     idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
     directoryType: jobsState.directoryType,
     directorySource: jobsState.directorySource,
@@ -4205,7 +4607,9 @@ function renderAdminItemsWorkspace() {
   ensureAdminOutputControls();
   resetAdminSchoolYearForCurrentJob();
   adminOptionsForm.elements.stage.value = jobsState.adminStage;
-  adminOptionsForm.elements.sortBy.value = jobsState.adminSortBy;
+  if (adminOptionsForm.elements.sortBy) {
+    adminOptionsForm.elements.sortBy.value = jobsState.adminSortBy;
+  }
   if (adminOptionsForm.elements.schoolYear) {
     adminOptionsForm.elements.schoolYear.value = jobsState.directorySchoolYear || schoolYearFromJobName(currentJobSummary());
   }
@@ -4254,13 +4658,19 @@ function renderAdminItemsWorkspace() {
         <section class="admin-checklist-group">
           <h3>${escapeHtml(group)}</h3>
           ${items.filter((item) => item.group === group).map((item) => `
-            <label class="admin-check-row">
-              <input data-admin-item-checkbox="${escapeHtml(item.type)}" type="checkbox" ${selectedItems.has(item.type) ? 'checked' : ''}>
-              <span>
-                <strong>${escapeHtml(item.label)}</strong>
-                <em>${escapeHtml(item.detail)}</em>
-              </span>
-            </label>
+            <div class="admin-check-row">
+              <label class="admin-check-label">
+                <input data-admin-item-checkbox="${escapeHtml(item.type)}" type="checkbox" ${selectedItems.has(item.type) ? 'checked' : ''}>
+                <span>
+                  <strong>${escapeHtml(item.label)}</strong>
+                  <em>${escapeHtml(item.detail)}</em>
+                </span>
+              </label>
+              ${item.type === 'school_directory' ? renderDirectoryOptions(data.listNames || []) : ''}
+              ${item.type === 'id_cards' ? renderIdCardOptions(data.listNames || []) : ''}
+              ${item.type === 'sis_export' ? renderSisOptions() : ''}
+              ${item.type === 'sticker_prints' ? renderStickerOptions(data.listNames || []) : ''}
+            </div>
           `).join('')}
         </section>
       `).join('')}
@@ -4305,6 +4715,10 @@ function renderAdminItemsWorkspace() {
     });
   }
 
+  bindDirectoryOptions();
+  bindIdCardOptions();
+  bindSisOptions();
+  bindStickerOptions();
   renderAdminRunState();
 }
 
@@ -4480,45 +4894,89 @@ function setNewSchoolFormVisible(visible) {
   renderImportPreviousJobForm();
 }
 
-function populateJobSetupOptions(form) {
+function populateJobSetupOptions(form, options = {}) {
   if (!form) {
     return;
   }
 
   const clientSelect = form.elements.clientId;
   const packageSelect = form.elements.packagePlanId;
-  const currentClientId = clientSelect.value;
-  const currentPackagePlanId = packageSelect.value;
+  const studentTemplateSelect = form.elements.studentIdTemplateId;
+  const staffTemplateSelect = form.elements.facultyIdTemplateId;
+  const currentClientId = clientSelect ? clientSelect.value : '';
+  const currentPackagePlanId = packageSelect ? packageSelect.value : '';
+  const currentStudentTemplateId = studentTemplateSelect ? studentTemplateSelect.value : '';
+  const currentStaffTemplateId = staffTemplateSelect ? staffTemplateSelect.value : '';
 
-  clientSelect.innerHTML = jobsState.clients
-    .length
-    ? jobsState.clients
-      .map((client) => `
-        <option value="${client.id}">
-          ${escapeHtml(client.trecsName || client.displayName)}
-        </option>
-      `)
-      .join('')
-    : '<option value="">Add a school first</option>';
+  if (clientSelect) {
+    clientSelect.innerHTML = jobsState.clients
+      .length
+      ? jobsState.clients
+        .map((client) => `
+          <option value="${client.id}">
+            ${escapeHtml(client.trecsName || client.displayName)}
+          </option>
+        `)
+        .join('')
+      : '<option value="">Add a school first</option>';
+  }
 
-  packageSelect.innerHTML = `
-    <option value="">No package plan</option>
-    ${jobsState.packagePlans
-      .map((plan) => `
-        <option value="${plan.id}">
-          ${escapeHtml(plan.name)}${plan.version > 1 ? ` v${plan.version}` : ''}
-        </option>
-      `)
-      .join('')}
-  `;
+  if (packageSelect) {
+    packageSelect.innerHTML = `
+      <option value="">No package plan</option>
+      ${jobsState.packagePlans
+        .map((plan) => `
+          <option value="${plan.id}">
+            ${escapeHtml(plan.name)}${plan.version > 1 ? ` v${plan.version}` : ''}
+          </option>
+        `)
+        .join('')}
+    `;
+  }
 
-  if (currentClientId && jobsState.clients.some((client) => String(client.id) === currentClientId)) {
+  if (clientSelect && currentClientId && jobsState.clients.some((client) => String(client.id) === currentClientId)) {
     clientSelect.value = currentClientId;
-  } else if (jobsState.selectedNewClientId) {
+  } else if (clientSelect && jobsState.selectedNewClientId) {
     clientSelect.value = String(jobsState.selectedNewClientId);
   }
-  if (currentPackagePlanId && jobsState.packagePlans.some((plan) => String(plan.id) === currentPackagePlanId)) {
+  if (packageSelect && currentPackagePlanId && jobsState.packagePlans.some((plan) => String(plan.id) === currentPackagePlanId)) {
     packageSelect.value = currentPackagePlanId;
+  }
+
+  if (studentTemplateSelect) {
+    const studentTemplates = (jobsState.idCardTemplates || []).filter((template) => template.templateType === 'student');
+    studentTemplateSelect.innerHTML = `
+      <option value="">Use latest Student ID template</option>
+      ${studentTemplates.map((template) => `
+        <option value="${template.id}">${escapeHtml(template.name)}</option>
+      `).join('')}
+    `;
+    if (currentStudentTemplateId && studentTemplates.some((template) => String(template.id) === currentStudentTemplateId)) {
+      studentTemplateSelect.value = currentStudentTemplateId;
+    } else if (options.applyDefaults !== false) {
+      const defaultStudent = studentTemplates.find((template) => /^student id$/i.test(template.name));
+      if (defaultStudent) {
+        studentTemplateSelect.value = String(defaultStudent.id);
+      }
+    }
+  }
+
+  if (staffTemplateSelect) {
+    const staffTemplates = (jobsState.idCardTemplates || []).filter((template) => template.templateType === 'staff');
+    staffTemplateSelect.innerHTML = `
+      <option value="">Use latest Staff ID template</option>
+      ${staffTemplates.map((template) => `
+        <option value="${template.id}">${escapeHtml(template.name)}</option>
+      `).join('')}
+    `;
+    if (currentStaffTemplateId && staffTemplates.some((template) => String(template.id) === currentStaffTemplateId)) {
+      staffTemplateSelect.value = currentStaffTemplateId;
+    } else if (options.applyDefaults !== false) {
+      const defaultStaff = staffTemplates.find((template) => /^staff id$/i.test(template.name));
+      if (defaultStaff) {
+        staffTemplateSelect.value = String(defaultStaff.id);
+      }
+    }
   }
 }
 
@@ -4584,6 +5042,74 @@ function resetNewJobForm() {
   const fallPlan = jobsState.packagePlans.find((plan) => /fall/i.test(plan.name));
   if (fallPlan) {
     newJobForm.elements.packagePlanId.value = String(fallPlan.id);
+  }
+}
+
+function openEditJobModal() {
+  if (!editJobModal || !editJobForm || !jobsState.detail || !jobsState.detail.summary) {
+    return;
+  }
+  const job = jobsState.detail.summary;
+  editJobForm.reset();
+  populateJobSetupOptions(editJobForm, { applyDefaults: false });
+  editJobForm.elements.name.value = job.job || job.name || '';
+  editJobForm.elements.type.value = job.type || 'fall';
+  editJobForm.elements.packagePlanId.value = job.packagePlanId ? String(job.packagePlanId) : '';
+  editJobForm.elements.studentIdTemplateId.value = job.studentIdTemplateId ? String(job.studentIdTemplateId) : '';
+  editJobForm.elements.facultyIdTemplateId.value = job.facultyIdTemplateId ? String(job.facultyIdTemplateId) : '';
+  editJobForm.elements.shootDate.value = job.shootDate || '';
+  editJobForm.elements.retakeDate.value = job.retakeDate || '';
+  editJobForm.elements.rootPath.value = job.rootPath || '';
+  editJobForm.elements.notes.value = job.notes || '';
+  editJobStatus.textContent = '';
+  editJobModal.hidden = false;
+  editJobForm.elements.name.focus();
+  editJobForm.elements.name.select();
+}
+
+function closeEditJobModal() {
+  if (!editJobModal) {
+    return;
+  }
+  editJobModal.hidden = true;
+  if (editJobStatus) {
+    editJobStatus.textContent = '';
+  }
+}
+
+async function submitEditJob(event) {
+  event.preventDefault();
+  if (!jobsState.selectedJobId) {
+    return;
+  }
+  const button = editJobForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = 'Saving...';
+  editJobStatus.textContent = 'Saving...';
+
+  try {
+    await trecsApi('updateJob').updateJob(jobsState.selectedJobId, {
+      name: editJobForm.elements.name.value,
+      type: editJobForm.elements.type.value,
+      packagePlanId: editJobForm.elements.packagePlanId.value,
+      studentIdTemplateId: editJobForm.elements.studentIdTemplateId.value,
+      facultyIdTemplateId: editJobForm.elements.facultyIdTemplateId.value,
+      shootDate: editJobForm.elements.shootDate.value,
+      retakeDate: editJobForm.elements.retakeDate.value,
+      rootPath: editJobForm.elements.rootPath.value,
+      notes: editJobForm.elements.notes.value
+    });
+    closeEditJobModal();
+    jobsState.detail = null;
+    await loadDashboard();
+    await loadJobs();
+    await loadJobDetail(jobsState.selectedJobId);
+  } catch (error) {
+    editJobStatus.textContent = error.message || 'Save failed';
+    console.error(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Save Job';
   }
 }
 
@@ -6562,6 +7088,7 @@ async function loadJobs() {
   jobsState.types = data.types;
   jobsState.clients = data.clients || [];
   jobsState.packagePlans = data.packagePlans || [];
+  jobsState.idCardTemplates = data.idCardTemplates || [];
   jobsState.studentFieldSettings = fieldSettings || defaultStudentFieldSettings();
   renderNewSchoolForm();
   renderNewJobForm();
@@ -6617,6 +7144,8 @@ async function submitNewJob(event) {
       name: newJobForm.elements.name.value,
       type: newJobForm.elements.type.value,
       packagePlanId: newJobForm.elements.packagePlanId.value,
+      studentIdTemplateId: newJobForm.elements.studentIdTemplateId.value,
+      facultyIdTemplateId: newJobForm.elements.facultyIdTemplateId.value,
       shootDate: newJobForm.elements.shootDate.value,
       retakeDate: newJobForm.elements.retakeDate.value,
       rootPath: newJobForm.elements.rootPath.value,
@@ -6845,7 +7374,9 @@ jobSearchInput.addEventListener('input', () => {
 });
 
 backToJobsButton.addEventListener('click', () => {
-  if (jobsState.workspaceMode === 'capture' || jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
+  if (jobsState.workspaceMode === 'idTemplates') {
+    setWorkspaceMode('admin');
+  } else if (jobsState.workspaceMode === 'capture' || jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
     setWorkspaceMode('students');
   } else {
     closeJobWorkspace();
@@ -6877,6 +7408,160 @@ if (workspaceEnvelopeButton) {
 if (workspaceAdminItemsButton) {
   workspaceAdminItemsButton.addEventListener('click', () => {
     setWorkspaceMode('admin');
+  });
+}
+
+if (workspaceEditJobButton) {
+  workspaceEditJobButton.addEventListener('click', openEditJobModal);
+}
+
+if (cancelEditJobButton) {
+  cancelEditJobButton.addEventListener('click', closeEditJobModal);
+}
+
+if (editJobForm) {
+  editJobForm.addEventListener('submit', submitEditJob);
+}
+
+if (openIdTemplateDesignerButton) {
+  openIdTemplateDesignerButton.addEventListener('click', () => {
+    setWorkspaceMode('idTemplates');
+  });
+}
+
+if (idTemplateBackButton) {
+  idTemplateBackButton.addEventListener('click', () => {
+    setWorkspaceMode('admin');
+  });
+}
+
+if (newIdTemplateButton) {
+  newIdTemplateButton.addEventListener('click', () => {
+    jobsState.idTemplateDesigner.template = createDefaultIdTemplate();
+    jobsState.idTemplateDesigner.selectedFileName = '';
+    jobsState.idTemplateDesigner.selectedTemplateId = null;
+    jobsState.idTemplateDesigner.selectedElement = 'photo';
+    idTemplateStatus.textContent = 'New template';
+    renderIdTemplateDesigner();
+  });
+}
+
+if (idTemplateList) {
+  idTemplateList.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-id-template-file]');
+    if (!button) {
+      return;
+    }
+    loadIdTemplateFile(button.dataset.idTemplateFile).catch((error) => {
+      idTemplateStatus.textContent = error.message || 'Could not load template';
+      console.error(error);
+    });
+  });
+}
+
+if (idTemplateForm) {
+  idTemplateForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    saveCurrentIdTemplate().catch((error) => {
+      idTemplateStatus.textContent = error.message || 'Could not save template';
+      console.error(error);
+    });
+  });
+  idTemplateForm.addEventListener('change', () => {
+    const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
+    jobsState.idTemplateDesigner.template = template;
+    template.name = idTemplateForm.elements.templateName.value.trim() || template.name;
+    template.templateType = idTemplateForm.elements.templateType.value === 'staff' ? 'staff' : 'student';
+    setIdTemplateOrientation(template, idTemplateForm.elements.orientation.value);
+    template.background = idTemplateForm.elements.background.value || '';
+    renderIdTemplateStage();
+  });
+}
+
+if (chooseIdTemplateBackgroundButton) {
+  chooseIdTemplateBackgroundButton.addEventListener('click', async () => {
+    try {
+      const result = await trecsApi('chooseIdTemplateBackground').chooseIdTemplateBackground(jobsState.selectedJobId);
+      if (!result || result.canceled) {
+        return;
+      }
+      jobsState.idTemplateDesigner.backgrounds.push(result);
+      const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
+      template.background = result.fileName;
+      jobsState.idTemplateDesigner.template = template;
+      renderIdTemplateDesigner();
+    } catch (error) {
+      idTemplateStatus.textContent = error.message || 'Could not import background';
+      console.error(error);
+    }
+  });
+}
+
+if (idTemplateStage) {
+  idTemplateStage.addEventListener('pointerdown', (event) => {
+    const elementNode = event.target.closest('[data-id-template-element]');
+    if (!elementNode) {
+      return;
+    }
+    const key = elementNode.dataset.idTemplateElement;
+    const template = jobsState.idTemplateDesigner.template;
+    const element = template && template.elements && template.elements[key];
+    if (!element) {
+      return;
+    }
+    jobsState.idTemplateDesigner.selectedElement = key;
+    jobsState.idTemplateDesigner.drag = {
+      key,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: Number(element.x || 0),
+      originY: Number(element.y || 0)
+    };
+    elementNode.setPointerCapture(event.pointerId);
+    renderIdTemplateStage();
+    renderIdTemplateProperties();
+  });
+
+  idTemplateStage.addEventListener('pointermove', (event) => {
+    const drag = jobsState.idTemplateDesigner.drag;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    const template = jobsState.idTemplateDesigner.template;
+    const element = template && template.elements && template.elements[drag.key];
+    if (!element) {
+      return;
+    }
+    const rect = idTemplateStage.getBoundingClientRect();
+    const card = idTemplateCardSize(template);
+    const scaleX = card.width / rect.width;
+    const scaleY = card.height / rect.height;
+    element.x = Math.max(0, Math.round(drag.originX + ((event.clientX - drag.startX) * scaleX)));
+    element.y = Math.max(0, Math.round(drag.originY + ((event.clientY - drag.startY) * scaleY)));
+    renderIdTemplateStage();
+    renderIdTemplateProperties();
+  });
+
+  idTemplateStage.addEventListener('pointerup', (event) => {
+    const drag = jobsState.idTemplateDesigner.drag;
+    if (drag && drag.pointerId === event.pointerId) {
+      jobsState.idTemplateDesigner.drag = null;
+    }
+  });
+}
+
+if (idTemplateProperties) {
+  idTemplateProperties.addEventListener('change', (event) => {
+    const control = event.target.closest('[data-id-template-property]');
+    if (!control) {
+      return;
+    }
+    updateSelectedIdTemplateElement(
+      control.dataset.idTemplateProperty,
+      control.type === 'checkbox' ? control.checked : control.value,
+      control.type
+    );
   });
 }
 
