@@ -462,6 +462,25 @@ CREATE TABLE IF NOT EXISTS admin_item_batches (
   error_message TEXT
 );
 
+CREATE TABLE IF NOT EXISTS end_of_day_imports (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  package_name TEXT,
+  package_folder TEXT NOT NULL,
+  photographer_name TEXT,
+  workstation_name TEXT,
+  shoot_stage TEXT,
+  captured_images INTEGER NOT NULL DEFAULT 0,
+  raw_files INTEGER NOT NULL DEFAULT 0,
+  new_subjects INTEGER NOT NULL DEFAULT 0,
+  edited_subjects INTEGER NOT NULL DEFAULT 0,
+  copied_files INTEGER NOT NULL DEFAULT 0,
+  imported_by TEXT,
+  imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  manifest_json TEXT,
+  UNIQUE(job_id, package_folder)
+);
+
 CREATE TABLE IF NOT EXISTS migration_sources (
   id INTEGER PRIMARY KEY,
   source_type TEXT NOT NULL,
@@ -508,3 +527,4 @@ CREATE INDEX IF NOT EXISTS idx_orders_source_reference ON orders(source_referenc
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_render_tasks_status ON render_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id ON admin_item_batches(job_id, shoot_stage, admin_item_type);
+CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id ON end_of_day_imports(job_id, imported_at);

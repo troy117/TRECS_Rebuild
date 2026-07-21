@@ -500,6 +500,25 @@ function createJobDatabaseSchema(database) {
       completed_at TEXT,
       error_message TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS end_of_day_imports (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      package_name TEXT,
+      package_folder TEXT NOT NULL,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      shoot_stage TEXT,
+      captured_images INTEGER NOT NULL DEFAULT 0,
+      raw_files INTEGER NOT NULL DEFAULT 0,
+      new_subjects INTEGER NOT NULL DEFAULT 0,
+      edited_subjects INTEGER NOT NULL DEFAULT 0,
+      copied_files INTEGER NOT NULL DEFAULT 0,
+      imported_by TEXT,
+      imported_at TEXT,
+      manifest_json TEXT,
+      UNIQUE(job_id, package_folder)
+    );
   `);
 }
 
@@ -963,6 +982,28 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id
       ON admin_item_batches(job_id, shoot_stage, admin_item_type);
+
+      CREATE TABLE IF NOT EXISTS end_of_day_imports (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        package_name TEXT,
+        package_folder TEXT NOT NULL,
+        photographer_name TEXT,
+        workstation_name TEXT,
+        shoot_stage TEXT,
+        captured_images INTEGER NOT NULL DEFAULT 0,
+        raw_files INTEGER NOT NULL DEFAULT 0,
+        new_subjects INTEGER NOT NULL DEFAULT 0,
+        edited_subjects INTEGER NOT NULL DEFAULT 0,
+        copied_files INTEGER NOT NULL DEFAULT 0,
+        imported_by TEXT,
+        imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        manifest_json TEXT,
+        UNIQUE(job_id, package_folder)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id
+      ON end_of_day_imports(job_id, imported_at);
 
       CREATE TABLE IF NOT EXISTS envelope_scans (
         id INTEGER PRIMARY KEY,
@@ -1455,6 +1496,35 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   };
   const manifestPath = path.join(setupPath, 'onsite-setup.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  await writeSql((database) => {
+    const statement = database.prepare(`
+      INSERT INTO admin_item_batches (
+        job_id,
+        shoot_stage,
+        admin_item_type,
+        status,
+        options_json,
+        output_path,
+        created_by,
+        created_at,
+        completed_at
+      )
+      VALUES (?, 'picture_day_prep', 'onsite_setup', 'complete', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+    `);
+    try {
+      statement.run([
+        jobId,
+        JSON.stringify({
+          subjects: job.subjects,
+          croppedMediumImages: copiedCroppedMed
+        }),
+        setupPath,
+        process.env.USERNAME || os.userInfo().username || null
+      ]);
+    } finally {
+      statement.free();
+    }
+  });
 
   return {
     packagePath: setupPath,
@@ -2246,6 +2316,11 @@ const ADMIN_ITEM_TYPES = new Map([
     extension: 'jpg',
     stages: ['original_picture_day', 'makeup_day']
   }],
+  ['camera_cards', {
+    label: 'Camera Cards',
+    extension: 'jpg',
+    stages: ['original_picture_day', 'makeup_day']
+  }],
   ['sticker_prints', {
     label: 'Sticker Prints',
     extension: 'csv',
@@ -2434,6 +2509,34 @@ function normalizeIdCardSortMethod(value) {
     throw new Error('Invalid ID card sort method');
   }
   return sort;
+}
+
+function normalizeCameraCardSource(value) {
+  const source = String(value || 'all').trim();
+  const allowed = new Set(['all', 'grade', 'homeroom', 'track', 'list']);
+  if (!allowed.has(source)) {
+    throw new Error('Invalid camera card source');
+  }
+  return source;
+}
+
+function normalizeCameraCardSortMethod(value) {
+  const sort = String(value || 'alpha_grade').trim();
+  const allowed = new Set(['alpha_homeroom', 'alpha_track', 'alpha_grade', 'alpha_school', 'ref']);
+  if (!allowed.has(sort)) {
+    throw new Error('Invalid camera card sort method');
+  }
+  return sort;
+}
+
+function cameraCardSortFileLabel(value) {
+  return {
+    alpha_homeroom: 'Alpha-by-Homeroom',
+    alpha_track: 'Alpha-by-Track',
+    alpha_grade: 'Alpha-by-Grade',
+    alpha_school: 'Alpha-by-School',
+    ref: 'Reference-Number'
+  }[value] || 'Alpha-by-Grade';
 }
 
 function csvValue(value) {
@@ -2850,6 +2953,55 @@ function selectedIdCardSubjects(subjects, options, listSubjectIds) {
   });
 }
 
+function selectedCameraCardSubjects(subjects, options, listSubjectIds) {
+  const source = options.cameraCardSource || 'all';
+  const value = String(options.cameraCardSourceValue || '').trim();
+  return subjects.filter((subject) => {
+    if (source === 'list') {
+      return listSubjectIds.has(subject.id);
+    }
+    if (source === 'grade') {
+      return String(subject.grade || '') === value;
+    }
+    if (source === 'homeroom') {
+      return String(subject.homeroom || '') === value;
+    }
+    if (source === 'track') {
+      return String(subject.track || '') === value;
+    }
+    return true;
+  });
+}
+
+function sortCameraCardSubjects(subjects, sortMethod) {
+  const sortParts = {
+    alpha_homeroom: ['homeroom', 'lastName', 'firstName', 'ref'],
+    alpha_track: ['track', 'lastName', 'firstName', 'ref'],
+    alpha_grade: ['grade', 'lastName', 'firstName', 'ref'],
+    alpha_school: ['lastName', 'firstName', 'grade', 'homeroom', 'ref'],
+    ref: ['ref']
+  }[sortMethod] || ['grade', 'lastName', 'firstName', 'ref'];
+
+  return [...subjects].sort((first, second) => {
+    for (const key of sortParts) {
+      const firstValue = key === 'lastName' || key === 'firstName'
+        ? String(first[key] || '').toLowerCase()
+        : subjectSortValue(first, key);
+      const secondValue = key === 'lastName' || key === 'firstName'
+        ? String(second[key] || '').toLowerCase()
+        : subjectSortValue(second, key);
+      const comparison = firstValue.localeCompare(secondValue, undefined, {
+        numeric: true,
+        sensitivity: 'base'
+      });
+      if (comparison !== 0) {
+        return comparison;
+      }
+    }
+    return 0;
+  });
+}
+
 function buildIdCardRows(subjects, options) {
   return sortDirectorySubjects(subjects, options.idCardSortMethod).map((subject, index) => {
     const image = subjectImageChoice(subject, 'production');
@@ -2931,7 +3083,7 @@ function adminOutputAbsolutePath(outputPath) {
   return path.isAbsolute(outputPath) ? outputPath : path.join(projectRoot, outputPath);
 }
 
-function adminOutputPathForRequest(job, stage, type, extension, outputFolderValue, date = new Date()) {
+function adminOutputPathForRequest(job, stage, type, extension, outputFolderValue, date = new Date(), options = {}) {
   const outputFolder = optionalText(outputFolderValue, 1000);
   if (!outputFolder) {
     return adminOutputRelativePath(job, stage, type, extension, date);
@@ -2947,6 +3099,8 @@ function adminOutputPathForRequest(job, stage, type, extension, outputFolderValu
       ? `MugBook_${safeFolderName(job.location || job.clientName || 'School')}_0.jpg`
       : type === 'missing_photo_report'
         ? `${safeFolderName(job.location || job.clientName || 'School')}_Photography_Report.xlsx`
+      : type === 'camera_cards'
+        ? `CameraCards_${safeFolderName(job.location || job.clientName || 'School')}_${safeFolderName(cameraCardSortFileLabel(options.cameraCardSortMethod))}_${timestampForFolder(date)}.${extension}`
     : `${safeFolderName(type)}-${timestampForFolder(date)}.${extension}`;
   return path.join(schoolOutputFolder, filename);
 }
@@ -3199,6 +3353,29 @@ function idCardSubjectTsvRow(subject) {
   ].map(tsvValue).join('\t');
 }
 
+async function ensureCameraCardSheetRenderer() {
+  await ensureBundledJavaTool('CameraCardSheetRenderer', cameraCardJavaClasspath());
+}
+
+function cameraCardJavaClasspath() {
+  return [
+    'tools',
+    path.join('JARS', 'zxing-core-1.7.jar')
+  ].join(path.delimiter);
+}
+
+function cameraCardSubjectTsvRow(subject) {
+  return [
+    subject.ref,
+    subject.firstName,
+    subject.lastName,
+    subject.grade,
+    subject.homeroom,
+    subject.track,
+    subject.externalId
+  ].map(tsvValue).join('\t');
+}
+
 function jpegDimensions(filePath) {
   const buffer = fs.readFileSync(filePath);
   let offset = 2;
@@ -3236,12 +3413,12 @@ function pdfStream(dictionary, streamBuffer) {
   ]);
 }
 
-function writeJpegSheetsPdf(pdfPath, jpgPaths) {
+function writeJpegSheetsPdf(pdfPath, jpgPaths, options = {}) {
   if (!jpgPaths.length) {
     return null;
   }
-  const pageWidthPoints = 864;
-  const pageHeightPoints = 1296;
+  const pageWidthPoints = Number(options.pageWidthPoints || 864);
+  const pageHeightPoints = Number(options.pageHeightPoints || 1296);
   const objects = [];
   const pageObjectNumbers = [];
 
@@ -3399,6 +3576,58 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
   return {
     subjects: idCardSubjects.length,
     renderedFiles
+  };
+}
+
+async function renderCameraCardSheets(job, subjects, options, outputPath, absoluteOutputPath) {
+  await ensureCameraCardSheetRenderer();
+  const outputFolder = path.dirname(absoluteOutputPath);
+  fs.mkdirSync(outputFolder, { recursive: true });
+
+  const cameraCardSubjects = sortCameraCardSubjects(subjects, options.cameraCardSortMethod);
+  if (!cameraCardSubjects.length) {
+    throw new Error('No students matched the camera card render options');
+  }
+
+  const timestamp = timestampForFolder(new Date());
+  const tsvPath = path.join(outputFolder, `camera-card-subjects-${timestamp}.tsv`);
+  fs.writeFileSync(tsvPath, cameraCardSubjects.map(cameraCardSubjectTsvRow).join('\r\n'));
+
+  await processOutput('java', [
+    '-cp',
+    cameraCardJavaClasspath(),
+    'CameraCardSheetRenderer',
+    absoluteOutputPath,
+    base64Arg(job.clientName || job.location || ''),
+    tsvPath,
+    base64Arg('CCPage')
+  ], { cwd: bundledResourceRoot });
+
+  const stem = path.basename(absoluteOutputPath, path.extname(absoluteOutputPath));
+  const renderedFiles = fs.readdirSync(outputFolder)
+    .filter((name) => name === path.basename(absoluteOutputPath) || (name.startsWith(`${stem}_`) && name.toLowerCase().endsWith('.jpg')))
+    .sort();
+  const renderedPaths = renderedFiles.map((name) => path.join(outputFolder, name));
+  const pdfPath = options.cameraCardPdfOnly ? path.join(outputFolder, `${stem}.pdf`) : null;
+  if (options.cameraCardPdfOnly) {
+    writeJpegSheetsPdf(pdfPath, renderedPaths, {
+      pageWidthPoints: 1224,
+      pageHeightPoints: 792
+    });
+    renderedPaths.forEach((filePath) => {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+  }
+  if (fs.existsSync(tsvPath)) {
+    fs.unlinkSync(tsvPath);
+  }
+  return {
+    subjects: cameraCardSubjects.length,
+    renderedFiles: options.cameraCardPdfOnly ? [] : renderedFiles,
+    pdfPath,
+    displayPath: options.cameraCardPdfOnly ? pdfPath : absoluteOutputPath
   };
 }
 
@@ -3710,6 +3939,17 @@ async function adminListNames(jobId) {
   return rows.map((row) => row.name);
 }
 
+function uniqueSubjectValues(subjects, key) {
+  return Array.from(new Set(
+    subjects
+      .map((subject) => String(subject[key] || '').trim())
+      .filter(Boolean)
+  )).sort((first, second) => first.localeCompare(second, undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  }));
+}
+
 async function adminListSubjectIds(jobId, listName) {
   if (!listName) {
     return new Set();
@@ -4013,8 +4253,76 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
       staff: subjects.filter((subject) => ['faculty', 'staff'].includes(subject.subjectType)).length
     },
     listNames,
+    filterOptions: {
+      grades: uniqueSubjectValues(subjects, 'grade'),
+      homerooms: uniqueSubjectValues(subjects, 'homeroom'),
+      tracks: uniqueSubjectValues(subjects, 'track')
+    },
     items: adminItemDefinitionsForStage(stage),
     batches
+  };
+}
+
+async function getPictureDayPrep(_event, jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const [job, listNames, adminBatches, endOfDayImports] = await Promise.all([
+    adminJobSummary(jobId),
+    adminListNames(jobId),
+    querySql(`
+      SELECT
+        id,
+        shoot_stage AS shootStage,
+        admin_item_type AS adminItemType,
+        status,
+        options_json AS optionsJson,
+        output_path AS outputPath,
+        created_by AS createdBy,
+        created_at AS createdAt,
+        completed_at AS completedAt,
+        error_message AS errorMessage
+      FROM admin_item_batches
+      WHERE job_id = ${jobId}
+        AND admin_item_type IN ('camera_cards', 'onsite_setup')
+      ORDER BY created_at DESC, id DESC
+      LIMIT 25;
+    `),
+    querySql(`
+      SELECT
+        id,
+        package_name AS packageName,
+        package_folder AS packageFolder,
+        photographer_name AS photographerName,
+        workstation_name AS workstationName,
+        shoot_stage AS shootStage,
+        captured_images AS capturedImages,
+        raw_files AS rawFiles,
+        new_subjects AS newSubjects,
+        edited_subjects AS editedSubjects,
+        copied_files AS copiedFiles,
+        imported_by AS importedBy,
+        imported_at AS importedAt
+      FROM end_of_day_imports
+      WHERE job_id = ${jobId}
+      ORDER BY imported_at DESC, id DESC
+      LIMIT 50;
+    `)
+  ]);
+  const subjects = await adminSubjectRows(jobId);
+  return {
+    job,
+    listNames,
+    filterOptions: {
+      grades: uniqueSubjectValues(subjects, 'grade'),
+      homerooms: uniqueSubjectValues(subjects, 'homeroom'),
+      tracks: uniqueSubjectValues(subjects, 'track')
+    },
+    counts: {
+      subjects: subjects.length,
+      photographed: subjects.filter((subject) => subject.imageFilename).length,
+      blankRecords: subjects.filter((subject) => !String(subject.firstName || subject.lastName || subject.displayName || '').trim()).length
+    },
+    prepHistory: adminBatches,
+    endOfDayImports
   };
 }
 
@@ -4047,6 +4355,11 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     idCardReason: normalizeIdCardReason(input.idCardReason || (stage === 'makeup_day' ? 'makeup_day' : 'admin_batch')),
     idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false,
+    cameraCardSource: normalizeCameraCardSource(input.cameraCardSource),
+    cameraCardSourceValue: optionalText(input.cameraCardSourceValue, 255) || '',
+    cameraCardListName: optionalText(input.cameraCardListName, 255) || '',
+    cameraCardSortMethod: normalizeCameraCardSortMethod(input.cameraCardSortMethod),
+    cameraCardPdfOnly: Boolean(input.cameraCardPdfOnly),
     directoryType: normalizeDirectoryType(input.directoryType),
     directorySource: normalizeDirectorySource(input.directorySource),
     directoryListName: optionalText(input.directoryListName, 255) || '',
@@ -4064,8 +4377,9 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   const job = await adminJobSummary(jobId);
   const subjects = await adminSubjectRows(jobId);
   const createdAt = new Date();
-  const outputPath = adminOutputPathForRequest(job, stage, type, item.extension, options.outputFolder, createdAt);
+  const outputPath = adminOutputPathForRequest(job, stage, type, item.extension, options.outputFolder, createdAt, options);
   const absoluteOutputPath = adminOutputAbsolutePath(outputPath);
+  let renderDetails = {};
 
   fs.mkdirSync(path.dirname(absoluteOutputPath), { recursive: true });
   if (type === 'delivery_envelope_cover') {
@@ -4101,6 +4415,16 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
     await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
+  } else if (type === 'camera_cards') {
+    const cameraListName = options.cameraCardSource === 'list'
+      ? (options.cameraCardListName || options.cameraCardSourceValue)
+      : '';
+    if (options.cameraCardSource === 'list') {
+      options.cameraCardSourceValue = cameraListName;
+    }
+    const listSubjectIds = await adminListSubjectIds(jobId, cameraListName);
+    const cameraCardSubjects = selectedCameraCardSubjects(subjects, options, listSubjectIds);
+    renderDetails = await renderCameraCardSheets(job, cameraCardSubjects, options, outputPath, absoluteOutputPath);
   } else {
     const content = buildAdminContent(type, stage, job, subjects, options);
     fs.writeFileSync(absoluteOutputPath, content);
@@ -4135,19 +4459,24 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     }
 
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
-    return {
-      id: idRows[0].id,
-      outputPath,
-      absoluteOutputPath,
-      type,
-      stage
-    };
+      return {
+        id: idRows[0].id,
+        outputPath,
+        absoluteOutputPath: renderDetails.displayPath || absoluteOutputPath,
+        sourceOutputPath: outputPath,
+        pdfPath: renderDetails.pdfPath || null,
+        subjects: renderDetails.subjects || null,
+        renderedFiles: renderDetails.renderedFiles || [],
+        type,
+        stage
+      };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   return result;
 }
 
 ipcMain.handle('admin-items:get', getAdminItems);
+ipcMain.handle('picture-day:get-prep', getPictureDayPrep);
 ipcMain.handle('admin-items:choose-output-folder', chooseAdminOutputFolder);
 ipcMain.handle('admin-items:render', renderAdminItem);
 ipcMain.handle('id-templates:list', listIdTemplates);
@@ -5246,6 +5575,16 @@ async function approveEndOfDayPackage(_event, input = {}) {
       upsertImportedRowsById(database, 'image_assets', imageRows);
       mergeImportedImageVersionRows(database, imageVersionRows);
       mergeImportedSubjectImageRows(database, packageTables.subject_images);
+      const manifestCounts = approvedManifest.counts || {};
+      const photographerName = (approvedManifest.photographerNames || []).join(', ')
+        || approvedManifest.photographerName
+        || approvedManifest.photographer
+        || null;
+      const workstationName = (approvedManifest.workstationNames || []).join(', ')
+        || approvedManifest.workstationName
+        || approvedManifest.computerName
+        || approvedManifest.workstation
+        || null;
 
       subjectRowsToImport
         .filter((row) => !newSubjectIds.has(Number(row.id)))
@@ -5261,6 +5600,45 @@ async function approveEndOfDayPackage(_event, input = {}) {
             row.id
           ]);
         });
+
+      const importStatement = database.prepare(`
+        INSERT OR REPLACE INTO end_of_day_imports (
+          job_id,
+          package_name,
+          package_folder,
+          photographer_name,
+          workstation_name,
+          shoot_stage,
+          captured_images,
+          raw_files,
+          new_subjects,
+          edited_subjects,
+          copied_files,
+          imported_by,
+          imported_at,
+          manifest_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?);
+      `);
+      try {
+        importStatement.run([
+          jobId,
+          path.basename(packageFolder),
+          packageFolder,
+          photographerName,
+          workstationName,
+          approvedManifest.shootStage || null,
+          Number(manifestCounts.capturedImages || manifestCounts.images || (approvedManifest.copiedImages || []).length || 0),
+          Number(manifestCounts.rawFiles || manifestCounts.cr3Files || 0),
+          newSubjectRows.length,
+          editedSubjects.length,
+          copiedFiles,
+          process.env.USERNAME || os.userInfo().username || null,
+          JSON.stringify(approvedManifest)
+        ]);
+      } finally {
+        importStatement.free();
+      }
 
       return {
         id: jobId,
@@ -9576,8 +9954,24 @@ function menuActionMap(window) {
     createCroppedMedium: menuAction(window, 'Create Cropped Medium', 'create-cropped-medium'),
     imageReview: menuAction(window, 'Image Review', 'image-review'),
     cropTool: menuAction(window, '8x10 Crop Tool', 'crop-tool'),
-    prepareOnsiteSetup: menuAction(window, 'Prepare Onsite Setup', 'prepare-onsite-setup'),
+    pictureDayPrep: menuAction(window, 'Picture Day Prep', 'picture-day-prep'),
+    prepareOnsiteSetup: menuAction(window, 'Make Onsite Setup', 'prepare-onsite-setup'),
+    createCameraCards: menuAction(window, 'Create Camera Cards', 'create-camera-cards'),
     makeEndOfDay: menuAction(window, 'Make End of Day', 'make-end-of-day')
+  };
+}
+
+function pictureDayMenu(actions) {
+  return {
+    label: 'Picture Day',
+    submenu: [
+      actions.pictureDayPrep,
+      { type: 'separator' },
+      actions.createCameraCards,
+      { type: 'separator' },
+      actions.prepareOnsiteSetup,
+      actions.loadOnsiteSetup
+    ]
   };
 }
 
@@ -9591,10 +9985,10 @@ function createContextMenus(window, context) {
           actions.newSchool,
           actions.newJob,
           actions.importPreviousJob,
-          actions.loadOnsiteSetup,
           actions.loadEndOfDay
         ]
       },
+      pictureDayMenu(actions),
       {
         label: 'TRECS',
         submenu: [
@@ -9605,7 +9999,6 @@ function createContextMenus(window, context) {
           actions.adminItems,
           { type: 'separator' },
           actions.cropTool,
-          actions.prepareOnsiteSetup,
           actions.makeEndOfDay
         ]
       }
@@ -9624,13 +10017,13 @@ function createContextMenus(window, context) {
           actions.imageReview
         ]
       },
+      pictureDayMenu(actions),
       {
         label: 'TRECS',
         submenu: [
           actions.newSchool,
           actions.newJob,
           actions.importPreviousJob,
-          actions.loadOnsiteSetup,
           actions.loadEndOfDay,
           { type: 'separator' },
           actions.studentFieldSetup,
@@ -9640,7 +10033,6 @@ function createContextMenus(window, context) {
           actions.adminItems,
           { type: 'separator' },
           actions.cropTool,
-          actions.prepareOnsiteSetup,
           actions.makeEndOfDay
         ]
       }
@@ -9656,13 +10048,13 @@ function createContextMenus(window, context) {
           actions.addBlankRecords
         ]
       },
+      pictureDayMenu(actions),
       {
         label: 'TRECS',
         submenu: [
           actions.newSchool,
           actions.newJob,
           actions.importPreviousJob,
-          actions.loadOnsiteSetup,
           actions.loadEndOfDay,
           { type: 'separator' },
           actions.studentFieldSetup,
@@ -9675,21 +10067,20 @@ function createContextMenus(window, context) {
           actions.syncCroppedImages,
           actions.createCroppedMedium,
           actions.imageReview,
-          actions.cropTool,
-          actions.prepareOnsiteSetup
+          actions.cropTool
         ]
       }
     ];
   }
 
   return [
+    pictureDayMenu(actions),
     {
       label: 'TRECS',
       submenu: [
         actions.newSchool,
         actions.newJob,
         actions.importPreviousJob,
-        actions.loadOnsiteSetup,
         actions.loadEndOfDay,
         { type: 'separator' },
         actions.studentFieldSetup,
@@ -9704,7 +10095,6 @@ function createContextMenus(window, context) {
         actions.createCroppedMedium,
         actions.imageReview,
         actions.cropTool,
-        actions.prepareOnsiteSetup,
         actions.makeEndOfDay
       ]
     }

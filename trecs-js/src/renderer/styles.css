@@ -596,6 +596,21 @@ dd {
   width: 100%;
 }
 
+.camera-cards-card {
+  width: min(92vw, 720px);
+}
+
+.camera-cards-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.camera-cards-card progress {
+  height: 18px;
+  width: 100%;
+}
+
 .empty-state {
   color: #617488;
   padding: 18px;
@@ -1523,6 +1538,118 @@ dd {
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
+}
+
+.picture-day-workspace {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  height: 100%;
+  min-height: 0;
+}
+
+.picture-day-main,
+.picture-day-history {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.picture-day-prep-content,
+.picture-day-eod-history {
+  display: grid;
+  gap: 14px;
+  max-height: 100%;
+  overflow: auto;
+  padding: 14px;
+}
+
+.picture-day-metrics {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.picture-day-metrics article {
+  background: #f7fafc;
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.picture-day-metrics span,
+.eod-history-card dt {
+  color: #617488;
+  display: block;
+  font-size: 12px;
+}
+
+.picture-day-metrics strong {
+  display: block;
+  font-size: 22px;
+  margin-top: 6px;
+}
+
+.picture-day-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.picture-day-section,
+.eod-history-card,
+.picture-day-history-row {
+  border: 1px solid #d7e0e8;
+  border-radius: 6px;
+}
+
+.picture-day-section {
+  display: grid;
+  overflow: hidden;
+}
+
+.picture-day-section h3 {
+  background: #f7fafc;
+  border-bottom: 1px solid #d7e0e8;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.picture-day-history-row,
+.eod-history-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+}
+
+.picture-day-history-row + .picture-day-history-row,
+.eod-history-card + .eod-history-card {
+  margin-top: 10px;
+}
+
+.picture-day-history-row span,
+.picture-day-history-row em,
+.eod-history-card span {
+  color: #617488;
+  font-size: 12px;
+}
+
+.picture-day-history-row code,
+.eod-history-card code {
+  color: #3f5368;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.eod-history-card dl {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.eod-history-card dd {
+  margin: 2px 0 0;
 }
 
 .job-student-workspace.capture-mode .capture-entry-panel .panel-heading,

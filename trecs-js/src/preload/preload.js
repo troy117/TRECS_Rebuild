@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('trecs', {
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
   importSchoolData: (jobId, input) => ipcRenderer.invoke('school-data:import', jobId, input),
   getAdminItems: (jobId, stage) => ipcRenderer.invoke('admin-items:get', jobId, stage),
+  getPictureDayPrep: (jobId) => ipcRenderer.invoke('picture-day:get-prep', jobId),
   chooseAdminOutputFolder: () => ipcRenderer.invoke('admin-items:choose-output-folder'),
   renderAdminItem: (jobId, input) => ipcRenderer.invoke('admin-items:render', jobId, input),
   listIdTemplates: (jobId) => ipcRenderer.invoke('id-templates:list', jobId),

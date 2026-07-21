@@ -56,6 +56,11 @@ const captureLoginForm = document.getElementById('captureLoginForm');
 const cancelCaptureLoginButton = document.getElementById('cancelCaptureLoginButton');
 const captureLoginStatus = document.getElementById('captureLoginStatus');
 const imageReviewWorkspace = document.getElementById('imageReviewWorkspace');
+const pictureDayWorkspace = document.getElementById('pictureDayWorkspace');
+const pictureDayPrepStatus = document.getElementById('pictureDayPrepStatus');
+const pictureDayPrepContent = document.getElementById('pictureDayPrepContent');
+const pictureDayEodHistory = document.getElementById('pictureDayEodHistory');
+const refreshPictureDayPrepButton = document.getElementById('refreshPictureDayPrepButton');
 const envelopeWorkspace = document.getElementById('envelopeWorkspace');
 const envelopeEntryForm = document.getElementById('envelopeEntryForm');
 const envelopeEntryStatus = document.getElementById('envelopeEntryStatus');
@@ -120,6 +125,15 @@ const croppedMediumProgress = document.getElementById('croppedMediumProgress');
 const croppedMediumStatus = document.getElementById('croppedMediumStatus');
 const croppedMediumSummary = document.getElementById('croppedMediumSummary');
 const closeCroppedMediumButton = document.getElementById('closeCroppedMediumButton');
+const cameraCardsModal = document.getElementById('cameraCardsModal');
+const cameraCardsForm = document.getElementById('cameraCardsForm');
+const cancelCameraCardsButton = document.getElementById('cancelCameraCardsButton');
+const browseCameraCardsOutputButton = document.getElementById('browseCameraCardsOutputButton');
+const cameraCardsFilterLabel = document.getElementById('cameraCardsFilterLabel');
+const cameraCardsProgress = document.getElementById('cameraCardsProgress');
+const cameraCardsStatus = document.getElementById('cameraCardsStatus');
+const cameraCardsSummary = document.getElementById('cameraCardsSummary');
+const createCameraCardsButton = document.getElementById('createCameraCardsButton');
 const schoolDataModal = document.getElementById('schoolDataModal');
 const schoolDataFilePath = document.getElementById('schoolDataFilePath');
 const schoolDataMapping = document.getElementById('schoolDataMapping');
@@ -220,6 +234,8 @@ let jobsState = {
   showAddRecordsModal: false,
   adminItems: null,
   adminItemsLoading: false,
+  pictureDayPrep: null,
+  pictureDayPrepLoading: false,
   adminStage: 'original_picture_day',
   adminSortBy: 'grade',
   expandedAdminItem: null,
@@ -257,6 +273,21 @@ let jobsState = {
   idCardReason: 'admin_batch',
   idCardSortMethod: 'alpha_grade',
   idCardPhotographedOnly: true,
+  cameraCardSource: 'all',
+  cameraCardSourceValue: '',
+  cameraCardListName: '',
+  cameraCardSortMethod: 'alpha_grade',
+  cameraCardsDialog: {
+    jobId: null,
+    loading: false,
+    running: false,
+    listNames: [],
+    filterOptions: {
+      grades: [],
+      homerooms: [],
+      tracks: []
+    }
+  },
   directoryType: 'mugbook',
   directorySource: 'all',
   directoryListName: '',
@@ -486,6 +517,9 @@ function jobsViewTitle() {
   if (jobsState.selectedTab === 'capture') {
     return 'Capture';
   }
+  if (jobsState.selectedTab === 'pictureDay') {
+    return 'Picture Day';
+  }
   if (jobsState.selectedTab === 'products') {
     return 'Products';
   }
@@ -684,7 +718,7 @@ async function openJob(jobId) {
     return;
   }
   setJobsWorkspaceMode(true);
-  setWorkspaceMode('students');
+  setWorkspaceMode(jobsState.selectedTab === 'pictureDay' ? 'pictureDay' : 'students');
 }
 
 function closeJobWorkspace() {
@@ -814,10 +848,14 @@ function setWorkspaceMode(mode) {
   const adminOpen = mode === 'admin';
   const idTemplateOpen = mode === 'idTemplates';
   const imageReviewOpen = mode === 'imageReview';
+  const pictureDayOpen = mode === 'pictureDay';
   document.querySelector('.student-workspace-grid').hidden = !studentsOpen;
   jobStudentWorkspace.classList.toggle('capture-mode', captureOpen);
   captureWorkspace.hidden = !captureOpen;
   imageReviewWorkspace.hidden = !imageReviewOpen;
+  if (pictureDayWorkspace) {
+    pictureDayWorkspace.hidden = !pictureDayOpen;
+  }
   envelopeWorkspace.hidden = !envelopeOpen;
   adminItemsWorkspace.hidden = !adminOpen;
   if (idTemplateWorkspace) {
@@ -825,7 +863,7 @@ function setWorkspaceMode(mode) {
   }
   backToJobsButton.textContent = (captureOpen || envelopeOpen || imageReviewOpen)
     ? 'Back to Students'
-    : (adminOpen || idTemplateOpen)
+    : (adminOpen || idTemplateOpen || pictureDayOpen)
       ? 'Back to School'
       : 'Back to Jobs';
   if (workspaceStudentsButton) {
@@ -860,11 +898,13 @@ function setWorkspaceMode(mode) {
     renderCaptureWorkspace();
   } else if (imageReviewOpen) {
     renderImageReviewWorkspace();
+  } else if (pictureDayOpen) {
+    renderPictureDayPrepWorkspace();
   } else if (envelopeOpen) {
     renderEnvelopeWorkspace();
   } else if (idTemplateOpen) {
     renderIdTemplateDesigner();
-  } else {
+  } else if (adminOpen) {
     renderAdminItemsWorkspace();
   }
 }
@@ -1283,6 +1323,9 @@ async function confirmEndOfDayPackage() {
         jobsState.workspaceMode = previousWorkspaceMode || 'students';
         jobsState.selectedSubjectId = previousSubjectId;
         await reloadCurrentJobDetail();
+        if (previousWorkspaceMode === 'pictureDay') {
+          await loadPictureDayPrep(true);
+        }
       } else {
         jobsState.detail = null;
         await loadJobDetail(result.id);
@@ -4158,6 +4201,217 @@ function bindIdCardOptions() {
   });
 }
 
+function renderCameraCardOptions(listNames, filterOptions = {}) {
+  const source = jobsState.cameraCardSource || 'all';
+  const valuesBySource = {
+    grade: filterOptions.grades || [],
+    homeroom: filterOptions.homerooms || [],
+    track: filterOptions.tracks || [],
+    list: listNames || []
+  };
+  const sourceValues = valuesBySource[source] || [];
+  const valueControlEnabled = source !== 'all' && sourceValues.length > 0;
+  let selectedValue = source === 'list'
+    ? (jobsState.cameraCardListName || jobsState.cameraCardSourceValue)
+    : jobsState.cameraCardSourceValue;
+  if (source !== 'all' && !selectedValue && sourceValues.length) {
+    selectedValue = sourceValues[0];
+    if (source === 'list') {
+      jobsState.cameraCardListName = selectedValue;
+    }
+    jobsState.cameraCardSourceValue = selectedValue;
+  }
+
+  return `
+    <section class="id-card-options">
+      <label>
+        <span>Students</span>
+        <select data-camera-card-option="cameraCardSource">
+          <option value="all" ${source === 'all' ? 'selected' : ''}>Entire School</option>
+          <option value="grade" ${source === 'grade' ? 'selected' : ''}>Grade</option>
+          <option value="homeroom" ${source === 'homeroom' ? 'selected' : ''}>Homeroom</option>
+          <option value="track" ${source === 'track' ? 'selected' : ''}>Track</option>
+          <option value="list" ${source === 'list' ? 'selected' : ''}>Saved List</option>
+        </select>
+      </label>
+      <label>
+        <span>${source === 'list' ? 'Saved List' : 'Filter'}</span>
+        <select data-camera-card-option="${source === 'list' ? 'cameraCardListName' : 'cameraCardSourceValue'}" ${valueControlEnabled ? '' : 'disabled'}>
+          ${sourceValues.length
+            ? sourceValues.map((value) => `
+              <option value="${escapeHtml(value)}" ${value === selectedValue ? 'selected' : ''}>
+                ${escapeHtml(value)}
+              </option>
+            `).join('')
+            : '<option value="">No values</option>'}
+        </select>
+      </label>
+      <label>
+        <span>Sort</span>
+        <select data-camera-card-option="cameraCardSortMethod">
+          <option value="alpha_homeroom" ${jobsState.cameraCardSortMethod === 'alpha_homeroom' ? 'selected' : ''}>Alpha by Homeroom</option>
+          <option value="alpha_track" ${jobsState.cameraCardSortMethod === 'alpha_track' ? 'selected' : ''}>Alpha by Track</option>
+          <option value="alpha_grade" ${jobsState.cameraCardSortMethod === 'alpha_grade' ? 'selected' : ''}>Alpha by Grade</option>
+          <option value="alpha_school" ${jobsState.cameraCardSortMethod === 'alpha_school' ? 'selected' : ''}>Alpha by School</option>
+          <option value="ref" ${jobsState.cameraCardSortMethod === 'ref' ? 'selected' : ''}>Reference Number</option>
+        </select>
+      </label>
+    </section>
+  `;
+}
+
+function bindCameraCardOptions() {
+  adminItemsList.querySelectorAll('[data-camera-card-option]').forEach((control) => {
+    control.addEventListener('change', () => {
+      const key = control.dataset.cameraCardOption;
+      jobsState[key] = control.value;
+      if (key === 'cameraCardSource') {
+        jobsState.cameraCardSourceValue = '';
+        jobsState.cameraCardListName = '';
+      }
+      if (key === 'cameraCardListName') {
+        jobsState.cameraCardSourceValue = control.value;
+      }
+      renderAdminItemsWorkspace();
+    });
+  });
+}
+
+function pictureDaySortLabel(value) {
+  return {
+    alpha_homeroom: 'Alpha by Homeroom',
+    alpha_track: 'Alpha by Track',
+    alpha_grade: 'Alpha by Grade',
+    alpha_school: 'Alpha by School',
+    ref: 'Reference Number'
+  }[value] || formatType(value || 'alpha_grade');
+}
+
+function renderPictureDayPrepWorkspace() {
+  if (!pictureDayWorkspace || jobsState.workspaceMode !== 'pictureDay') {
+    return;
+  }
+  if (!jobsState.pictureDayPrep || jobsState.pictureDayPrep.job.id !== jobsState.selectedJobId) {
+    loadPictureDayPrep();
+    pictureDayPrepContent.innerHTML = '<div class="empty-state">Loading picture day prep...</div>';
+    pictureDayEodHistory.innerHTML = '<div class="empty-state">Loading End of Day imports...</div>';
+    return;
+  }
+
+  const prep = jobsState.pictureDayPrep;
+  const counts = prep.counts || {};
+  const cameraCardRuns = (prep.prepHistory || []).filter((item) => item.adminItemType === 'camera_cards');
+  const onsiteRuns = (prep.prepHistory || []).filter((item) => item.adminItemType === 'onsite_setup');
+  pictureDayPrepStatus.textContent = jobsState.pictureDayPrepLoading ? 'Refreshing...' : 'Ready';
+  pictureDayPrepContent.innerHTML = `
+    <section class="picture-day-metrics">
+      <article><span>Subjects</span><strong>${formatNumber(counts.subjects || 0)}</strong></article>
+      <article><span>Photographed</span><strong>${formatNumber(counts.photographed || 0)}</strong></article>
+      <article><span>Blank Records</span><strong>${formatNumber(counts.blankRecords || 0)}</strong></article>
+    </section>
+    <section class="picture-day-actions">
+      <button class="primary" data-picture-day-action="camera-cards" type="button">Create Camera Cards</button>
+      <button data-picture-day-action="onsite" type="button">Make Onsite Setup</button>
+      <button data-picture-day-action="load-onsite" type="button">Load Onsite Setup</button>
+      <button data-picture-day-action="load-eod" type="button">Load End of Day</button>
+    </section>
+    <section class="picture-day-section">
+      <h3>Camera Card Runs</h3>
+      ${cameraCardRuns.length ? cameraCardRuns.map((run) => {
+        let options = {};
+        try {
+          options = JSON.parse(run.optionsJson || '{}');
+        } catch (_error) {
+          options = {};
+        }
+        const source = options.cameraCardSource === 'list'
+          ? `List: ${options.cameraCardListName || options.cameraCardSourceValue || ''}`
+          : options.cameraCardSource === 'all'
+            ? 'Entire School'
+            : `${formatType(options.cameraCardSource)}: ${options.cameraCardSourceValue || ''}`;
+        return `
+          <article class="picture-day-history-row">
+            <strong>${escapeHtml(source)}</strong>
+            <span>${escapeHtml(pictureDaySortLabel(options.cameraCardSortMethod))} / ${options.cameraCardPdfOnly ? 'PDF' : 'JPG sheets'}</span>
+            <em>${escapeHtml(formatShortDateTime(run.completedAt || run.createdAt))}</em>
+            <code>${escapeHtml(run.outputPath || '')}</code>
+          </article>
+        `;
+      }).join('') : '<div class="empty-state">No camera cards created yet.</div>'}
+    </section>
+    <section class="picture-day-section">
+      <h3>Onsite Setup</h3>
+      ${onsiteRuns.length ? onsiteRuns.map((run) => `
+        <article class="picture-day-history-row">
+          <strong>${escapeHtml(formatShortDateTime(run.completedAt || run.createdAt))}</strong>
+          <span>${escapeHtml(run.status || 'complete')}</span>
+          <code>${escapeHtml(run.outputPath || '')}</code>
+        </article>
+      `).join('') : '<div class="empty-state">No onsite setup history yet.</div>'}
+    </section>
+  `;
+
+  pictureDayPrepContent.querySelectorAll('[data-picture-day-action]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const jobId = jobsState.selectedJobId;
+      if (button.dataset.pictureDayAction === 'camera-cards') {
+        await openCameraCardsModal(jobId);
+      } else if (button.dataset.pictureDayAction === 'onsite') {
+        await performPrepareOnsiteSetup(jobId);
+        await loadPictureDayPrep(true);
+      } else if (button.dataset.pictureDayAction === 'load-onsite') {
+        await loadOnsiteSetup();
+      } else if (button.dataset.pictureDayAction === 'load-eod') {
+        await loadEndOfDayPackage();
+      }
+    });
+  });
+
+  const imports = prep.endOfDayImports || [];
+  pictureDayEodHistory.innerHTML = imports.length ? imports.map((item) => `
+    <article class="eod-history-card">
+      <strong>${escapeHtml(item.packageName || 'End of Day')}</strong>
+      <span>${escapeHtml(formatShortDateTime(item.importedAt))}</span>
+      <dl>
+        <div><dt>Photographer</dt><dd>${escapeHtml(item.photographerName || '')}</dd></div>
+        <div><dt>Computer</dt><dd>${escapeHtml(item.workstationName || '')}</dd></div>
+        <div><dt>Images</dt><dd>${formatNumber(item.capturedImages || 0)}</dd></div>
+        <div><dt>New Cards</dt><dd>${formatNumber(item.newSubjects || 0)}</dd></div>
+        <div><dt>Edits</dt><dd>${formatNumber(item.editedSubjects || 0)}</dd></div>
+      </dl>
+      <code>${escapeHtml(item.packageFolder || '')}</code>
+    </article>
+  `).join('') : '<div class="empty-state">No End of Day imports loaded.</div>';
+}
+
+async function loadPictureDayPrep(force = false) {
+  if (!jobsState.selectedJobId || jobsState.pictureDayPrepLoading) {
+    return;
+  }
+  if (!force && jobsState.pictureDayPrep && jobsState.pictureDayPrep.job.id === jobsState.selectedJobId) {
+    renderPictureDayPrepWorkspace();
+    return;
+  }
+  jobsState.pictureDayPrepLoading = true;
+  if (pictureDayPrepStatus) {
+    pictureDayPrepStatus.textContent = 'Loading...';
+  }
+  try {
+    jobsState.pictureDayPrep = await trecsApi('getPictureDayPrep').getPictureDayPrep(jobsState.selectedJobId);
+    renderPictureDayPrepWorkspace();
+  } catch (error) {
+    if (pictureDayPrepContent) {
+      pictureDayPrepContent.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load picture day prep.')}</div>`;
+    }
+    console.error(error);
+  } finally {
+    jobsState.pictureDayPrepLoading = false;
+    if (pictureDayPrepStatus) {
+      pictureDayPrepStatus.textContent = 'Ready';
+    }
+  }
+}
+
 const ID_TEMPLATE_ELEMENT_DEFINITIONS = [
   { key: 'photo', label: 'Photo', kind: 'photo', x: 70, y: 86, w: 260, h: 325 },
   { key: 'name', label: 'Full Name', kind: 'text', field: 'fullName', x: 390, y: 155, w: 580, h: 70, size: 54, color: '#000000', font: 'Arial', align: 'left' },
@@ -4552,6 +4806,10 @@ function adminRenderRequest(type) {
     idCardReason: jobsState.idCardReason,
     idCardSortMethod: jobsState.idCardSortMethod,
     idCardPhotographedOnly: jobsState.idCardPhotographedOnly,
+    cameraCardSource: jobsState.cameraCardSource,
+    cameraCardSourceValue: jobsState.cameraCardSourceValue,
+    cameraCardListName: jobsState.cameraCardListName,
+    cameraCardSortMethod: jobsState.cameraCardSortMethod,
     directoryType: jobsState.directoryType,
     directorySource: jobsState.directorySource,
     directoryListName: jobsState.directoryListName,
@@ -5398,6 +5656,7 @@ async function performPrepareOnsiteSetup(jobId) {
       subjects: result.counts.subjects
     };
     alert(`Onsite setup created.\n\n${result.packagePath}`);
+    await loadPictureDayPrep(true);
   } catch (error) {
     jobsState.lastLaptopPackage = {
       jobId,
@@ -5409,6 +5668,207 @@ async function performPrepareOnsiteSetup(jobId) {
     if (status) {
       status.textContent = renderLaptopPackageStatus(jobId);
     }
+  }
+}
+
+function cameraCardDialogValuesForSource(source) {
+  const dialog = jobsState.cameraCardsDialog || {};
+  const filters = dialog.filterOptions || {};
+  if (source === 'grade') {
+    return filters.grades || [];
+  }
+  if (source === 'homeroom') {
+    return filters.homerooms || [];
+  }
+  if (source === 'track') {
+    return filters.tracks || [];
+  }
+  if (source === 'list') {
+    return dialog.listNames || [];
+  }
+  return [];
+}
+
+function setCameraCardsProgress(value, message) {
+  if (cameraCardsProgress) {
+    cameraCardsProgress.value = Number(value || 0);
+  }
+  if (cameraCardsStatus && message) {
+    cameraCardsStatus.textContent = message;
+  }
+}
+
+function renderCameraCardsModalOptions() {
+  if (!cameraCardsForm) {
+    return;
+  }
+  const source = cameraCardsForm.elements.source.value || jobsState.cameraCardSource || 'all';
+  const values = cameraCardDialogValuesForSource(source);
+  const selected = source === 'list'
+    ? (jobsState.cameraCardListName || jobsState.cameraCardSourceValue)
+    : jobsState.cameraCardSourceValue;
+  const label = {
+    all: 'Filter',
+    grade: 'Grade',
+    homeroom: 'Homeroom',
+    track: 'Track',
+    list: 'Saved List'
+  }[source] || 'Filter';
+  cameraCardsFilterLabel.textContent = label;
+  cameraCardsForm.elements.sourceValue.disabled = source === 'all' || values.length === 0;
+  cameraCardsForm.elements.sourceValue.innerHTML = values.length
+    ? values.map((value) => `
+      <option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>
+        ${escapeHtml(value)}
+      </option>
+    `).join('')
+    : `<option value="">${source === 'all' ? 'No filter needed' : 'No values found'}</option>`;
+  if (source !== 'all' && values.length && !values.includes(cameraCardsForm.elements.sourceValue.value)) {
+    cameraCardsForm.elements.sourceValue.value = values[0];
+  }
+}
+
+async function openCameraCardsModal(jobId) {
+  if (!cameraCardsModal || !cameraCardsForm) {
+    await performCreateCameraCards(jobId);
+    return;
+  }
+  jobsState.cameraCardsDialog = {
+    ...jobsState.cameraCardsDialog,
+    jobId,
+    loading: true,
+    running: false,
+    listNames: [],
+    filterOptions: { grades: [], homerooms: [], tracks: [] }
+  };
+  cameraCardsModal.hidden = false;
+  cameraCardsForm.elements.source.value = jobsState.cameraCardSource || 'all';
+  cameraCardsForm.elements.sortMethod.value = jobsState.cameraCardSortMethod || 'alpha_grade';
+  cameraCardsForm.elements.outputFolder.value = jobsState.adminOutputFolder || '';
+  cameraCardsForm.elements.pdfOnly.checked = false;
+  createCameraCardsButton.disabled = true;
+  browseCameraCardsOutputButton.disabled = false;
+  setCameraCardsProgress(0, 'Loading camera card options...');
+  cameraCardsSummary.textContent = '';
+  renderCameraCardsModalOptions();
+
+  try {
+    const data = await trecsApi('getAdminItems').getAdminItems(jobId, jobsState.adminStage || 'original_picture_day');
+    jobsState.cameraCardsDialog = {
+      ...jobsState.cameraCardsDialog,
+      loading: false,
+      listNames: data.listNames || [],
+      filterOptions: data.filterOptions || { grades: [], homerooms: [], tracks: [] }
+    };
+    renderCameraCardsModalOptions();
+    createCameraCardsButton.disabled = !cameraCardsForm.elements.outputFolder.value;
+    setCameraCardsProgress(0, 'Choose options, then create camera cards.');
+  } catch (error) {
+    jobsState.cameraCardsDialog.loading = false;
+    createCameraCardsButton.disabled = true;
+    setCameraCardsProgress(0, error.message || 'Could not load camera card options.');
+    console.error(error);
+  }
+}
+
+function closeCameraCardsModal() {
+  if (!cameraCardsModal || (jobsState.cameraCardsDialog && jobsState.cameraCardsDialog.running)) {
+    return;
+  }
+  cameraCardsModal.hidden = true;
+}
+
+async function browseCameraCardsOutputFolder() {
+  try {
+    const result = await trecsApi('chooseAdminOutputFolder').chooseAdminOutputFolder();
+    if (!result || result.canceled) {
+      return;
+    }
+    jobsState.adminOutputFolder = result.folderPath || '';
+    cameraCardsForm.elements.outputFolder.value = jobsState.adminOutputFolder;
+    createCameraCardsButton.disabled = !jobsState.adminOutputFolder || Boolean(jobsState.cameraCardsDialog.loading);
+    setCameraCardsProgress(0, 'Output folder selected.');
+  } catch (error) {
+    setCameraCardsProgress(0, error.message || 'Could not choose output folder.');
+    console.error(error);
+  }
+}
+
+async function performCreateCameraCards(jobId, input = null) {
+  const request = input || {
+    outputFolder: jobsState.adminOutputFolder || '',
+    cameraCardSource: jobsState.cameraCardSource || 'all',
+    cameraCardSourceValue: jobsState.cameraCardSourceValue || '',
+    cameraCardListName: jobsState.cameraCardListName || '',
+    cameraCardSortMethod: jobsState.cameraCardSortMethod || 'alpha_grade',
+    cameraCardPdfOnly: false
+  };
+  const outputFolder = request.outputFolder || '';
+  try {
+    jobsState.adminOutputFolder = outputFolder;
+    const result = await trecsApi('renderAdminItem').renderAdminItem(jobId, {
+      type: 'camera_cards',
+      stage: jobsState.adminStage || 'original_picture_day',
+      outputFolder,
+      cameraCardSource: request.cameraCardSource || 'all',
+      cameraCardSourceValue: request.cameraCardSourceValue || '',
+      cameraCardListName: request.cameraCardListName || '',
+      cameraCardSortMethod: request.cameraCardSortMethod || 'alpha_grade',
+      cameraCardPdfOnly: Boolean(request.cameraCardPdfOnly)
+    });
+    await loadAdminItems();
+    return result;
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+}
+
+async function submitCameraCardsForm(event) {
+  event.preventDefault();
+  const jobId = jobsState.cameraCardsDialog && jobsState.cameraCardsDialog.jobId;
+  if (!jobId) {
+    return;
+  }
+  const source = cameraCardsForm.elements.source.value || 'all';
+  const sourceValue = source === 'all' ? '' : cameraCardsForm.elements.sourceValue.value;
+  jobsState.cameraCardSource = source;
+  jobsState.cameraCardSourceValue = sourceValue;
+  jobsState.cameraCardListName = source === 'list' ? sourceValue : '';
+  jobsState.cameraCardSortMethod = cameraCardsForm.elements.sortMethod.value || 'alpha_grade';
+  jobsState.adminOutputFolder = cameraCardsForm.elements.outputFolder.value || '';
+  if (!jobsState.adminOutputFolder) {
+    setCameraCardsProgress(0, 'Choose an output folder first.');
+    return;
+  }
+
+  jobsState.cameraCardsDialog.running = true;
+  createCameraCardsButton.disabled = true;
+  cancelCameraCardsButton.disabled = true;
+  browseCameraCardsOutputButton.disabled = true;
+  setCameraCardsProgress(15, 'Preparing camera card work list...');
+  cameraCardsSummary.textContent = '';
+
+  try {
+    setCameraCardsProgress(45, 'Rendering camera card sheets...');
+    const result = await performCreateCameraCards(jobId, {
+      outputFolder: jobsState.adminOutputFolder,
+      cameraCardSource: jobsState.cameraCardSource,
+      cameraCardSourceValue: jobsState.cameraCardSourceValue,
+      cameraCardListName: jobsState.cameraCardListName,
+      cameraCardSortMethod: jobsState.cameraCardSortMethod,
+      cameraCardPdfOnly: cameraCardsForm.elements.pdfOnly.checked
+    });
+    setCameraCardsProgress(100, 'Camera cards complete.');
+    cameraCardsSummary.textContent = result.absoluteOutputPath || result.outputPath || '';
+    await loadPictureDayPrep(true);
+  } catch (error) {
+    setCameraCardsProgress(0, error.message || 'Camera card render failed.');
+  } finally {
+    jobsState.cameraCardsDialog.running = false;
+    createCameraCardsButton.disabled = false;
+    cancelCameraCardsButton.disabled = false;
+    browseCameraCardsOutputButton.disabled = false;
   }
 }
 
@@ -5783,6 +6243,11 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'picture-day-prep') {
+    await ensureSelectedJobWorkspace('pictureDay');
+    return;
+  }
+
   if (action === 'image-review') {
     await ensureSelectedJobWorkspace('imageReview');
     return;
@@ -5811,6 +6276,8 @@ async function handleTrecsMenuAction(action) {
     await performSyncCroppedImages(jobId);
   } else if (action === 'create-cropped-medium') {
     await performGenerateCroppedMedium(jobId);
+  } else if (action === 'create-camera-cards') {
+    await openCameraCardsModal(jobId);
   } else if (action === 'prepare-onsite-setup') {
     await performPrepareOnsiteSetup(jobId);
   } else if (action === 'make-end-of-day') {
@@ -7411,6 +7878,15 @@ if (workspaceAdminItemsButton) {
   });
 }
 
+if (refreshPictureDayPrepButton) {
+  refreshPictureDayPrepButton.addEventListener('click', () => {
+    loadPictureDayPrep(true).catch((error) => {
+      pictureDayPrepStatus.textContent = error.message || 'Refresh failed';
+      console.error(error);
+    });
+  });
+}
+
 if (workspaceEditJobButton) {
   workspaceEditJobButton.addEventListener('click', openEditJobModal);
 }
@@ -7624,6 +8100,33 @@ cancelAddRecordsButton.addEventListener('click', () => {
 });
 
 addRecordsForm.addEventListener('submit', submitAddRecords);
+
+if (cameraCardsForm) {
+  cameraCardsForm.addEventListener('submit', submitCameraCardsForm);
+  cameraCardsForm.elements.source.addEventListener('change', () => {
+    jobsState.cameraCardSource = cameraCardsForm.elements.source.value || 'all';
+    jobsState.cameraCardSourceValue = '';
+    jobsState.cameraCardListName = '';
+    renderCameraCardsModalOptions();
+  });
+  cameraCardsForm.elements.sourceValue.addEventListener('change', () => {
+    jobsState.cameraCardSourceValue = cameraCardsForm.elements.sourceValue.value || '';
+    if (cameraCardsForm.elements.source.value === 'list') {
+      jobsState.cameraCardListName = jobsState.cameraCardSourceValue;
+    }
+  });
+  cameraCardsForm.elements.sortMethod.addEventListener('change', () => {
+    jobsState.cameraCardSortMethod = cameraCardsForm.elements.sortMethod.value || 'alpha_grade';
+  });
+}
+
+if (cancelCameraCardsButton) {
+  cancelCameraCardsButton.addEventListener('click', closeCameraCardsModal);
+}
+
+if (browseCameraCardsOutputButton) {
+  browseCameraCardsOutputButton.addEventListener('click', browseCameraCardsOutputFolder);
+}
 
 if (closeCropToolButton) {
   closeCropToolButton.addEventListener('click', () => setCropToolVisible(false));

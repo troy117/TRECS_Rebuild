@@ -76,11 +76,29 @@ function compileIdCardSheetRenderer() {
   ]);
 }
 
+function compileCameraCardSheetRenderer() {
+  const source = path.join(repoRoot, 'tools', 'CameraCardSheetRenderer.java');
+  const output = path.join(repoRoot, 'tools', 'CameraCardSheetRenderer.class');
+  if (fs.existsSync(output) && fs.statSync(output).mtimeMs >= fs.statSync(source).mtimeMs) {
+    return;
+  }
+
+  run('javac', [
+    '-cp',
+    [
+      path.join(repoRoot, 'tools'),
+      path.join(repoRoot, 'JARS', 'zxing-core-1.7.jar')
+    ].join(path.delimiter),
+    source
+  ]);
+}
+
 function main() {
   compileAccessReader();
   compileDeliveryEnvelopeCoverRenderer();
   compileSchoolDirectoryRenderer();
   compileIdCardSheetRenderer();
+  compileCameraCardSheetRenderer();
   const builderCli = path.join(appRoot, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
   run(process.execPath, [builderCli, '--win', 'portable', '--x64'], { cwd: appRoot });
   console.log(`Single EXE created at ${path.join(repoRoot, 'build', 'single', 'TRECS-Portable.exe')}`);

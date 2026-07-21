@@ -271,6 +271,7 @@
               <h2>Workflow</h2>
               <div class="tabs" id="jobWorkflowTabs">
                 <button class="active" data-job-tab="subjects">Subjects</button>
+                <button data-job-tab="pictureDay">Picture Day</button>
                 <button data-job-tab="orders">Orders</button>
                 <button data-job-tab="capture">Capture</button>
                 <button data-job-tab="images">Images</button>
@@ -459,6 +460,27 @@
 
             <section class="panel image-review-workspace" id="imageReviewWorkspace" hidden>
               <div class="empty-state">Loading image review...</div>
+            </section>
+
+            <section class="picture-day-workspace" id="pictureDayWorkspace" hidden>
+              <section class="panel picture-day-main">
+                <div class="panel-heading">
+                  <h2>Picture Day Prep</h2>
+                  <span id="pictureDayPrepStatus"></span>
+                </div>
+                <div id="pictureDayPrepContent" class="picture-day-prep-content">
+                  <div class="empty-state">Loading picture day prep...</div>
+                </div>
+              </section>
+              <aside class="panel picture-day-history">
+                <div class="panel-heading">
+                  <h2>End of Day Imports</h2>
+                  <button class="secondary small" id="refreshPictureDayPrepButton" type="button">Refresh</button>
+                </div>
+                <div id="pictureDayEodHistory" class="picture-day-eod-history">
+                  <div class="empty-state">No End of Day imports loaded.</div>
+                </div>
+              </aside>
             </section>
 
             <section class="admin-items-workspace" id="adminItemsWorkspace" hidden>
@@ -809,6 +831,60 @@
                 <button id="closeCroppedMediumButton" type="button" disabled>Close</button>
               </div>
             </div>
+          </div>
+
+          <div class="modal-backdrop" id="cameraCardsModal" hidden>
+            <form class="modal-card camera-cards-card" id="cameraCardsForm">
+              <div class="modal-heading">
+                <h2>Create Camera Cards</h2>
+                <button id="cancelCameraCardsButton" type="button">Cancel</button>
+              </div>
+              <div class="camera-cards-grid">
+                <label>
+                  <span>Students</span>
+                  <select name="source">
+                    <option value="all">Entire School</option>
+                    <option value="grade">Grade</option>
+                    <option value="homeroom">Homeroom</option>
+                    <option value="track">Track</option>
+                    <option value="list">Saved List</option>
+                  </select>
+                </label>
+                <label>
+                  <span id="cameraCardsFilterLabel">Filter</span>
+                  <select name="sourceValue" disabled>
+                    <option value="">No filter needed</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Sort</span>
+                  <select name="sortMethod">
+                    <option value="alpha_grade">Alpha by Grade</option>
+                    <option value="alpha_homeroom">Alpha by Homeroom</option>
+                    <option value="alpha_track">Alpha by Track</option>
+                    <option value="alpha_school">Alpha by School</option>
+                    <option value="ref">Reference Number</option>
+                  </select>
+                </label>
+              </div>
+              <label class="checkbox-line">
+                <input name="pdfOnly" type="checkbox">
+                <span>Render as a single PDF instead of individual JPG sheets</span>
+              </label>
+              <label>
+                <span>Output Folder</span>
+                <div class="folder-picker">
+                  <input name="outputFolder" readonly placeholder="Choose where camera cards will be created">
+                  <button id="browseCameraCardsOutputButton" type="button">Browse</button>
+                </div>
+              </label>
+              <progress id="cameraCardsProgress" value="0" max="100"></progress>
+              <p id="cameraCardsStatus">Choose options, then create camera cards.</p>
+              <div class="form-actions">
+                <span id="cameraCardsSummary"></span>
+                <button class="primary" id="createCameraCardsButton" type="submit">Create Camera Cards</button>
+              </div>
+            </form>
           </div>
         </section>
       </main>
