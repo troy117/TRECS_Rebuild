@@ -159,12 +159,17 @@ CREATE TABLE IF NOT EXISTS job_links (
 CREATE TABLE IF NOT EXISTS job_sessions (
   id INTEGER PRIMARY KEY,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  session_uuid TEXT NOT NULL,
   workstation_name TEXT NOT NULL,
   user_name TEXT,
+  lock_scope TEXT NOT NULL DEFAULT 'job_write',
+  lock_mode TEXT NOT NULL DEFAULT 'exclusive',
   session_status TEXT NOT NULL DEFAULT 'open',
   opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  closed_at TEXT
+  expires_at TEXT,
+  closed_at TEXT,
+  metadata_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS capture_sessions (
@@ -421,19 +426,64 @@ CREATE TABLE IF NOT EXISTS render_batches (
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
+  output_path TEXT,
+  options_json TEXT,
+  result_json TEXT,
   started_at TEXT,
   finished_at TEXT,
   created_by TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS event_entries (
+  id INTEGER PRIMARY KEY,
+  event_job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  fall_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  event_image_asset_id INTEGER NOT NULL REFERENCES image_assets(id) ON DELETE CASCADE,
+  image_number TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'unlinked',
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(event_job_id, event_image_asset_id)
+);
+
+CREATE TABLE IF NOT EXISTS event_subject_links (
+  id INTEGER PRIMARY KEY,
+  event_entry_id INTEGER NOT NULL REFERENCES event_entries(id) ON DELETE CASCADE,
+  fall_subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+  order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  confirmed_by TEXT,
+  confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  notes TEXT,
+  UNIQUE(event_entry_id, fall_subject_id)
+);
+
+CREATE TABLE IF NOT EXISTS render_batch_jobs (
+  id INTEGER PRIMARY KEY,
+  render_batch_id INTEGER NOT NULL REFERENCES render_batches(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'queued',
+  output_path TEXT,
+  result_json TEXT,
+  error_message TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  UNIQUE(render_batch_id, job_id)
+);
+
 CREATE TABLE IF NOT EXISTS render_tasks (
   id INTEGER PRIMARY KEY,
   render_batch_id INTEGER NOT NULL REFERENCES render_batches(id) ON DELETE CASCADE,
   order_item_id INTEGER REFERENCES order_items(id) ON DELETE SET NULL,
+  job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
   task_type TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
   output_path TEXT,
+  details_json TEXT,
   error_message TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -525,6 +575,9 @@ CREATE INDEX IF NOT EXISTS idx_orders_job_id ON orders(job_id);
 CREATE INDEX IF NOT EXISTS idx_orders_subject_id ON orders(subject_id);
 CREATE INDEX IF NOT EXISTS idx_orders_source_reference ON orders(source_reference);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_event_entries_job_status ON event_entries(event_job_id, status, image_number);
+CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry ON event_subject_links(event_entry_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_event_subject_links_fall_subject ON event_subject_links(fall_subject_id);
 CREATE INDEX IF NOT EXISTS idx_render_tasks_status ON render_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id ON admin_item_batches(job_id, shoot_stage, admin_item_type);
 CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id ON end_of_day_imports(job_id, imported_at);

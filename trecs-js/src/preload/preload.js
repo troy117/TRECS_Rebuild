@@ -5,6 +5,53 @@ contextBridge.exposeInMainWorld('trecs', {
   getDashboardData: () => ipcRenderer.invoke('dashboard:get'),
   getJobsData: () => ipcRenderer.invoke('jobs:list'),
   getJobDetail: (jobId) => ipcRenderer.invoke('job:detail', jobId),
+  getPackageEditorData: (packagePlanId) => ipcRenderer.invoke('package-editor:get', packagePlanId),
+  createPackagePlan: (input) => ipcRenderer.invoke('package-editor:create-plan', input),
+  savePackageCode: (input) => ipcRenderer.invoke('package-editor:save-code', input),
+  deletePackageCode: (packageCodeId) => ipcRenderer.invoke('package-editor:delete-code', packageCodeId),
+  testPackagePlanRenders: (packagePlanId) => ipcRenderer.invoke('package-editor:test-renders', packagePlanId),
+  testPictureUnitRenders: () => ipcRenderer.invoke('picture-units:test-all'),
+  getUnitRenderSetup: (jobId) => ipcRenderer.invoke('unit-render:get-setup', jobId),
+  chooseUnitRenderOutputFolder: () => ipcRenderer.invoke('unit-render:choose-output-folder'),
+  runUnitRender: (input) => ipcRenderer.invoke('unit-render:run', input),
+  testBlankEnvelopeRenders: (outputFolder) => ipcRenderer.invoke('unit-render:test-envelope-proofs', outputFolder),
+  acquireJobSession: (jobId, scope) => ipcRenderer.invoke('job-session:acquire', jobId, scope),
+  heartbeatJobSessions: (jobIds) => ipcRenderer.invoke('job-session:heartbeat', jobIds),
+  releaseJobSession: (jobIds) => ipcRenderer.invoke('job-session:release', jobIds),
+  getJobSessions: () => ipcRenderer.invoke('job-session:list'),
+  getStudentListSetup: (jobId, listId) => ipcRenderer.invoke('student-lists:get-setup', jobId, listId),
+  saveStudentList: (input) => ipcRenderer.invoke('student-lists:save', input),
+  deleteStudentList: (listId) => ipcRenderer.invoke('student-lists:delete', listId),
+  chooseOnlineOrderFile: (jobId) => ipcRenderer.invoke('online-orders:choose-file', jobId),
+  previewOnlineOrders: (input) => ipcRenderer.invoke('online-orders:preview', input),
+  importOnlineOrders: (input) => ipcRenderer.invoke('online-orders:import', input),
+  getBatchRenderSetup: () => ipcRenderer.invoke('batch-render:get-setup'),
+  chooseBatchRenderOutputFolder: () => ipcRenderer.invoke('batch-render:choose-output-folder'),
+  runBatchRender: (input) => ipcRenderer.invoke('batch-render:run', input),
+  onBatchRenderProgress: (callback) => {
+    ipcRenderer.removeAllListeners('batch-render:progress');
+    ipcRenderer.on('batch-render:progress', (_event, payload) => callback(payload));
+  },
+  getEventWorkflowSetup: (eventJobId, entryId) => ipcRenderer.invoke('event:get-setup', eventJobId, entryId),
+  configureEventFallJob: (input) => ipcRenderer.invoke('event:configure-fall-job', input),
+  chooseEventImageFolder: (eventJobId) => ipcRenderer.invoke('event:choose-image-folder', eventJobId),
+  importEventImageFolder: (eventJobId, folderPath) => ipcRenderer.invoke('event:import-image-folder', eventJobId, folderPath),
+  searchEventFallStudents: (input) => ipcRenderer.invoke('event:search-fall-students', input),
+  saveEventMatch: (input) => ipcRenderer.invoke('event:save-match', input),
+  removeEventSubjectLink: (linkId) => ipcRenderer.invoke('event:remove-subject-link', linkId),
+  getCompositeSetup: (jobId) => ipcRenderer.invoke('composite:get-setup', jobId),
+  previewComposite: (input) => ipcRenderer.invoke('composite:preview', input),
+  chooseCompositeOutputFolder: () => ipcRenderer.invoke('composite:choose-output-folder'),
+  renderComposites: (input) => ipcRenderer.invoke('composite:render', input),
+  testCompositeLayouts: () => ipcRenderer.invoke('composite:test-layouts'),
+  onCompositeProgress: (callback) => {
+    ipcRenderer.removeAllListeners('composite:progress');
+    ipcRenderer.on('composite:progress', (_event, payload) => callback(payload));
+  },
+  onUnitRenderProgress: (callback) => {
+    ipcRenderer.removeAllListeners('unit-render:progress');
+    ipcRenderer.on('unit-render:progress', (_event, payload) => callback(payload));
+  },
   getStudentFieldSettings: () => ipcRenderer.invoke('settings:student-fields:get'),
   saveStudentFieldSettings: (input) => ipcRenderer.invoke('settings:student-fields:save', input),
   createClient: (input) => ipcRenderer.invoke('client:create', input),

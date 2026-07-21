@@ -37,6 +37,7 @@ AdminItems/
 .env
 .env.*
 *.log
+trecs-js/.electron-user-data/
 path.txt
 Thumbs.db
 Desktop.ini

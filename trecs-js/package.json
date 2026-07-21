@@ -64,7 +64,13 @@
     "build:portable": "node scripts/build-portable.js",
     "check": "node scripts/check-files.js",
     "check:db": "node scripts/check-db.js",
-    "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1"
+    "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1",
+    "check:ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-package-editor-ui.ps1",
+    "check:units": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-picture-units.ps1",
+    "check:render-ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-unit-render-ui.ps1",
+    "check:composites": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-composite-builder-ui.ps1",
+    "check:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-production-workflows-ui.ps1",
+    "check:events": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-event-workflow-ui.ps1"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.2",

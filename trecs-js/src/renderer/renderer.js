@@ -8,6 +8,95 @@ const viewButtons = document.querySelectorAll('[data-view-button]');
 const viewTargets = document.querySelectorAll('[data-view-target]');
 const dashboardView = document.getElementById('dashboardView');
 const jobsView = document.getElementById('jobsView');
+const productsView = document.getElementById('productsView');
+const productsPageContent = document.getElementById('productsPageContent');
+const eventsView = document.getElementById('eventsView');
+const eventJobSelect = document.getElementById('eventJobSelect');
+const eventFallJobSelect = document.getElementById('eventFallJobSelect');
+const linkEventFallJobButton = document.getElementById('linkEventFallJobButton');
+const importEventImagesButton = document.getElementById('importEventImagesButton');
+const createEventJobButton = document.getElementById('createEventJobButton');
+const eventSetupStatus = document.getElementById('eventSetupStatus');
+const eventWorkflowEmpty = document.getElementById('eventWorkflowEmpty');
+const eventWorkflowLayout = document.getElementById('eventWorkflowLayout');
+const eventQueueCount = document.getElementById('eventQueueCount');
+const eventImageNumberSearch = document.getElementById('eventImageNumberSearch');
+const eventQueueFilters = document.getElementById('eventQueueFilters');
+const eventImageQueue = document.getElementById('eventImageQueue');
+const eventCurrentImageNumber = document.getElementById('eventCurrentImageNumber');
+const eventCurrentStatus = document.getElementById('eventCurrentStatus');
+const eventPhotoPreview = document.getElementById('eventPhotoPreview');
+const eventFallPreview = document.getElementById('eventFallPreview');
+const eventExistingLinks = document.getElementById('eventExistingLinks');
+const eventAddAnotherButton = document.getElementById('eventAddAnotherButton');
+const eventStudentSearch = document.getElementById('eventStudentSearch');
+const eventGradeFilter = document.getElementById('eventGradeFilter');
+const eventHomeroomFilter = document.getElementById('eventHomeroomFilter');
+const eventCandidateCount = document.getElementById('eventCandidateCount');
+const eventStudentResults = document.getElementById('eventStudentResults');
+const eventOrderForm = document.getElementById('eventOrderForm');
+const eventSelectedStudent = document.getElementById('eventSelectedStudent');
+const eventPackageCodeShortcuts = document.getElementById('eventPackageCodeShortcuts');
+const eventOrderStatus = document.getElementById('eventOrderStatus');
+const eventSaveStayButton = document.getElementById('eventSaveStayButton');
+const eventSaveNextButton = document.getElementById('eventSaveNextButton');
+const studentListsView = document.getElementById('studentListsView');
+const studentListJobSelect = document.getElementById('studentListJobSelect');
+const studentListSearch = document.getElementById('studentListSearch');
+const studentListsSaved = document.getElementById('studentListsSaved');
+const studentListAvailable = document.getElementById('studentListAvailable');
+const studentListMembers = document.getElementById('studentListMembers');
+const studentListName = document.getElementById('studentListName');
+const studentListCount = document.getElementById('studentListCount');
+const studentListMemberCount = document.getElementById('studentListMemberCount');
+const studentListStatus = document.getElementById('studentListStatus');
+const newStudentListButton = document.getElementById('newStudentListButton');
+const addSelectedStudentsButton = document.getElementById('addSelectedStudentsButton');
+const saveStudentListButton = document.getElementById('saveStudentListButton');
+const deleteStudentListButton = document.getElementById('deleteStudentListButton');
+const onlineOrdersView = document.getElementById('onlineOrdersView');
+const onlineOrderJobSelect = document.getElementById('onlineOrderJobSelect');
+const chooseOnlineOrderFileButton = document.getElementById('chooseOnlineOrderFileButton');
+const onlineOrderFileName = document.getElementById('onlineOrderFileName');
+const onlineOrderMapping = document.getElementById('onlineOrderMapping');
+const onlineOrderSummary = document.getElementById('onlineOrderSummary');
+const onlineOrderPreviewBody = document.getElementById('onlineOrderPreviewBody');
+const onlineOrderStatus = document.getElementById('onlineOrderStatus');
+const importOnlineOrdersButton = document.getElementById('importOnlineOrdersButton');
+const unitRenderView = document.getElementById('unitRenderView');
+const unitRenderForm = document.getElementById('unitRenderForm');
+const unitRenderFilterField = document.getElementById('unitRenderFilterField');
+const unitRenderFilterLabel = document.getElementById('unitRenderFilterLabel');
+const unitRenderMetrics = document.getElementById('unitRenderMetrics');
+const unitRenderProgress = document.getElementById('unitRenderProgress');
+const unitRenderStatus = document.getElementById('unitRenderStatus');
+const browseUnitRenderOutputButton = document.getElementById('browseUnitRenderOutputButton');
+const startUnitRenderButton = document.getElementById('startUnitRenderButton');
+const batchRenderView = document.getElementById('batchRenderView');
+const batchRenderForm = document.getElementById('batchRenderForm');
+const batchRenderJobs = document.getElementById('batchRenderJobs');
+const batchRenderHistory = document.getElementById('batchRenderHistory');
+const batchRenderProgress = document.getElementById('batchRenderProgress');
+const batchRenderStatus = document.getElementById('batchRenderStatus');
+const browseBatchRenderOutputButton = document.getElementById('browseBatchRenderOutputButton');
+const refreshBatchRenderButton = document.getElementById('refreshBatchRenderButton');
+const startBatchRenderButton = document.getElementById('startBatchRenderButton');
+const compositesView = document.getElementById('compositesView');
+const compositeJobSelect = document.getElementById('compositeJobSelect');
+const compositeJobMetrics = document.getElementById('compositeJobMetrics');
+const compositeClassCount = document.getElementById('compositeClassCount');
+const compositeClassList = document.getElementById('compositeClassList');
+const compositePreviewType = document.getElementById('compositePreviewType');
+const compositeFeaturedField = document.getElementById('compositeFeaturedField');
+const compositeFeaturedStudent = document.getElementById('compositeFeaturedStudent');
+const refreshCompositePreviewButton = document.getElementById('refreshCompositePreviewButton');
+const compositePreviewStage = document.getElementById('compositePreviewStage');
+const compositePreviewMeta = document.getElementById('compositePreviewMeta');
+const compositeRenderForm = document.getElementById('compositeRenderForm');
+const browseCompositeOutputButton = document.getElementById('browseCompositeOutputButton');
+const compositeProgress = document.getElementById('compositeProgress');
+const compositeStatus = document.getElementById('compositeStatus');
+const renderCompositesButton = document.getElementById('renderCompositesButton');
 const jobActionsMenu = document.getElementById('jobActionsMenu');
 const jobTypeFilters = document.getElementById('jobTypeFilters');
 const jobSearchInput = document.getElementById('jobSearchInput');
@@ -327,6 +416,25 @@ let jobsState = {
   selectedNewClientId: null,
   showNewJobForm: false,
   showImportPreviousJobForm: false,
+  unitRenderSetup: null,
+  unitRenderRunning: false,
+  studentListSetup: null,
+  studentListId: null,
+  studentListMemberIds: [],
+  studentListCheckedIds: new Set(),
+  onlineOrderPreview: null,
+  batchRenderSetup: null,
+  batchRenderRunning: false,
+  eventSetup: null,
+  eventQueueFilter: 'all',
+  eventCandidates: [],
+  eventSelectedCandidateId: null,
+  eventSearchTimer: null,
+  eventSaving: false,
+  compositeSetup: null,
+  compositeHomeroom: '',
+  compositePreviewKind: 'traditional',
+  compositeRunning: false,
   cropTool: {
     image: null,
     files: [],
@@ -348,6 +456,8 @@ let jobsState = {
   }
 };
 
+const activeJobLockIds = new Set();
+
 if (window.trecs && databasePath) {
   databasePath.textContent = window.trecs.prototypeDatabasePath;
 }
@@ -364,6 +474,34 @@ if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
 if (window.trecs && typeof window.trecs.onCroppedMediumProgress === 'function') {
   window.trecs.onCroppedMediumProgress((payload) => {
     updateCroppedMediumProgress(payload);
+  });
+}
+
+if (window.trecs && typeof window.trecs.onUnitRenderProgress === 'function') {
+  window.trecs.onUnitRenderProgress((payload) => {
+    const total = Number(payload.total || 0);
+    const current = Number(payload.current || 0);
+    unitRenderProgress.max = total || 100;
+    unitRenderProgress.value = total ? current : 0;
+    unitRenderStatus.textContent = payload.message || 'Rendering...';
+  });
+}
+
+if (window.trecs && typeof window.trecs.onCompositeProgress === 'function') {
+  window.trecs.onCompositeProgress((payload) => {
+    const total = Number(payload.total || 0);
+    const current = Number(payload.current || 0);
+    compositeProgress.max = total || 100;
+    compositeProgress.value = total ? current : 0;
+    compositeStatus.textContent = payload.message || 'Rendering composites...';
+  });
+}
+
+if (window.trecs && typeof window.trecs.onBatchRenderProgress === 'function') {
+  window.trecs.onBatchRenderProgress((payload) => {
+    const total = Number(payload.total || 0); const current = Number(payload.current || 0);
+    batchRenderProgress.max = total || 100; batchRenderProgress.value = total ? current : 0;
+    batchRenderStatus.textContent = payload.message || 'Batch rendering...';
   });
 }
 
@@ -547,9 +685,22 @@ function updateMenuContext() {
 }
 
 function setView(view) {
+  if (studentListsView.classList.contains('active-view') && view !== 'studentLists' && jobsState.studentListSetup?.selectedJobId) {
+    releaseUiJobLocks(jobsState.studentListSetup.selectedJobId).catch((error) => console.error(error));
+  }
+  if (eventsView.classList.contains('active-view') && view !== 'events' && jobsState.eventSetup?.selectedEventJobId) {
+    releaseUiJobLocks(jobsState.eventSetup.selectedEventJobId).catch((error) => console.error(error));
+  }
   dashboardView.classList.toggle('active-view', view === 'dashboard');
   jobsView.classList.toggle('active-view', view === 'jobs');
-  title.textContent = view === 'jobs' ? jobsViewTitle() : 'Dashboard';
+  productsView.classList.toggle('active-view', view === 'products');
+  eventsView.classList.toggle('active-view', view === 'events');
+  studentListsView.classList.toggle('active-view', view === 'studentLists');
+  onlineOrdersView.classList.toggle('active-view', view === 'onlineOrders');
+  unitRenderView.classList.toggle('active-view', view === 'unitRender');
+  batchRenderView.classList.toggle('active-view', view === 'batchRender');
+  compositesView.classList.toggle('active-view', view === 'composites');
+  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
@@ -557,6 +708,35 @@ function setView(view) {
 
   if (view === 'jobs' && jobsState.jobs.length === 0) {
     loadJobs().catch(showJobsLoadError);
+  }
+  if (view === 'products') {
+    renderProductsPage().catch((error) => {
+      productsPageContent.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load package plans.')}</div>`;
+    });
+  }
+  if (view === 'events') {
+    loadEventWorkflow().catch((error) => { eventSetupStatus.textContent = error.message || 'Could not load event workflow.'; });
+  }
+  if (view === 'unitRender') {
+    loadUnitRenderSetup().catch((error) => {
+      unitRenderStatus.textContent = error.message || 'Could not load the render queue.';
+    });
+  }
+  if (view === 'studentLists') {
+    loadStudentListSetup().catch((error) => { studentListStatus.textContent = error.message || 'Could not load student lists.'; });
+  }
+  if (view === 'onlineOrders') {
+    loadOnlineOrderJobs().catch((error) => { onlineOrderStatus.textContent = error.message || 'Could not load jobs.'; });
+  }
+  if (view === 'batchRender') {
+    loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message || 'Could not load batch rendering.'; });
+  }
+  if (view === 'composites') {
+    if (!jobsState.compositeSetup) {
+      loadCompositeSetup().catch((error) => {
+        compositeStatus.textContent = error.message || 'Could not load composite classes.';
+      });
+    }
   }
 }
 
@@ -712,7 +892,13 @@ function selectJobSummary(jobId) {
 
 async function openJob(jobId) {
   selectJobSummary(jobId);
-  await loadJobDetail(jobId);
+  if (!(await acquireUiJobLock(jobId))) return;
+  try {
+    await loadJobDetail(jobId);
+  } catch (error) {
+    await releaseUiJobLocks(jobId);
+    throw error;
+  }
   if (jobsState.selectedTab === 'capture') {
     await openCaptureLogin(jobId);
     return;
@@ -724,6 +910,7 @@ async function openJob(jobId) {
 function closeJobWorkspace() {
   stopCaptureWatcher().catch((error) => console.error(error));
   stopEnvelopeWatcher().catch((error) => console.error(error));
+  if (jobsState.selectedJobId) releaseUiJobLocks(jobsState.selectedJobId).catch((error) => console.error(error));
   setJobsWorkspaceMode(false);
   title.textContent = 'Jobs';
 }
@@ -787,6 +974,7 @@ async function focusCaptureLoginPhotographer() {
 }
 
 async function openCaptureLogin(jobId) {
+  if (!(await acquireUiJobLock(jobId))) return;
   jobsState.pendingCaptureJobId = jobId;
   setCaptureLoginVisible(true);
   captureLoginStatus.textContent = '';
@@ -6243,6 +6431,54 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'package-plan-editor') {
+    if (jobsState.jobWorkspaceOpen) {
+      closeJobWorkspace();
+    }
+    setView('products');
+    return;
+  }
+
+  if (action === 'unit-render') {
+    if (jobsState.jobWorkspaceOpen) {
+      closeJobWorkspace();
+    }
+    setView('unitRender');
+    return;
+  }
+
+  if (action === 'composite-builder') {
+    if (jobsState.jobWorkspaceOpen) {
+      closeJobWorkspace();
+    }
+    setView('composites');
+    return;
+  }
+
+  if (action === 'student-list-builder') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('studentLists');
+    return;
+  }
+
+  if (action === 'event-workflow') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('events');
+    return;
+  }
+
+  if (action === 'online-order-import') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('onlineOrders');
+    return;
+  }
+
+  if (action === 'batch-render') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('batchRender');
+    return;
+  }
+
   if (action === 'picture-day-prep') {
     await ensureSelectedJobWorkspace('pictureDay');
     return;
@@ -6391,7 +6627,7 @@ function renderWorkflowTab() {
   } else if (jobsState.selectedTab === 'images') {
     renderImagesTab(jobsState.detail.images);
   } else {
-    renderProductsTab(jobsState.detail.products);
+    jobWorkflowContent.innerHTML = '<div class="empty-state">Choose a workflow tab.</div>';
   }
 }
 
@@ -7194,20 +7430,436 @@ function renderCaptureTab(capture) {
   loadImagePreview(jobsState.selectedImageId);
 }
 
-function renderProductsTab(products) {
-  jobWorkflowContent.innerHTML = tableHtml(
-    ['Code', 'Name', 'Items', 'Mapped', 'Raw Items'],
-    products.map((product) => `
-      <tr>
-        <td>${product.code}</td>
-        <td>${product.codeName || ''}</td>
-        <td>${formatNumber(product.itemCount)}</td>
-        <td>${formatNumber(product.mappedItems)}</td>
-        <td class="wrap-cell">${product.rawItems || ''}</td>
-      </tr>
-    `),
-    'No package plan found.'
-  );
+async function renderProductsPage() {
+  productsPageContent.innerHTML = '<div class="empty-state">Loading package-plan editor...</div>';
+  try {
+    const requestedPlanId = jobsState.packageEditorPlanId || null;
+    jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(requestedPlanId);
+    jobsState.packageEditorPlanId = jobsState.packageEditor.selectedPlanId;
+    drawPackageEditor();
+  } catch (error) {
+    productsPageContent.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load package plans.')}</div>`;
+  }
+}
+
+async function acquireUiJobLock(jobId, scope = 'job_write') {
+  if (activeJobLockIds.has(Number(jobId))) return true;
+  const result = await trecsApi('acquireJobSession').acquireJobSession(Number(jobId), scope);
+  if (!result.acquired) {
+    const owner = [result.conflict?.userName, result.conflict?.workstationName].filter(Boolean).join(' on ');
+    window.alert(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nTRECS will release an abandoned lock automatically after two minutes.`);
+    return false;
+  }
+  activeJobLockIds.add(Number(jobId));
+  return true;
+}
+
+async function releaseUiJobLocks(jobIds) {
+  const ids = (Array.isArray(jobIds) ? jobIds : [jobIds]).map(Number).filter((id) => activeJobLockIds.has(id));
+  if (!ids.length) return;
+  ids.forEach((id) => activeJobLockIds.delete(id));
+  await trecsApi('releaseJobSession').releaseJobSession(ids);
+}
+
+function studentDisplayName(subject) {
+  return subject.displayName || [subject.firstName, subject.lastName].filter(Boolean).join(' ') || `Student ${subject.ref || subject.id}`;
+}
+
+function renderStudentListBuilder() {
+  const setup = jobsState.studentListSetup;
+  if (!setup) return;
+  studentListJobSelect.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)} (${formatNumber(job.subjects)})</option>`).join('');
+  studentListCount.textContent = `${setup.lists.length} list${setup.lists.length === 1 ? '' : 's'}`;
+  studentListsSaved.innerHTML = setup.lists.length ? setup.lists.map((list) => `<button type="button" data-list-id="${list.id}" class="${Number(list.id) === Number(jobsState.studentListId) ? 'active' : ''}"><strong>${escapeHtml(list.name)}</strong><span>${formatNumber(list.memberCount)} member${Number(list.memberCount) === 1 ? '' : 's'}</span></button>`).join('') : '<div class="empty-state">No lists yet. Select New List to begin.</div>';
+  const memberSet = new Set(jobsState.studentListMemberIds.map(Number));
+  const search = studentListSearch.value.trim().toLowerCase();
+  const available = setup.subjects.filter((subject) => !memberSet.has(Number(subject.id))).filter((subject) => !search || [studentDisplayName(subject), subject.ref, subject.externalId, subject.grade, subject.homeroom].some((value) => String(value || '').toLowerCase().includes(search)));
+  studentListAvailable.innerHTML = available.length ? available.map((subject) => `<label class="student-picker-row"><input type="checkbox" data-available-subject="${subject.id}" ${jobsState.studentListCheckedIds.has(Number(subject.id)) ? 'checked' : ''}><span><strong>${escapeHtml(studentDisplayName(subject))}</strong><small>Ref ${escapeHtml(subject.ref || '—')} · ${escapeHtml(subject.grade || 'No grade')} · ${escapeHtml(subject.homeroom || 'No homeroom')}</small></span><small>${subject.hasPhoto ? 'Photo' : ''}</small></label>`).join('') : '<div class="empty-state">No available students match.</div>';
+  const byId = new Map(setup.subjects.map((subject) => [Number(subject.id), subject]));
+  studentListMembers.innerHTML = jobsState.studentListMemberIds.length ? jobsState.studentListMemberIds.map((id, index) => {
+    const subject = byId.get(Number(id)); if (!subject) return '';
+    return `<div class="student-picker-row"><span>${index + 1}</span><span><strong>${escapeHtml(studentDisplayName(subject))}</strong><small>Ref ${escapeHtml(subject.ref || '—')} · ${escapeHtml(subject.grade || 'No grade')} · ${escapeHtml(subject.homeroom || 'No homeroom')}</small></span><span class="member-actions"><button type="button" data-member-up="${id}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-member-down="${id}" ${index === jobsState.studentListMemberIds.length - 1 ? 'disabled' : ''}>↓</button><button type="button" data-member-remove="${id}">×</button></span></div>`;
+  }).join('') : '<div class="empty-state">Add students from the middle column.</div>';
+  studentListMemberCount.textContent = `${jobsState.studentListMemberIds.length} member${jobsState.studentListMemberIds.length === 1 ? '' : 's'}`;
+  deleteStudentListButton.disabled = !jobsState.studentListId;
+}
+
+async function loadStudentListSetup(jobId = null, listId = null) {
+  const setup = await trecsApi('getStudentListSetup').getStudentListSetup(jobId, listId);
+  jobsState.studentListSetup = setup;
+  jobsState.studentListId = setup.selectedList?.id || null;
+  jobsState.studentListMemberIds = setup.selectedList?.memberIds || [];
+  jobsState.studentListCheckedIds.clear();
+  studentListName.value = setup.selectedList?.name || '';
+  studentListStatus.textContent = setup.selectedList ? `Editing ${setup.selectedList.name}.` : 'Select New List to begin.';
+  renderStudentListBuilder();
+}
+
+function startNewStudentList() {
+  jobsState.studentListId = null; jobsState.studentListMemberIds = []; jobsState.studentListCheckedIds.clear(); studentListName.value = ''; studentListStatus.textContent = 'New list. Add students, enter a name, and save.'; renderStudentListBuilder(); studentListName.focus();
+}
+
+function addCheckedStudentsToList() {
+  jobsState.studentListMemberIds.push(...Array.from(jobsState.studentListCheckedIds).filter((id) => !jobsState.studentListMemberIds.includes(id)));
+  jobsState.studentListCheckedIds.clear(); renderStudentListBuilder();
+}
+
+function moveStudentListMember(id, direction) {
+  const index = jobsState.studentListMemberIds.indexOf(Number(id)); const next = index + direction;
+  if (index < 0 || next < 0 || next >= jobsState.studentListMemberIds.length) return;
+  [jobsState.studentListMemberIds[index], jobsState.studentListMemberIds[next]] = [jobsState.studentListMemberIds[next], jobsState.studentListMemberIds[index]]; renderStudentListBuilder();
+}
+
+async function saveCurrentStudentList() {
+  const jobId = Number(jobsState.studentListSetup?.selectedJobId); if (!jobId) return;
+  if (!(await acquireUiJobLock(jobId))) return;
+  saveStudentListButton.disabled = true;
+  try {
+    const result = await trecsApi('saveStudentList').saveStudentList({ id: jobsState.studentListId, jobId, name: studentListName.value, memberIds: jobsState.studentListMemberIds });
+    await loadStudentListSetup(jobId, result.id); studentListStatus.textContent = `Saved ${result.name} with ${result.memberCount} members.`;
+  } catch (error) { studentListStatus.textContent = error.message || 'Could not save list.'; } finally { saveStudentListButton.disabled = false; }
+}
+
+async function deleteCurrentStudentList() {
+  if (!jobsState.studentListId || !window.confirm(`Delete “${studentListName.value}”?`)) return;
+  const jobId = Number(jobsState.studentListSetup.selectedJobId); if (!(await acquireUiJobLock(jobId))) return;
+  await trecsApi('deleteStudentList').deleteStudentList(jobsState.studentListId); await loadStudentListSetup(jobId); studentListStatus.textContent = 'List deleted.';
+}
+
+async function loadOnlineOrderJobs() {
+  const setup = await trecsApi('getStudentListSetup').getStudentListSetup(onlineOrderJobSelect.value || null, null);
+  onlineOrderJobSelect.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</option>`).join('');
+}
+
+function renderOnlineOrderPreview() {
+  const preview = jobsState.onlineOrderPreview;
+  if (!preview) { onlineOrderMapping.innerHTML = ''; onlineOrderPreviewBody.innerHTML = ''; importOnlineOrdersButton.disabled = true; return; }
+  onlineOrderFileName.textContent = preview.fileName;
+  onlineOrderMapping.innerHTML = preview.fields.map((field) => `<label><span>${escapeHtml(field.label)}${field.required ? ' *' : ''}</span><select data-online-field="${field.key}"><option value="">Not mapped</option>${preview.columns.map((column) => `<option value="${column.index}" ${Number(preview.mapping[field.key]) === Number(column.index) && preview.mapping[field.key] !== undefined ? 'selected' : ''}>${escapeHtml(column.name)}</option>`).join('')}</select></label>`).join('');
+  onlineOrderSummary.innerHTML = `<div class="unit-render-metrics"><article><span>Rows</span><strong>${formatNumber(preview.totals.rows)}</strong></article><article><span>Ready</span><strong>${formatNumber(preview.totals.ready)}</strong></article><article><span>Need Review</span><strong>${formatNumber(preview.totals.problems)}</strong></article></div>`;
+  onlineOrderPreviewBody.innerHTML = preview.rows.map((row) => `<tr><td>${row.rowNumber}</td><td>${escapeHtml(row.values.sourceReference || '—')}</td><td>${escapeHtml([row.values.firstName, row.values.lastName].filter(Boolean).join(' ') || row.values.subjectRef || row.values.externalId || '—')}</td><td>${row.subject ? `${escapeHtml([row.subject.firstName, row.subject.lastName].filter(Boolean).join(' '))}<br><small>Ref ${escapeHtml(row.subject.ref || '—')}</small>` : '—'}</td><td>${escapeHtml(row.values.packageCodes || '—')}</td><td><span class="import-status ${row.status}">${escapeHtml(row.message)}</span></td></tr>`).join('');
+  importOnlineOrdersButton.disabled = preview.totals.ready < 1;
+}
+
+async function chooseOnlineOrderFile() {
+  chooseOnlineOrderFileButton.disabled = true;
+  try {
+    const result = await trecsApi('chooseOnlineOrderFile').chooseOnlineOrderFile(Number(onlineOrderJobSelect.value));
+    if (!result.canceled) { jobsState.onlineOrderPreview = result; renderOnlineOrderPreview(); onlineOrderStatus.textContent = `${result.totals.ready} of ${result.totals.rows} rows are ready.`; }
+  } catch (error) { onlineOrderStatus.textContent = error.message || 'Could not read online orders.'; } finally { chooseOnlineOrderFileButton.disabled = false; }
+}
+
+async function refreshOnlineOrderPreviewFromMapping() {
+  const current = jobsState.onlineOrderPreview; if (!current) return;
+  const mapping = {}; onlineOrderMapping.querySelectorAll('[data-online-field]').forEach((select) => { if (select.value !== '') mapping[select.dataset.onlineField] = Number(select.value); });
+  jobsState.onlineOrderPreview = await trecsApi('previewOnlineOrders').previewOnlineOrders({ jobId: Number(onlineOrderJobSelect.value), filePath: current.filePath, mapping }); renderOnlineOrderPreview();
+}
+
+async function importReadyOnlineOrders() {
+  const preview = jobsState.onlineOrderPreview; if (!preview) return;
+  const jobId = Number(onlineOrderJobSelect.value); if (!(await acquireUiJobLock(jobId))) return;
+  const mapping = {}; onlineOrderMapping.querySelectorAll('[data-online-field]').forEach((select) => { if (select.value !== '') mapping[select.dataset.onlineField] = Number(select.value); });
+  importOnlineOrdersButton.disabled = true;
+  try { const result = await trecsApi('importOnlineOrders').importOnlineOrders({ jobId, filePath: preview.filePath, mapping }); onlineOrderStatus.textContent = `Imported ${result.inserted} new and updated ${result.updated} existing online orders; ${result.skipped} rows skipped.`; await refreshOnlineOrderPreviewFromMapping(); } catch (error) { onlineOrderStatus.textContent = error.message || 'Import failed.'; } finally { importOnlineOrdersButton.disabled = false; await releaseUiJobLocks(jobId); }
+}
+
+function renderBatchRenderSetup() {
+  const setup = jobsState.batchRenderSetup; if (!setup) return;
+  batchRenderJobs.innerHTML = setup.jobs.map((job) => `<label><input type="checkbox" name="jobIds" value="${job.id}" ${Number(job.readyOrders) > 0 ? '' : ''}><span><strong>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</strong><small>${escapeHtml(job.packagePlan || 'No package plan')}</small></span><small>${formatNumber(job.readyOrders)} ready / ${formatNumber(job.paidOrders)} paid</small></label>`).join('');
+  batchRenderHistory.innerHTML = setup.history.length ? setup.history.map((batch) => `<button type="button"><strong>${escapeHtml(batch.name)}</strong><span>${escapeHtml(formatType(batch.status))} · ${formatNumber(batch.completedJobs || 0)}/${formatNumber(batch.jobs || 0)} jobs · ${escapeHtml(formatShortDateTime(batch.createdAt))}</span><span>${escapeHtml(batch.outputPath || '')}</span></button>`).join('') : '<div class="empty-state">No batch renders have run yet.</div>';
+}
+
+async function loadBatchRenderSetup() { jobsState.batchRenderSetup = await trecsApi('getBatchRenderSetup').getBatchRenderSetup(); renderBatchRenderSetup(); }
+
+async function browseBatchRenderOutput() { const result = await trecsApi('chooseBatchRenderOutputFolder').chooseBatchRenderOutputFolder(); if (!result.canceled) batchRenderForm.elements.outputFolder.value = result.folderPath; }
+
+async function submitBatchRender(event) {
+  event.preventDefault(); if (jobsState.batchRenderRunning) return;
+  const jobIds = Array.from(batchRenderForm.querySelectorAll('input[name="jobIds"]:checked')).map((input) => Number(input.value));
+  jobsState.batchRenderRunning = true; startBatchRenderButton.disabled = true; batchRenderStatus.textContent = 'Reserving jobs and starting batch...';
+  try {
+    const result = await trecsApi('runBatchRender').runBatchRender({ jobIds, name: batchRenderForm.elements.name.value, sortBy: batchRenderForm.elements.sortBy.value, outputFolder: batchRenderForm.elements.outputFolder.value, includeUnits: batchRenderForm.elements.includeUnits.checked, includeEnvelopes: batchRenderForm.elements.includeEnvelopes.checked, includeLabels: batchRenderForm.elements.includeLabels.checked });
+    batchRenderStatus.textContent = `${result.name} finished: ${result.results.filter((item) => item.status === 'completed').length} completed, ${result.results.filter((item) => item.status === 'failed').length} failed.`; await loadBatchRenderSetup();
+  } catch (error) { batchRenderStatus.textContent = error.message || 'Batch render failed.'; } finally { jobsState.batchRenderRunning = false; startBatchRenderButton.disabled = false; }
+}
+
+function eventStatusLabel(status) {
+  return { unlinked: 'Unlinked', linked: 'Linked', coded: 'Order coded' }[status] || formatType(status || 'unlinked');
+}
+
+function eventStatusClass(status) {
+  return status === 'coded' ? 'ready' : status === 'linked' ? 'review' : 'error';
+}
+
+function selectedEventCandidate() {
+  return jobsState.eventCandidates.find((candidate) => Number(candidate.id) === Number(jobsState.eventSelectedCandidateId))
+    || jobsState.eventSetup?.selectedEntry?.links?.find((link) => Number(link.subjectId) === Number(jobsState.eventSelectedCandidateId))
+    || null;
+}
+
+async function loadEventImagePreview(imageAssetId, container, missingText) {
+  if (!imageAssetId) { container.innerHTML = `<div class="empty-state">${escapeHtml(missingText)}</div>`; return; }
+  container.innerHTML = '<div class="empty-state">Loading photo...</div>';
+  try {
+    const preview = await imagePreviewForId(Number(imageAssetId));
+    container.innerHTML = preview?.dataUrl && !preview.missing ? `<img src="${preview.dataUrl}" alt="Photo preview">` : `<div class="empty-state">${escapeHtml(preview?.reason || missingText)}</div>`;
+  } catch (error) { container.innerHTML = `<div class="empty-state">${escapeHtml(error.message || missingText)}</div>`; }
+}
+
+function renderEventJobSetup() {
+  const setup = jobsState.eventSetup;
+  eventJobSelect.innerHTML = setup?.eventJobs?.length ? setup.eventJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedEventJobId) ? 'selected' : ''}>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</option>`).join('') : '<option value="">No event jobs yet</option>';
+  eventFallJobSelect.innerHTML = setup?.fallJobs?.length ? `<option value="">Choose the matching fall job</option>${setup.fallJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.linkedFallJobId) ? 'selected' : ''}>${escapeHtml(job.jobName)} · ${formatNumber(job.subjects)} students · ${formatNumber(job.photographed)} photos</option>`).join('')}` : '<option value="">No fall jobs for this school</option>';
+  const empty = !setup?.selectedEventJobId;
+  eventWorkflowEmpty.hidden = !empty; eventWorkflowLayout.hidden = empty;
+  linkEventFallJobButton.disabled = empty || !setup.fallJobs.length;
+  importEventImagesButton.disabled = empty;
+  eventSetupStatus.textContent = empty ? 'Create an Event job to begin.' : setup.linkedFallJobId ? 'Fall student records linked. Ready for image matching.' : 'Choose and link the fall job before matching students.';
+}
+
+function filteredEventQueue() {
+  const setup = jobsState.eventSetup; if (!setup) return [];
+  const jump = eventImageNumberSearch.value.trim().toLowerCase();
+  return setup.queue.filter((entry) => jobsState.eventQueueFilter === 'all' || entry.status === jobsState.eventQueueFilter)
+    .filter((entry) => !jump || String(entry.imageNumber || '').toLowerCase().includes(jump) || String(entry.filename || '').toLowerCase().includes(jump));
+}
+
+function renderEventQueue() {
+  const setup = jobsState.eventSetup; if (!setup) return;
+  const queue = filteredEventQueue();
+  eventQueueCount.textContent = `${queue.length} of ${setup.queue.length}`;
+  eventImageQueue.innerHTML = queue.length ? queue.map((entry) => `<button class="event-image-card ${Number(entry.id) === Number(setup.selectedEntry?.id) ? 'active' : ''}" data-event-entry-id="${entry.id}" type="button"><span><strong>Image ${escapeHtml(entry.imageNumber)}</strong><small>${escapeHtml(entry.linkedNames || entry.filename)}</small></span><span class="status ${eventStatusClass(entry.status)}">${escapeHtml(eventStatusLabel(entry.status))}</span></button>`).join('') : '<div class="empty-state">No event images match this filter.</div>';
+}
+
+function renderEventExistingLinks() {
+  const links = jobsState.eventSetup?.selectedEntry?.links || [];
+  eventExistingLinks.innerHTML = links.length ? links.map((link) => `<div class="event-link-chip"><strong>${escapeHtml([link.firstName, link.lastName].filter(Boolean).join(' ') || `Ref ${link.ref}`)}</strong><span>${escapeHtml([link.ref ? `Ref ${link.ref}` : '', link.packageCodes ? `Order ${link.packageCodes}` : 'Linked only'].filter(Boolean).join(' · '))}</span><button data-remove-event-link="${link.id}" type="button" title="Remove this match">×</button></div>`).join('') : '<span class="tool-status">No fall students linked yet.</span>';
+}
+
+function renderEventSelectedCandidate() {
+  const candidate = selectedEventCandidate();
+  if (!candidate) {
+    eventSelectedStudent.innerHTML = '<span>No fall student selected.</span>';
+    eventFallPreview.innerHTML = '<div class="empty-state">Select a fall student result.</div>';
+    eventOrderForm.elements.confirmed.checked = false;
+    return;
+  }
+  const name = candidate.name || [candidate.firstName, candidate.lastName].filter(Boolean).join(' ') || `Ref ${candidate.ref}`;
+  eventSelectedStudent.innerHTML = `<strong>${escapeHtml(name)}</strong><span>${escapeHtml([candidate.ref ? `Ref ${candidate.ref}` : '', candidate.grade ? `Grade ${candidate.grade}` : '', candidate.homeroom || ''].filter(Boolean).join(' · '))}</span>`;
+  eventOrderForm.elements.confirmed.checked = false;
+  const existing = jobsState.eventSetup?.selectedEntry?.links?.find((link) => Number(link.subjectId) === Number(candidate.id || candidate.subjectId));
+  eventOrderForm.elements.orderCodes.value = existing?.packageCodes || '';
+  eventOrderForm.elements.paidStatus.value = existing?.paidStatus || 'paid';
+  eventOrderForm.elements.notes.value = jobsState.eventSetup?.selectedEntry?.notes || '';
+  loadEventImagePreview(candidate.fallImageAssetId, eventFallPreview, 'This fall student does not have a thumbnail.').catch((error) => console.error(error));
+}
+
+async function hydrateEventResultThumbnails(candidates) {
+  const entryId = jobsState.eventSetup?.selectedEntry?.id;
+  await Promise.all(candidates.slice(0, 30).map(async (candidate) => {
+    if (!candidate.fallImageAssetId) return;
+    try {
+      const preview = await imagePreviewForId(candidate.fallImageAssetId);
+      if (entryId !== jobsState.eventSetup?.selectedEntry?.id || !preview?.dataUrl) return;
+      const node = eventStudentResults.querySelector(`[data-event-result-thumb="${candidate.id}"]`);
+      if (node) node.innerHTML = `<img src="${preview.dataUrl}" alt="Fall thumbnail">`;
+    } catch (_error) { /* A missing thumbnail remains a neutral placeholder. */ }
+  }));
+}
+
+function renderEventCandidates() {
+  const candidates = jobsState.eventCandidates;
+  eventCandidateCount.textContent = `${candidates.length} found`;
+  eventStudentResults.innerHTML = candidates.length ? candidates.map((candidate) => `<button class="event-student-result ${Number(candidate.id) === Number(jobsState.eventSelectedCandidateId) ? 'active' : ''}" data-event-candidate-id="${candidate.id}" type="button"><span class="event-result-thumb" data-event-result-thumb="${candidate.id}">${candidate.fallImageAssetId ? '' : 'No photo'}</span><span><strong>${escapeHtml(candidate.name || [candidate.firstName, candidate.lastName].filter(Boolean).join(' ') || `Ref ${candidate.ref}`)}</strong><small>${escapeHtml([candidate.ref ? `Ref ${candidate.ref}` : '', candidate.externalId ? `ID ${candidate.externalId}` : '', candidate.grade ? `Grade ${candidate.grade}` : '', candidate.homeroom || ''].filter(Boolean).join(' · '))}</small></span></button>`).join('') : '<div class="empty-state">No fall students match those filters.</div>';
+  hydrateEventResultThumbnails(candidates).catch((error) => console.error(error));
+}
+
+async function searchEventStudents() {
+  const setup = jobsState.eventSetup;
+  if (!setup?.selectedEventJobId || !setup.linkedFallJobId) { jobsState.eventCandidates = []; renderEventCandidates(); return; }
+  jobsState.eventCandidates = await trecsApi('searchEventFallStudents').searchEventFallStudents({ eventJobId: setup.selectedEventJobId, search: eventStudentSearch.value, grade: eventGradeFilter.value, homeroom: eventHomeroomFilter.value });
+  renderEventCandidates();
+}
+
+function renderEventEntry() {
+  const entry = jobsState.eventSetup?.selectedEntry;
+  if (!entry) {
+    eventCurrentImageNumber.textContent = 'Choose an image'; eventCurrentStatus.textContent = 'Waiting'; eventCurrentStatus.className = 'status review';
+    eventPhotoPreview.innerHTML = '<div class="empty-state">Import and choose an event image.</div>'; renderEventExistingLinks(); renderEventSelectedCandidate(); return;
+  }
+  eventCurrentImageNumber.textContent = `Image ${entry.imageNumber}`; eventCurrentStatus.textContent = eventStatusLabel(entry.status); eventCurrentStatus.className = `status ${eventStatusClass(entry.status)}`;
+  loadEventImagePreview(entry.imageAssetId, eventPhotoPreview, 'Event photo could not be loaded.').catch((error) => console.error(error));
+  renderEventExistingLinks();
+  const firstLink = entry.links?.[0]; jobsState.eventSelectedCandidateId = firstLink?.subjectId || null;
+  renderEventSelectedCandidate();
+}
+
+function renderEventFilters() {
+  const setup = jobsState.eventSetup;
+  const selectedGrade = eventGradeFilter.value; const selectedHomeroom = eventHomeroomFilter.value;
+  eventGradeFilter.innerHTML = `<option value="">All Grades</option>${(setup?.filters?.grades || []).map((value) => `<option value="${escapeHtml(value)}" ${value === selectedGrade ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}`;
+  eventHomeroomFilter.innerHTML = `<option value="">All Homerooms</option>${(setup?.filters?.homerooms || []).map((value) => `<option value="${escapeHtml(value)}" ${value === selectedHomeroom ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}`;
+  eventPackageCodeShortcuts.innerHTML = (setup?.packageCodes || []).slice(0, 12).map((code) => `<button data-event-package-code="${escapeHtml(code.code)}" type="button" title="${escapeHtml(code.name || '')}">${escapeHtml(code.code)}${code.name ? ` · ${escapeHtml(code.name)}` : ''}</button>`).join('');
+}
+
+async function loadEventWorkflow(eventJobId = null, entryId = null) {
+  eventSetupStatus.textContent = 'Loading event workflow...';
+  jobsState.eventSetup = await trecsApi('getEventWorkflowSetup').getEventWorkflowSetup(eventJobId || jobsState.eventSetup?.selectedEventJobId || null, entryId);
+  jobsState.eventCandidates = []; jobsState.eventSelectedCandidateId = null;
+  renderEventJobSetup(); renderEventFilters(); renderEventQueue(); renderEventEntry();
+  if (jobsState.eventSetup.linkedFallJobId) await searchEventStudents();
+}
+
+async function configureSelectedEventFallJob() {
+  const eventJobId = Number(eventJobSelect.value); const fallJobId = Number(eventFallJobSelect.value);
+  if (!eventJobId || !fallJobId) { eventSetupStatus.textContent = 'Choose an event job and fall job.'; return; }
+  if (!(await acquireUiJobLock(eventJobId))) return;
+  try { await trecsApi('configureEventFallJob').configureEventFallJob({ eventJobId, fallJobId }); await loadEventWorkflow(eventJobId); eventSetupStatus.textContent = 'Fall student job linked.'; } catch (error) { eventSetupStatus.textContent = error.message || 'Could not link fall job.'; }
+}
+
+async function importSelectedEventImages() {
+  const eventJobId = Number(eventJobSelect.value); if (!eventJobId || !(await acquireUiJobLock(eventJobId))) return;
+  importEventImagesButton.disabled = true;
+  try { const result = await trecsApi('chooseEventImageFolder').chooseEventImageFolder(eventJobId); if (!result.canceled) { await loadEventWorkflow(eventJobId); eventSetupStatus.textContent = `Imported ${result.imported} new event images; ${result.existing} already loaded.`; } } catch (error) { eventSetupStatus.textContent = error.message || 'Could not import event images.'; } finally { importEventImagesButton.disabled = false; }
+}
+
+async function selectEventEntry(entryId) {
+  await loadEventWorkflow(Number(eventJobSelect.value), Number(entryId)); eventStudentSearch.focus(); eventStudentSearch.select();
+}
+
+function selectEventCandidate(candidateId, focusOrder = false) {
+  jobsState.eventSelectedCandidateId = Number(candidateId); renderEventCandidates(); renderEventSelectedCandidate();
+  if (focusOrder) { eventOrderForm.elements.orderCodes.focus(); eventOrderForm.elements.orderCodes.select(); }
+}
+
+async function saveEventOrder(goNext) {
+  const setup = jobsState.eventSetup; const candidate = selectedEventCandidate();
+  if (!setup?.selectedEntry || !candidate || jobsState.eventSaving) { eventOrderStatus.textContent = 'Choose an event image and fall student first.'; return; }
+  if (!(await acquireUiJobLock(setup.selectedEventJobId))) return;
+  jobsState.eventSaving = true; eventSaveNextButton.disabled = true; eventSaveStayButton.disabled = true;
+  try {
+    const result = await trecsApi('saveEventMatch').saveEventMatch({ eventJobId: setup.selectedEventJobId, entryId: setup.selectedEntry.id, fallSubjectId: candidate.id || candidate.subjectId, confirmed: eventOrderForm.elements.confirmed.checked, orderCodes: eventOrderForm.elements.orderCodes.value, paidStatus: eventOrderForm.elements.paidStatus.value, notes: eventOrderForm.elements.notes.value });
+    await loadEventWorkflow(setup.selectedEventJobId, goNext ? result.nextEntryId : result.entryId);
+    eventOrderStatus.textContent = result.orderId ? 'Student linked and picture order saved.' : 'Student linked without an order.';
+    if (goNext) { eventStudentSearch.focus(); eventStudentSearch.select(); } else { jobsState.eventSelectedCandidateId = null; renderEventSelectedCandidate(); eventStudentSearch.focus(); eventStudentSearch.select(); }
+  } catch (error) { eventOrderStatus.textContent = error.message || 'Could not save event match.'; } finally { jobsState.eventSaving = false; eventSaveNextButton.disabled = false; eventSaveStayButton.disabled = false; }
+}
+
+function packageProductOptions(selectedId = '') {
+  const products = (jobsState.packageEditor && jobsState.packageEditor.products) || [];
+  const groups = new Map();
+  products.forEach((product) => {
+    const category = product.category || 'other';
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(product);
+  });
+  return Array.from(groups.entries()).map(([category, rows]) => `
+    <optgroup label="${escapeHtml(formatStatusLabel(category))}">
+      ${rows.map((product) => `<option value="${product.id}" ${Number(selectedId) === Number(product.id) ? 'selected' : ''}>${escapeHtml(product.name)}${product.size ? ` (${escapeHtml(product.size)})` : ''}</option>`).join('')}
+    </optgroup>
+  `).join('');
+}
+
+function packageItemRow(item = {}) {
+  return `<div class="package-item-row">
+    <span class="package-item-handle" title="Items render in this order">≡</span>
+    <select name="productId" required><option value="">Choose product...</option>${packageProductOptions(item.productId)}</select>
+    <label>Qty <input name="quantity" type="number" min="1" max="999" value="${Number(item.quantity || 1)}"></label>
+    <button data-remove-package-item type="button">Remove</button>
+  </div>`;
+}
+
+function drawPackageEditor(selectedCodeId = null) {
+  const editor = jobsState.packageEditor;
+  const selected = selectedCodeId === 0
+    ? null
+    : editor.codes.find((code) => Number(code.id) === Number(selectedCodeId)) || editor.codes[0] || null;
+  productsPageContent.innerHTML = `
+    <div class="package-editor">
+      <div class="package-editor-toolbar">
+        <label><span>Package Plan</span><select id="packageEditorPlan">${editor.plans.map((plan) => `<option value="${plan.id}" ${Number(plan.id) === Number(editor.selectedPlanId) ? 'selected' : ''}>${escapeHtml(plan.name)} (v${plan.version})</option>`).join('')}</select></label>
+        <button id="newPackagePlanButton" type="button">New Plan</button>
+        <button id="newPackageCodeButton" type="button">New Code</button>
+        <button id="testPictureUnitsButton" type="button">Test Picture Units</button>
+        <button id="testPackageRendersButton" type="button">Audit Render Support</button>
+        <span id="packageEditorStatus"></span>
+      </div>
+      <div class="package-editor-layout">
+        <aside class="package-code-list">
+          ${editor.codes.length ? editor.codes.map((code) => `<button data-package-code="${code.id}" class="${selected && Number(code.id) === Number(selected.id) ? 'active' : ''}" type="button"><strong>${escapeHtml(code.name || 'Unnamed package')}</strong><span>Code ${escapeHtml(code.code)}</span><small>${code.items.length} item${code.items.length === 1 ? '' : 's'}</small></button>`).join('') : '<div class="empty-state">No codes in this plan.</div>'}
+        </aside>
+        <form id="packageCodeForm" class="package-code-form">
+          <input name="id" type="hidden" value="${selected ? selected.id : ''}">
+          <div class="package-code-heading"><label><span>Order Code</span><input name="code" required value="${selected ? escapeHtml(selected.code) : ''}" placeholder="1"></label><label class="grow"><span>Customer-facing Name</span><input name="name" value="${selected ? escapeHtml(selected.name || '') : ''}" placeholder="Package A"></label></div>
+          <div class="package-item-heading"><div><h3>Package Contents</h3><p>Each row is a product, service, modifier, or fulfillment instruction.</p></div><button id="addPackageItemButton" type="button">Add Item</button></div>
+          <div id="packageItemRows">${selected && selected.items.length ? selected.items.map(packageItemRow).join('') : packageItemRow()}</div>
+          <div class="form-actions"><button id="deletePackageCodeButton" class="danger" type="button" ${selected ? '' : 'disabled'}>Delete Code</button><button class="primary" type="submit">Save Package</button></div>
+        </form>
+      </div>
+    </div>`;
+  bindPackageEditor(selected);
+}
+
+function bindPackageEditor(selected) {
+  const status = document.querySelector('#packageEditorStatus');
+  document.querySelector('#packageEditorPlan').addEventListener('change', async (event) => {
+    jobsState.packageEditorPlanId = Number(event.target.value);
+    await renderProductsPage();
+  });
+  document.querySelectorAll('[data-package-code]').forEach((button) => button.addEventListener('click', () => drawPackageEditor(Number(button.dataset.packageCode))));
+  document.querySelector('#addPackageItemButton').addEventListener('click', () => document.querySelector('#packageItemRows').insertAdjacentHTML('beforeend', packageItemRow()));
+  document.querySelector('#packageItemRows').addEventListener('click', (event) => {
+    if (event.target.matches('[data-remove-package-item]')) event.target.closest('.package-item-row').remove();
+  });
+  document.querySelector('#newPackageCodeButton').addEventListener('click', () => drawPackageEditor(0));
+  document.querySelector('#newPackagePlanButton').addEventListener('click', async () => {
+    const name = window.prompt('Name for the new package plan:');
+    if (!name) return;
+    try {
+      const result = await trecsApi('createPackagePlan').createPackagePlan({ name });
+      jobsState.packageEditorPlanId = result.id;
+      await renderProductsPage();
+    } catch (error) { status.textContent = error.message; }
+  });
+  document.querySelector('#packageCodeForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const items = Array.from(form.querySelectorAll('.package-item-row')).filter((row) => row.querySelector('[name="productId"]').value).map((row) => ({ productId: Number(row.querySelector('[name="productId"]').value), quantity: Number(row.querySelector('[name="quantity"]').value || 1) }));
+    try {
+      status.textContent = 'Saving...';
+      const result = await trecsApi('savePackageCode').savePackageCode({ id: form.elements.id.value || null, packagePlanId: jobsState.packageEditorPlanId, code: form.elements.code.value, name: form.elements.name.value, items });
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      status.textContent = 'Saved';
+      drawPackageEditor(result.id);
+    } catch (error) { status.textContent = error.message; }
+  });
+  document.querySelector('#deletePackageCodeButton').addEventListener('click', async () => {
+    if (!selected || !window.confirm(`Delete package code ${selected.code}?`)) return;
+    await trecsApi('deletePackageCode').deletePackageCode(selected.id);
+    jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+    drawPackageEditor();
+  });
+  document.querySelector('#testPackageRendersButton').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    status.textContent = 'Testing configured products...';
+    try {
+      const report = await trecsApi('testPackagePlanRenders').testPackagePlanRenders(jobsState.packageEditorPlanId);
+      const rendered = report.results.filter((row) => row.status === 'rendered').length;
+      const needsTemplate = report.results.filter((row) => row.status === 'template_required').length;
+      const nonRendering = report.results.filter((row) => row.status === 'non_rendering').length;
+      status.textContent = `${rendered} rendered; ${needsTemplate} need templates; ${nonRendering} non-rendering. ${report.outputFolder}`;
+    } catch (error) { status.textContent = error.message; }
+    finally { event.currentTarget.disabled = false; }
+  });
+  document.querySelector('#testPictureUnitsButton').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    status.textContent = 'Rendering template-free picture-unit tests...';
+    try {
+      const report = await trecsApi('testPictureUnitRenders').testPictureUnitRenders();
+      status.textContent = `${report.totals.abilities} unit layouts passed across ${report.totals.sheets} sheets. ${report.outputFolder}`;
+    } catch (error) { status.textContent = error.message; }
+    finally { event.currentTarget.disabled = false; }
+  });
 }
 
 async function loadJobDetail(jobId) {
@@ -7546,6 +8198,225 @@ function bindImagePreviewLinkForm(options = {}) {
   bindImageReviewSubjectButtons(form);
 }
 
+function unitRenderSelectedJob() {
+  const setup = jobsState.unitRenderSetup;
+  if (!setup || !unitRenderForm) return null;
+  return setup.jobs.find((job) => Number(job.id) === Number(unitRenderForm.elements.jobId.value)) || null;
+}
+
+function renderUnitRenderFilter() {
+  const setup = jobsState.unitRenderSetup;
+  if (!setup) return;
+  const source = unitRenderForm.elements.source.value;
+  const values = source === 'grade' ? setup.filters.grades : source === 'homeroom' ? setup.filters.homerooms : source === 'individual' ? setup.filters.orders : [];
+  unitRenderFilterField.hidden = source === 'all';
+  unitRenderFilterLabel.textContent = source === 'grade' ? 'Grade' : source === 'homeroom' ? 'Homeroom' : 'Order';
+  unitRenderForm.elements.sourceValue.innerHTML = source === 'individual'
+    ? values.map((order) => `<option value="${order.id}">${escapeHtml(`${order.subjectName || 'Unnamed'} — Ref ${order.ref || ''} — ${order.packageCodes || 'No codes'}${order.hasPhoto ? '' : ' — NO PHOTO'}`)}</option>`).join('')
+    : values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
+}
+
+function renderUnitRenderSummary() {
+  const job = unitRenderSelectedJob();
+  if (!job) {
+    unitRenderMetrics.innerHTML = '<div class="empty-state">No job selected.</div>';
+    return;
+  }
+  unitRenderForm.elements.packagePlan.value = job.packagePlan || 'No package plan';
+  unitRenderMetrics.innerHTML = `
+    <article><span>Paid Orders</span><strong>${formatNumber(job.paidOrders)}</strong></article>
+    <article><span>Ready With Photo</span><strong>${formatNumber(job.readyOrders)}</strong></article>
+    <article><span>Needs Photo</span><strong>${formatNumber(Number(job.paidOrders || 0) - Number(job.readyOrders || 0))}</strong></article>
+    <article><span>All Orders</span><strong>${formatNumber(job.orders)}</strong></article>`;
+}
+
+async function loadUnitRenderSetup(jobId = null) {
+  if (jobsState.unitRenderRunning) return;
+  unitRenderStatus.textContent = 'Loading render queue...';
+  const previousJobId = jobId || unitRenderForm.elements.jobId.value || null;
+  jobsState.unitRenderSetup = await trecsApi('getUnitRenderSetup').getUnitRenderSetup(previousJobId);
+  const setup = jobsState.unitRenderSetup;
+  unitRenderForm.elements.jobId.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(`${job.clientName} — ${job.jobName}`)}</option>`).join('');
+  renderUnitRenderSummary();
+  renderUnitRenderFilter();
+  unitRenderStatus.textContent = setup.jobs.length ? 'Choose an output folder, then render.' : 'No jobs are available.';
+}
+
+async function browseUnitRenderOutput() {
+  const result = await trecsApi('chooseUnitRenderOutputFolder').chooseUnitRenderOutputFolder();
+  if (!result || result.canceled) return;
+  unitRenderForm.elements.outputFolder.value = result.folderPath || '';
+  unitRenderStatus.textContent = 'Output folder selected.';
+}
+
+async function submitUnitRender(event) {
+  event.preventDefault();
+  if (jobsState.unitRenderRunning) return;
+  const outputFolder = unitRenderForm.elements.outputFolder.value;
+  if (!outputFolder) {
+    unitRenderStatus.textContent = 'Choose an output folder first.';
+    return;
+  }
+  const jobId = Number(unitRenderForm.elements.jobId.value);
+  if (!(await acquireUiJobLock(jobId, 'batch_render'))) return;
+  jobsState.unitRenderRunning = true;
+  startUnitRenderButton.disabled = true;
+  browseUnitRenderOutputButton.disabled = true;
+  unitRenderProgress.value = 0;
+  unitRenderStatus.textContent = 'Preparing orders...';
+  try {
+    const result = await trecsApi('runUnitRender').runUnitRender({
+      jobId,
+      source: unitRenderForm.elements.source.value,
+      sourceValue: unitRenderForm.elements.sourceValue.value,
+      sortBy: unitRenderForm.elements.sortBy.value,
+      includeUnits: unitRenderForm.elements.includeUnits.checked,
+      includeEnvelopes: unitRenderForm.elements.includeEnvelopes.checked,
+      includeLabels: unitRenderForm.elements.includeLabels.checked,
+      outputFolder
+    });
+    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped.`;
+  } catch (error) {
+    unitRenderStatus.textContent = error.message || 'Render failed.';
+    console.error(error);
+  } finally {
+    await releaseUiJobLocks(jobId);
+    jobsState.unitRenderRunning = false;
+    startUnitRenderButton.disabled = false;
+    browseUnitRenderOutputButton.disabled = false;
+  }
+}
+
+function selectedCompositeClass() {
+  return jobsState.compositeSetup?.classes.find((group) => group.homeroom === jobsState.compositeHomeroom) || null;
+}
+
+function compositeInput() {
+  const group = selectedCompositeClass();
+  return {
+    jobId: Number(compositeJobSelect.value),
+    homeroom: group?.homeroom || '',
+    type: jobsState.compositePreviewKind,
+    featuredSubjectId: Number(compositeFeaturedStudent.value || group?.featuredStudents?.[0]?.id || 0),
+    schoolName: compositeRenderForm.elements.schoolName.value,
+    principal: compositeRenderForm.elements.principal.value,
+    schoolYear: compositeRenderForm.elements.schoolYear.value,
+    classHeading: compositeRenderForm.elements.classHeading.value,
+    photographedOnly: compositeRenderForm.elements.photographedOnly.checked,
+    includeStaff: compositeRenderForm.elements.includeStaff.checked,
+    includeNames: compositeRenderForm.elements.includeNames.checked
+  };
+}
+
+function renderCompositeClasses() {
+  const setup = jobsState.compositeSetup;
+  const classes = setup?.classes || [];
+  compositeClassCount.textContent = `${formatNumber(classes.length)} classes`;
+  if (!classes.length) {
+    compositeClassList.innerHTML = '<div class="empty-state">This job has no homerooms to build.</div>';
+    compositePreviewStage.innerHTML = '<div class="empty-state">No class is available.</div>';
+    return;
+  }
+  if (!classes.some((group) => group.homeroom === jobsState.compositeHomeroom)) jobsState.compositeHomeroom = classes[0].homeroom;
+  compositeClassList.innerHTML = classes.map((group) => {
+    const overLimit = group.traditionalLayout === 'Over legacy limit' || group.starLayout === 'Over legacy limit';
+    return `<button type="button" class="composite-class-item ${group.homeroom === jobsState.compositeHomeroom ? 'selected' : ''}" data-composite-homeroom="${escapeHtml(group.homeroom)}">
+      <span><strong>${escapeHtml(group.homeroom)}</strong><em>${escapeHtml(group.gradeLabel || 'No grade label')}</em></span>
+      <span class="composite-class-counts"><b>${formatNumber(group.students)}</b> students · ${formatNumber(group.photographed)} photos</span>
+      <span class="composite-class-orders">${formatNumber(group.traditionalOrders)} class · ${formatNumber(group.starOrders)} STAR orders${overLimit ? ' · OVER LIMIT' : ''}</span>
+    </button>`;
+  }).join('');
+  compositeClassList.querySelectorAll('[data-composite-homeroom]').forEach((button) => button.addEventListener('click', () => {
+    jobsState.compositeHomeroom = button.dataset.compositeHomeroom;
+    compositeRenderForm.elements.classHeading.value = '';
+    renderCompositeClasses();
+    updateCompositeFeaturedStudents();
+    refreshCompositePreview();
+  }));
+}
+
+function updateCompositeFeaturedStudents() {
+  const group = selectedCompositeClass();
+  const featured = group?.featuredStudents || [];
+  compositeFeaturedField.hidden = jobsState.compositePreviewKind !== 'star';
+  compositeFeaturedStudent.innerHTML = featured.map((student) => `<option value="${student.id}">${escapeHtml(`${student.name} — Ref ${student.ref || ''}${student.hasPhoto ? '' : ' — NO PHOTO'}${student.starOrders ? ` — ${student.starOrders} STAR` : ''}`)}</option>`).join('');
+}
+
+function renderCompositeJobSummary() {
+  const setup = jobsState.compositeSetup; const classes = setup?.classes || [];
+  const students = classes.reduce((total, group) => total + Number(group.students || 0), 0);
+  const photographed = classes.reduce((total, group) => total + Number(group.photographed || 0), 0);
+  const starOrders = classes.reduce((total, group) => total + Number(group.starOrders || 0), 0);
+  compositeJobMetrics.innerHTML = `<span><strong>${formatNumber(classes.length)}</strong> classes</span><span><strong>${formatNumber(students)}</strong> students</span><span><strong>${formatNumber(photographed)}</strong> photos</span><span><strong>${formatNumber(starOrders)}</strong> STAR orders</span>`;
+}
+
+async function loadCompositeSetup(jobId = null) {
+  if (jobsState.compositeRunning) return;
+  compositeStatus.textContent = 'Loading class groups...';
+  const previousJobId = jobId || compositeJobSelect.value || null;
+  jobsState.compositeSetup = await trecsApi('getCompositeSetup').getCompositeSetup(previousJobId);
+  const setup = jobsState.compositeSetup;
+  compositeJobSelect.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(`${job.clientName} — ${job.jobName} — ${job.classes} classes`)}</option>`).join('');
+  compositeRenderForm.elements.schoolName.value = setup.job?.clientName || '';
+  compositeRenderForm.elements.schoolYear.value = setup.job?.schoolYear || '';
+  jobsState.compositeHomeroom = setup.classes[0]?.homeroom || '';
+  renderCompositeJobSummary();
+  renderCompositeClasses();
+  updateCompositeFeaturedStudents();
+  compositeStatus.textContent = setup.classes.length ? 'Ready. Preview a class or choose an output folder.' : 'This job has no class groups.';
+  if (setup.classes.length) await refreshCompositePreview();
+}
+
+async function refreshCompositePreview() {
+  const group = selectedCompositeClass();
+  if (!group || jobsState.compositeRunning) return;
+  refreshCompositePreviewButton.disabled = true;
+  compositePreviewStage.innerHTML = '<div class="empty-state">Building full-resolution preview...</div>';
+  try {
+    const result = await trecsApi('previewComposite').previewComposite(compositeInput());
+    compositePreviewStage.innerHTML = `<img src="${result.dataUrl}" alt="${escapeHtml(`${group.homeroom} ${jobsState.compositePreviewKind} composite preview`)}">`;
+    compositePreviewMeta.textContent = `${group.homeroom} · ${result.layout} layout · ${result.studentCount} selected students · ${result.width} × ${result.height} pixels at 300 DPI output`;
+  } catch (error) {
+    compositePreviewStage.innerHTML = `<div class="empty-state error-text">${escapeHtml(error.message || 'Preview failed.')}</div>`;
+    compositePreviewMeta.textContent = '';
+  } finally {
+    refreshCompositePreviewButton.disabled = false;
+  }
+}
+
+async function browseCompositeOutput() {
+  const result = await trecsApi('chooseCompositeOutputFolder').chooseCompositeOutputFolder();
+  if (!result || result.canceled) return;
+  compositeRenderForm.elements.outputFolder.value = result.folderPath || '';
+  compositeStatus.textContent = 'Output folder selected.';
+}
+
+async function submitCompositeRender(event) {
+  event.preventDefault();
+  if (jobsState.compositeRunning) return;
+  const input = compositeInput();
+  input.scope = compositeRenderForm.elements.scope.value;
+  input.outputFolder = compositeRenderForm.elements.outputFolder.value;
+  input.includeTraditional = compositeRenderForm.elements.includeTraditional.checked;
+  input.includeStar = compositeRenderForm.elements.includeStar.checked;
+  input.includePurchaserCopies = compositeRenderForm.elements.includePurchaserCopies.checked;
+  if (input.scope === 'all') input.classHeading = '';
+  if (!input.outputFolder) {
+    compositeStatus.textContent = 'Choose an output folder first.';
+    return;
+  }
+  jobsState.compositeRunning = true; renderCompositesButton.disabled = true; browseCompositeOutputButton.disabled = true; compositeProgress.value = 0;
+  try {
+    const result = await trecsApi('renderComposites').renderComposites(input);
+    compositeStatus.textContent = `Complete: ${result.traditionalBackgrounds} traditional backgrounds, ${result.starBackgrounds} STAR backgrounds, ${result.traditionalCopies} traditional buyer copies, and ${result.starCopies} personalized STAR copies.`;
+  } catch (error) {
+    compositeStatus.textContent = error.message || 'Composite render failed.';
+    console.error(error);
+  } finally {
+    jobsState.compositeRunning = false; renderCompositesButton.disabled = false; browseCompositeOutputButton.disabled = false;
+  }
+}
+
 async function loadJobs() {
   const [data, fieldSettings] = await Promise.all([
     trecsApi('getJobsData').getJobsData(),
@@ -7808,9 +8679,72 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'jobs') {
       jobsState.selectedTab = 'subjects';
     }
+    if (['events', 'products', 'studentLists', 'onlineOrders', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
+      closeJobWorkspace();
+    }
     setView(button.dataset.viewButton);
   });
 });
+
+eventJobSelect.addEventListener('change', async () => {
+  const previousId = jobsState.eventSetup?.selectedEventJobId;
+  if (previousId) await releaseUiJobLocks(previousId);
+  loadEventWorkflow(Number(eventJobSelect.value)).catch((error) => { eventSetupStatus.textContent = error.message; });
+});
+linkEventFallJobButton.addEventListener('click', configureSelectedEventFallJob);
+importEventImagesButton.addEventListener('click', importSelectedEventImages);
+createEventJobButton.addEventListener('click', () => {
+  setView('jobs'); setNewJobFormVisible(true); newJobForm.elements.type.value = 'event'; newJobForm.elements.name.focus();
+});
+eventImageQueue.addEventListener('click', (event) => { const button = event.target.closest('[data-event-entry-id]'); if (button) selectEventEntry(Number(button.dataset.eventEntryId)).catch((error) => { eventOrderStatus.textContent = error.message; }); });
+eventQueueFilters.addEventListener('click', (event) => { const button = event.target.closest('[data-event-queue-filter]'); if (!button) return; jobsState.eventQueueFilter = button.dataset.eventQueueFilter; eventQueueFilters.querySelectorAll('[data-event-queue-filter]').forEach((item) => item.classList.toggle('active', item === button)); renderEventQueue(); });
+eventImageNumberSearch.addEventListener('input', renderEventQueue);
+eventImageNumberSearch.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return; event.preventDefault();
+  const value = eventImageNumberSearch.value.trim().toLowerCase(); const queue = jobsState.eventSetup?.queue || [];
+  const exact = queue.find((entry) => String(entry.imageNumber || '').toLowerCase() === value || String(entry.filename || '').toLowerCase() === value);
+  const match = exact || filteredEventQueue()[0];
+  if (match) selectEventEntry(match.id).catch((error) => { eventOrderStatus.textContent = error.message; });
+});
+eventStudentSearch.addEventListener('input', () => { clearTimeout(jobsState.eventSearchTimer); jobsState.eventSearchTimer = setTimeout(() => searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }), 140); });
+eventStudentSearch.addEventListener('keydown', (event) => {
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key) || !jobsState.eventCandidates.length) return;
+  event.preventDefault(); let index = jobsState.eventCandidates.findIndex((candidate) => Number(candidate.id) === Number(jobsState.eventSelectedCandidateId));
+  if (event.key === 'ArrowDown') index = Math.min(jobsState.eventCandidates.length - 1, index + 1);
+  else if (event.key === 'ArrowUp') index = Math.max(0, index < 0 ? 0 : index - 1);
+  else if (index < 0) index = 0;
+  selectEventCandidate(jobsState.eventCandidates[index].id, event.key === 'Enter');
+});
+eventGradeFilter.addEventListener('change', () => searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }));
+eventHomeroomFilter.addEventListener('change', () => searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }));
+eventStudentResults.addEventListener('click', (event) => { const button = event.target.closest('[data-event-candidate-id]'); if (button) selectEventCandidate(button.dataset.eventCandidateId, false); });
+eventStudentResults.addEventListener('dblclick', (event) => { const button = event.target.closest('[data-event-candidate-id]'); if (button) selectEventCandidate(button.dataset.eventCandidateId, true); });
+eventPackageCodeShortcuts.addEventListener('click', (event) => { const button = event.target.closest('[data-event-package-code]'); if (!button) return; const input = eventOrderForm.elements.orderCodes; input.value = input.value.trim() ? `${input.value.trim()}.${button.dataset.eventPackageCode}` : button.dataset.eventPackageCode; input.focus(); });
+eventOrderForm.addEventListener('submit', (event) => { event.preventDefault(); saveEventOrder(true); });
+eventSaveStayButton.addEventListener('click', () => saveEventOrder(false));
+eventAddAnotherButton.addEventListener('click', () => { jobsState.eventSelectedCandidateId = null; eventStudentSearch.value = ''; eventOrderForm.reset(); eventOrderForm.elements.paidStatus.value = 'paid'; renderEventSelectedCandidate(); searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }); eventStudentSearch.focus(); });
+eventExistingLinks.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-event-link]'); if (!button || !window.confirm('Remove this fall-student match and its event order?')) return; try { await trecsApi('removeEventSubjectLink').removeEventSubjectLink(Number(button.dataset.removeEventLink)); await loadEventWorkflow(jobsState.eventSetup.selectedEventJobId, jobsState.eventSetup.selectedEntry.id); } catch (error) { eventOrderStatus.textContent = error.message; } });
+
+studentListJobSelect.addEventListener('change', () => loadStudentListSetup(Number(studentListJobSelect.value)).catch((error) => { studentListStatus.textContent = error.message; }));
+studentListSearch.addEventListener('input', renderStudentListBuilder);
+newStudentListButton.addEventListener('click', startNewStudentList);
+addSelectedStudentsButton.addEventListener('click', addCheckedStudentsToList);
+saveStudentListButton.addEventListener('click', saveCurrentStudentList);
+deleteStudentListButton.addEventListener('click', () => deleteCurrentStudentList().catch((error) => { studentListStatus.textContent = error.message; }));
+studentListsSaved.addEventListener('click', (event) => { const button = event.target.closest('[data-list-id]'); if (button) loadStudentListSetup(Number(studentListJobSelect.value), Number(button.dataset.listId)).catch((error) => { studentListStatus.textContent = error.message; }); });
+studentListAvailable.addEventListener('change', (event) => { const checkbox = event.target.closest('[data-available-subject]'); if (!checkbox) return; const id = Number(checkbox.dataset.availableSubject); if (checkbox.checked) jobsState.studentListCheckedIds.add(id); else jobsState.studentListCheckedIds.delete(id); });
+studentListMembers.addEventListener('click', (event) => { const remove = event.target.closest('[data-member-remove]'); const up = event.target.closest('[data-member-up]'); const down = event.target.closest('[data-member-down]'); if (remove) { jobsState.studentListMemberIds = jobsState.studentListMemberIds.filter((id) => Number(id) !== Number(remove.dataset.memberRemove)); renderStudentListBuilder(); } else if (up) moveStudentListMember(up.dataset.memberUp, -1); else if (down) moveStudentListMember(down.dataset.memberDown, 1); });
+onlineOrderJobSelect.addEventListener('change', () => { jobsState.onlineOrderPreview = null; onlineOrderFileName.textContent = 'No file chosen'; renderOnlineOrderPreview(); });
+chooseOnlineOrderFileButton.addEventListener('click', chooseOnlineOrderFile);
+onlineOrderMapping.addEventListener('change', () => refreshOnlineOrderPreviewFromMapping().catch((error) => { onlineOrderStatus.textContent = error.message; }));
+importOnlineOrdersButton.addEventListener('click', importReadyOnlineOrders);
+browseBatchRenderOutputButton.addEventListener('click', browseBatchRenderOutput);
+refreshBatchRenderButton.addEventListener('click', () => loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message; }));
+batchRenderForm.addEventListener('submit', submitBatchRender);
+
+setInterval(() => {
+  if (activeJobLockIds.size) trecsApi('heartbeatJobSessions').heartbeatJobSessions(Array.from(activeJobLockIds)).catch((error) => console.error('Job lock heartbeat failed', error));
+}, 30000);
 
 viewTargets.forEach((button) => {
   button.addEventListener('click', () => {
@@ -7843,7 +8777,12 @@ jobSearchInput.addEventListener('input', () => {
 backToJobsButton.addEventListener('click', () => {
   if (jobsState.workspaceMode === 'idTemplates') {
     setWorkspaceMode('admin');
-  } else if (jobsState.workspaceMode === 'capture' || jobsState.workspaceMode === 'envelope' || jobsState.workspaceMode === 'imageReview') {
+  } else if (
+    jobsState.workspaceMode === 'capture'
+    || jobsState.workspaceMode === 'envelope'
+    || jobsState.workspaceMode === 'imageReview'
+    || jobsState.workspaceMode === 'pictureDay'
+  ) {
     setWorkspaceMode('students');
   } else {
     closeJobWorkspace();
@@ -8464,7 +9403,11 @@ cancelSchoolDataButton.addEventListener('click', () => {
 browseSchoolDataButton.addEventListener('click', browseSchoolDataFile);
 confirmSchoolDataButton.addEventListener('click', confirmSchoolDataImport);
 captureLoginForm.addEventListener('submit', submitCaptureLogin);
-cancelCaptureLoginButton.addEventListener('click', () => setCaptureLoginVisible(false));
+cancelCaptureLoginButton.addEventListener('click', () => {
+  const jobId = jobsState.pendingCaptureJobId;
+  setCaptureLoginVisible(false);
+  if (jobId && !jobsState.jobWorkspaceOpen) releaseUiJobLocks(jobId).catch((error) => console.error(error));
+});
 window.addEventListener('focus', () => {
   if (!captureLoginModal.hidden) {
     focusCaptureLoginPhotographer();
@@ -8524,3 +9467,27 @@ cancelImportPreviousJobButton.addEventListener('click', () => {
 
 browsePreviousJobFolderButton.addEventListener('click', browsePreviousJobFolder);
 importPreviousJobForm.addEventListener('submit', submitImportPreviousJob);
+
+unitRenderForm.elements.jobId.addEventListener('change', () => {
+  loadUnitRenderSetup(Number(unitRenderForm.elements.jobId.value)).catch((error) => {
+    unitRenderStatus.textContent = error.message || 'Could not load job render options.';
+  });
+});
+unitRenderForm.elements.source.addEventListener('change', renderUnitRenderFilter);
+browseUnitRenderOutputButton.addEventListener('click', browseUnitRenderOutput);
+unitRenderForm.addEventListener('submit', submitUnitRender);
+compositeJobSelect.addEventListener('change', () => {
+  loadCompositeSetup(Number(compositeJobSelect.value)).catch((error) => {
+    compositeStatus.textContent = error.message || 'Could not load composite classes.';
+  });
+});
+compositePreviewType.querySelectorAll('[data-composite-type]').forEach((button) => button.addEventListener('click', () => {
+  jobsState.compositePreviewKind = button.dataset.compositeType;
+  compositePreviewType.querySelectorAll('[data-composite-type]').forEach((item) => item.classList.toggle('active', item === button));
+  updateCompositeFeaturedStudents();
+  refreshCompositePreview();
+}));
+compositeFeaturedStudent.addEventListener('change', refreshCompositePreview);
+refreshCompositePreviewButton.addEventListener('click', refreshCompositePreview);
+browseCompositeOutputButton.addEventListener('click', browseCompositeOutput);
+compositeRenderForm.addEventListener('submit', submitCompositeRender);

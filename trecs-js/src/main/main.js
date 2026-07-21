@@ -38,8 +38,57 @@ const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
 const LEGACY_IMAGE_FOLDER = 'Images';
+const APP_SESSION_ID = crypto.randomUUID();
+const JOB_LOCK_TTL_SECONDS = 120;
+const DATABASE_WRITE_LOCK_PATH = `${prototypeDatabasePath}.write-lock`;
 
 let sqlModulePromise;
+
+function waitMilliseconds(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function acquireDatabaseWriteLock(timeoutMilliseconds = 15000) {
+  const startedAt = Date.now();
+  fs.mkdirSync(path.dirname(DATABASE_WRITE_LOCK_PATH), { recursive: true });
+  while (Date.now() - startedAt < timeoutMilliseconds) {
+    try {
+      fs.mkdirSync(DATABASE_WRITE_LOCK_PATH);
+      fs.writeFileSync(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), JSON.stringify({
+        sessionId: APP_SESSION_ID,
+        computerName: process.env.COMPUTERNAME || os.hostname() || '',
+        userName: process.env.USERNAME || os.userInfo().username || '',
+        acquiredAt: new Date().toISOString()
+      }, null, 2));
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const stat = fs.statSync(DATABASE_WRITE_LOCK_PATH);
+        if (Date.now() - stat.mtimeMs > 60000) {
+          fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statError) {
+        if (statError.code !== 'ENOENT') throw statError;
+      }
+      waitMilliseconds(75);
+    }
+  }
+  throw new Error('TRECS could not save because another workstation is writing the shared database. Try again in a few seconds.');
+}
+
+function releaseDatabaseWriteLock() {
+  try {
+    const ownerPath = path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json');
+    const owner = fs.existsSync(ownerPath) ? JSON.parse(fs.readFileSync(ownerPath, 'utf8')) : null;
+    if (!owner || owner.sessionId === APP_SESSION_ID) {
+      fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
+    }
+  } catch (_error) {
+    // A stale lock is recoverable on the next write.
+  }
+}
 
 function systemInfo() {
   return {
@@ -519,6 +568,31 @@ function createJobDatabaseSchema(database) {
       manifest_json TEXT,
       UNIQUE(job_id, package_folder)
     );
+
+    CREATE TABLE IF NOT EXISTS event_entries (
+      id INTEGER PRIMARY KEY,
+      event_job_id INTEGER NOT NULL,
+      fall_job_id INTEGER,
+      event_image_asset_id INTEGER NOT NULL,
+      image_number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'unlinked',
+      notes TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      UNIQUE(event_job_id, event_image_asset_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS event_subject_links (
+      id INTEGER PRIMARY KEY,
+      event_entry_id INTEGER NOT NULL,
+      fall_subject_id INTEGER NOT NULL,
+      order_id INTEGER,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      notes TEXT,
+      UNIQUE(event_entry_id, fall_subject_id)
+    );
   `);
 }
 
@@ -848,6 +922,12 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'envelope_scans', Object.keys(envelopeRows[0] || {}), envelopeRows);
     const adminRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM admin_item_batches WHERE job_id = ${jobId};`);
     insertRows(jobDatabase, 'admin_item_batches', Object.keys(adminRows[0] || {}), adminRows);
+    const eventEntryRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM event_entries WHERE event_job_id = ${jobId};`);
+    const eventEntryIds = eventEntryRows.map((row) => row.id);
+    const eventEntryIdList = eventEntryIds.length ? eventEntryIds.join(', ') : '0';
+    insertRows(jobDatabase, 'event_entries', Object.keys(eventEntryRows[0] || {}), eventEntryRows);
+    const eventLinkRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM event_subject_links WHERE event_entry_id IN (${eventEntryIdList});`);
+    insertRows(jobDatabase, 'event_subject_links', Object.keys(eventLinkRows[0] || {}), eventLinkRows);
 
     jobDatabase.run('COMMIT;');
     fs.writeFileSync(jobDatabasePath, Buffer.from(jobDatabase.export()));
@@ -1042,6 +1122,90 @@ async function ensurePrototypeDatabaseShape() {
         UNIQUE(name, template_type)
       );
 
+      CREATE TABLE IF NOT EXISTS job_sessions (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        session_uuid TEXT NOT NULL,
+        workstation_name TEXT NOT NULL,
+        user_name TEXT,
+        lock_scope TEXT NOT NULL DEFAULT 'job_write',
+        lock_mode TEXT NOT NULL DEFAULT 'exclusive',
+        session_status TEXT NOT NULL DEFAULT 'open',
+        opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TEXT,
+        closed_at TEXT,
+        metadata_json TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS event_entries (
+        id INTEGER PRIMARY KEY,
+        event_job_id INTEGER NOT NULL,
+        fall_job_id INTEGER,
+        event_image_asset_id INTEGER NOT NULL,
+        image_number TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unlinked',
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(event_job_id, event_image_asset_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS event_subject_links (
+        id INTEGER PRIMARY KEY,
+        event_entry_id INTEGER NOT NULL,
+        fall_subject_id INTEGER NOT NULL,
+        order_id INTEGER,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        confirmed_by TEXT,
+        confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT,
+        UNIQUE(event_entry_id, fall_subject_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS render_batches (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        output_path TEXT,
+        options_json TEXT,
+        result_json TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS render_batch_jobs (
+        id INTEGER PRIMARY KEY,
+        render_batch_id INTEGER NOT NULL,
+        job_id INTEGER NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        output_path TEXT,
+        result_json TEXT,
+        error_message TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(render_batch_id, job_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS render_tasks (
+        id INTEGER PRIMARY KEY,
+        render_batch_id INTEGER NOT NULL,
+        order_item_id INTEGER,
+        job_id INTEGER,
+        order_id INTEGER,
+        task_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        output_path TEXT,
+        details_json TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
     `);
     changed = true;
 
@@ -1053,6 +1217,17 @@ async function ensurePrototypeDatabaseShape() {
     changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT') || changed;
+    changed = ensureColumn(database, 'job_sessions', 'session_uuid', 'TEXT') || changed;
+    changed = ensureColumn(database, 'job_sessions', 'lock_scope', "TEXT NOT NULL DEFAULT 'job_write'") || changed;
+    changed = ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'") || changed;
+    changed = ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT') || changed;
+    changed = ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT') || changed;
+    changed = ensureColumn(database, 'render_batches', 'output_path', 'TEXT') || changed;
+    changed = ensureColumn(database, 'render_batches', 'options_json', 'TEXT') || changed;
+    changed = ensureColumn(database, 'render_batches', 'result_json', 'TEXT') || changed;
+    changed = ensureColumn(database, 'render_tasks', 'job_id', 'INTEGER') || changed;
+    changed = ensureColumn(database, 'render_tasks', 'order_id', 'INTEGER') || changed;
+    changed = ensureColumn(database, 'render_tasks', 'details_json', 'TEXT') || changed;
     changed = migrateExistingIdTemplateFiles(database) || changed;
 
     database.run(`
@@ -1061,6 +1236,21 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
       ON image_assets(job_id, shoot_stage);
+
+      CREATE INDEX IF NOT EXISTS idx_job_sessions_active
+      ON job_sessions(job_id, session_status, lock_scope);
+
+      CREATE INDEX IF NOT EXISTS idx_render_batch_jobs_batch
+      ON render_batch_jobs(render_batch_id, sort_order);
+
+      CREATE INDEX IF NOT EXISTS idx_event_entries_job_status
+      ON event_entries(event_job_id, status, image_number);
+
+      CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
+      ON event_subject_links(event_entry_id, sort_order);
+
+      CREATE INDEX IF NOT EXISTS idx_event_subject_links_fall_subject
+      ON event_subject_links(fall_subject_id);
     `);
 
     if (changed) {
@@ -2080,11 +2270,13 @@ ipcMain.handle('end-of-day:preview', getEndOfDayPreview);
 ipcMain.handle('end-of-day:create', createEndOfDayPackage);
 
 async function writeSql(updateDatabase) {
-  const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const database = new SQL.Database(databaseBytes);
+  acquireDatabaseWriteLock();
+  let database;
 
   try {
+    const SQL = await getSqlModule();
+    const databaseBytes = fs.readFileSync(prototypeDatabasePath);
+    database = new SQL.Database(databaseBytes);
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
     database.run('COMMIT');
@@ -2092,15 +2284,88 @@ async function writeSql(updateDatabase) {
     return result;
   } catch (error) {
     try {
-      database.run('ROLLBACK');
+      if (database) database.run('ROLLBACK');
     } catch (_rollbackError) {
       // The original database error is more useful than a rollback failure.
     }
     throw error;
   } finally {
-    database.close();
+    if (database) database.close();
+    releaseDatabaseWriteLock();
   }
 }
+
+function jobLockExpirySql() {
+  return `datetime('now', '+${JOB_LOCK_TTL_SECONDS} seconds')`;
+}
+
+async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
+  const jobId = numericId(jobIdValue);
+  const scope = ['job_write', 'batch_render'].includes(String(scopeValue)) ? String(scopeValue) : 'job_write';
+  return writeSql((database) => {
+    database.run(`UPDATE job_sessions SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP
+      WHERE session_status = 'open' AND (expires_at IS NULL OR expires_at <= CURRENT_TIMESTAMP);`);
+    const job = rowsFromDatabase(database, `SELECT j.id, j.name, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId} LIMIT 1;`)[0];
+    if (!job) throw new Error('Job not found');
+    const conflict = rowsFromDatabase(database, `
+      SELECT id, workstation_name AS workstationName, user_name AS userName, lock_scope AS scope,
+             opened_at AS openedAt, last_seen_at AS lastSeenAt, expires_at AS expiresAt
+      FROM job_sessions
+      WHERE job_id = ${jobId} AND session_status = 'open' AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)}
+      ORDER BY opened_at LIMIT 1;
+    `)[0];
+    if (conflict) return { acquired: false, job, conflict };
+    const own = rowsFromDatabase(database, `SELECT id FROM job_sessions WHERE job_id = ${jobId} AND session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' LIMIT 1;`)[0];
+    if (own) {
+      database.run(`UPDATE job_sessions SET last_seen_at = CURRENT_TIMESTAMP, expires_at = ${jobLockExpirySql()}, lock_scope = ${sqlLiteral(scope)} WHERE id = ${Number(own.id)};`);
+      return { acquired: true, job, sessionId: own.id, reused: true };
+    }
+    database.run(`INSERT INTO job_sessions (job_id, session_uuid, workstation_name, user_name, lock_scope, lock_mode, session_status, expires_at, metadata_json)
+      VALUES (?, ?, ?, ?, ?, 'exclusive', 'open', ${jobLockExpirySql()}, ?);`, [jobId, APP_SESSION_ID, systemInfo().computerName, systemInfo().userName, scope, JSON.stringify({ pid: process.pid })]);
+    return { acquired: true, job, sessionId: rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id };
+  });
+}
+
+async function heartbeatJobSessions(_event, jobIdsValue = []) {
+  const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  if (!jobIds.length) return { refreshed: 0 };
+  return writeSql((database) => {
+    database.run(`UPDATE job_sessions SET last_seen_at = CURRENT_TIMESTAMP, expires_at = ${jobLockExpirySql()}
+      WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
+    return { refreshed: database.getRowsModified() };
+  });
+}
+
+async function releaseJobSession(_event, jobIdsValue = []) {
+  const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  if (!jobIds.length) return { released: 0 };
+  return writeSql((database) => {
+    database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
+      WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
+    return { released: database.getRowsModified() };
+  });
+}
+
+async function releaseAllOwnedJobSessions() {
+  return writeSql((database) => {
+    database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
+      WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open';`);
+    return { released: database.getRowsModified() };
+  });
+}
+
+async function getJobSessions() {
+  return querySql(`SELECT js.id, js.job_id AS jobId, j.name AS jobName, c.display_name AS clientName,
+    js.workstation_name AS workstationName, js.user_name AS userName, js.lock_scope AS scope,
+    js.opened_at AS openedAt, js.last_seen_at AS lastSeenAt, js.expires_at AS expiresAt
+    FROM job_sessions js JOIN jobs j ON j.id = js.job_id JOIN clients c ON c.id = j.client_id
+    WHERE js.session_status = 'open' AND js.expires_at > CURRENT_TIMESTAMP ORDER BY c.display_name, j.name;`);
+}
+
+ipcMain.handle('job-session:acquire', acquireJobSession);
+ipcMain.handle('job-session:heartbeat', heartbeatJobSessions);
+ipcMain.handle('job-session:release', releaseJobSession);
+ipcMain.handle('job-session:list', getJobSessions);
 
 async function getDashboardData() {
   const counts = await querySql(`
@@ -2155,6 +2420,1199 @@ async function getDashboardData() {
 }
 
 ipcMain.handle('dashboard:get', getDashboardData);
+
+async function getPackageEditorData(_event, packagePlanIdValue = null) {
+  const requestedPlanId = packagePlanIdValue ? numericId(packagePlanIdValue) : null;
+  const plans = await querySql(`
+    SELECT id, name, version, active, legacy_name AS legacyName
+    FROM package_plans
+    ORDER BY active DESC, name, version DESC;
+  `);
+  const selectedPlanId = requestedPlanId || (plans.length ? Number(plans[0].id) : null);
+  const products = await querySql(`
+    SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
+    FROM products
+    ORDER BY category, name;
+  `);
+  const codes = selectedPlanId ? await querySql(`
+    SELECT id, code, name, active, legacy_code_name AS legacyCodeName
+    FROM package_codes
+    WHERE package_plan_id = ${selectedPlanId}
+    ORDER BY CAST(code AS INTEGER), code;
+  `) : [];
+  const codeIds = codes.map((row) => Number(row.id));
+  const items = codeIds.length ? await querySql(`
+    SELECT pci.id, pci.package_code_id AS packageCodeId, pci.raw_value AS rawValue,
+           pci.product_id AS productId, pci.quantity, pci.sort_order AS sortOrder,
+           p.name AS productName, p.category
+    FROM package_code_items pci
+    LEFT JOIN products p ON p.id = pci.product_id
+    WHERE pci.package_code_id IN (${codeIds.join(',')})
+    ORDER BY pci.package_code_id, pci.sort_order, pci.id;
+  `) : [];
+  const byCode = new Map(codes.map((code) => [Number(code.id), { ...code, items: [] }]));
+  items.forEach((item) => byCode.get(Number(item.packageCodeId))?.items.push(item));
+  return { plans, selectedPlanId, products, codes: Array.from(byCode.values()) };
+}
+
+async function createPackagePlan(_event, input = {}) {
+  const name = optionalText(input.name, 255);
+  if (!name) throw new Error('Package plan name is required');
+  const version = Math.max(1, Number.parseInt(input.version || '1', 10) || 1);
+  return writeSql((database) => {
+    database.run(`INSERT INTO package_plans (name, version, active) VALUES (?, ?, 1);`, [name, version]);
+    return { id: Number(database.exec('SELECT last_insert_rowid() AS id;')[0].values[0][0]), name, version };
+  });
+}
+
+async function savePackageCode(_event, input = {}) {
+  const planId = numericId(input.packagePlanId);
+  const code = optionalText(input.code, 100);
+  if (!code) throw new Error('Package code is required');
+  const name = optionalText(input.name, 255) || '';
+  const incomingItems = Array.isArray(input.items) ? input.items : [];
+  return writeSql((database) => {
+    let packageCodeId = input.id ? numericId(input.id) : null;
+    if (packageCodeId) {
+      database.run(`UPDATE package_codes SET code = ?, name = ?, active = ?, legacy_code_name = COALESCE(legacy_code_name, ?) WHERE id = ? AND package_plan_id = ?;`,
+        [code, name, input.active === false ? 0 : 1, name, packageCodeId, planId]);
+      database.run('DELETE FROM package_code_items WHERE package_code_id = ?;', [packageCodeId]);
+    } else {
+      database.run(`INSERT INTO package_codes (package_plan_id, code, name, active, legacy_code_name) VALUES (?, ?, ?, 1, ?);`, [planId, code, name, name]);
+      packageCodeId = Number(database.exec('SELECT last_insert_rowid() AS id;')[0].values[0][0]);
+    }
+    incomingItems.forEach((item, index) => {
+      const productId = numericId(item.productId);
+      const productRows = rowsFromDatabase(database, `SELECT name FROM products WHERE id = ${productId} LIMIT 1;`);
+      if (!productRows.length) throw new Error('Product not found');
+      const quantity = Math.max(1, Math.min(999, Number.parseInt(item.quantity || '1', 10) || 1));
+      database.run(`INSERT INTO package_code_items (package_code_id, legacy_field, raw_value, product_id, quantity, sort_order) VALUES (?, ?, ?, ?, ?, ?);`,
+        [packageCodeId, `f${index + 1}`, productRows[0].name, productId, quantity, index]);
+    });
+    return { id: packageCodeId };
+  });
+}
+
+async function deletePackageCode(_event, packageCodeIdValue) {
+  const packageCodeId = numericId(packageCodeIdValue);
+  return writeSql((database) => {
+    database.run('DELETE FROM package_codes WHERE id = ?;', [packageCodeId]);
+    return { deleted: packageCodeId };
+  });
+}
+
+function productRenderSupport(product) {
+  const category = String(product.category || '');
+  if (['render_modifier', 'service', 'fulfillment', 'workflow', 'package_builder', 'package_marker'].includes(category)) return 'non_rendering';
+  if (['print', 'print_bundle', 'id_card'].includes(category)) return 'renderable';
+  return 'template_required';
+}
+
+const UNIT_LAYOUTS = {
+  eightByTen: [[0, 0, 2400, 3150]],
+  twoFiveBySeven: [[0, 0, 2100, 1500], [0, 1501, 2100, 1500]],
+  fourFourByFive: [[0, 0, 1200, 1500], [1202, 0, 1200, 1500], [0, 1502, 1200, 1500], [1202, 1502, 1200, 1500]],
+  twoThreeByFive: [[0, 0, 1050, 1500], [1052, 0, 1050, 1500]],
+  fourThreeByFive: [[0, 0, 1050, 1500], [1052, 0, 1050, 1500], [0, 1502, 1050, 1500], [1052, 1502, 1050, 1500]],
+  fourWallets: [[0, 0, 1050, 750], [1052, 0, 1050, 750], [0, 752, 1050, 750], [1052, 752, 1050, 750]],
+  eightWallets: [[0, 0, 1050, 750], [1052, 0, 1050, 750], [0, 752, 1050, 750], [1052, 752, 1050, 750], [0, 1504, 1050, 750], [1054, 1504, 1050, 750], [0, 2254, 1050, 750], [1054, 2254, 1050, 750]],
+  sixteenMini: Array.from({ length: 16 }, (_value, index) => [(index % 4) * 602, Math.floor(index / 4) * 752, 600, 750])
+};
+
+function repeatedUnitSheets(layout, count) {
+  return Array.from({ length: count }, () => layout);
+}
+
+function pictureUnitRecipes() {
+  const walletFourFiveSeven = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 2100, 1500]];
+  const walletFourFourFive = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 1200, 1500], [1202, 1504, 1200, 1500]];
+  const walletFourThreeFive = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 1050, 1500], [1052, 1504, 1050, 1500]];
+  const miniEight = UNIT_LAYOUTS.sixteenMini.slice(8).map(([x, y, width, height]) => [x, y - 1504, width, height]);
+  const miniEightBottom = miniEight.map(([x, y, width, height]) => [x, y + 1502, width, height]);
+  return [
+    { name: '8x10', sheets: [UNIT_LAYOUTS.eightByTen], expectedPrints: 1 },
+    { name: '2-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 2), expectedPrints: 2 },
+    { name: '3-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 3), expectedPrints: 3 },
+    { name: '2-5x7', sheets: [UNIT_LAYOUTS.twoFiveBySeven], expectedPrints: 2 },
+    { name: '4-5x7', sheets: repeatedUnitSheets(UNIT_LAYOUTS.twoFiveBySeven, 2), expectedPrints: 4 },
+    { name: '6-5x7', sheets: repeatedUnitSheets(UNIT_LAYOUTS.twoFiveBySeven, 3), expectedPrints: 6 },
+    { name: '4-4x5', sheets: [UNIT_LAYOUTS.fourFourByFive], expectedPrints: 4 },
+    { name: '8-4x5', sheets: repeatedUnitSheets(UNIT_LAYOUTS.fourFourByFive, 2), expectedPrints: 8 },
+    { name: '2-3x5', sheets: [UNIT_LAYOUTS.twoThreeByFive], expectedPrints: 2 },
+    { name: '4-3x5', sheets: [UNIT_LAYOUTS.fourThreeByFive], expectedPrints: 4 },
+    { name: '8-3x5', sheets: repeatedUnitSheets(UNIT_LAYOUTS.fourThreeByFive, 2), expectedPrints: 8 },
+    { name: '4 Wallets', sheets: [UNIT_LAYOUTS.fourWallets], expectedPrints: 4 },
+    { name: '8 Wallets', sheets: [UNIT_LAYOUTS.eightWallets], expectedPrints: 8 },
+    { name: '16 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 2), expectedPrints: 16 },
+    { name: '24 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 3), expectedPrints: 24 },
+    { name: '32 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 4), expectedPrints: 32 },
+    { name: '16 Mini', sheets: [UNIT_LAYOUTS.sixteenMini], expectedPrints: 16 },
+    { name: '2-3x5 & 5x7', sheets: [[...UNIT_LAYOUTS.twoThreeByFive, [0, 1502, 2100, 1500]]], expectedPrints: 3 },
+    { name: '4 Wall & 5x7', sheets: [walletFourFiveSeven], expectedPrints: 5 },
+    { name: '4 Wall & 2-4x5', sheets: [walletFourFourFive], expectedPrints: 6 },
+    { name: '4 Wall & 2-3x5', sheets: [walletFourThreeFive], expectedPrints: 6 },
+    { name: '8 Mini & 2-4x5', sheets: [[...UNIT_LAYOUTS.fourFourByFive.slice(0, 2), ...miniEightBottom]], expectedPrints: 10 },
+    { name: '8 Mini & 2-3x5', sheets: [[...UNIT_LAYOUTS.twoThreeByFive, ...miniEightBottom]], expectedPrints: 10 },
+    { name: '6-3x5 & 12 Wallets', sheets: [UNIT_LAYOUTS.fourThreeByFive, walletFourThreeFive, UNIT_LAYOUTS.eightWallets], expectedPrints: 18 },
+    { name: '3-5x7 & 12 Wallets', sheets: [UNIT_LAYOUTS.twoFiveBySeven, walletFourFiveSeven, UNIT_LAYOUTS.eightWallets], expectedPrints: 15 }
+  ];
+}
+
+function syntheticPortraitSvg(x, y, width, height, index) {
+  const hue = (index * 37) % 360;
+  const rotated = width > height;
+  const transform = rotated ? `translate(${x + width} ${y}) rotate(90)` : `translate(${x} ${y})`;
+  const targetWidth = rotated ? height : width;
+  const targetHeight = rotated ? width : height;
+  return `<g transform="${transform}"><svg width="${targetWidth}" height="${targetHeight}" viewBox="0 0 800 1050" preserveAspectRatio="xMidYMid slice">
+    <rect width="800" height="1050" fill="hsl(${hue} 35% 82%)"/>
+    <path d="M0 0h800v1050H0z" fill="none" stroke="#142d3d" stroke-width="18"/>
+    <path d="M400 70l-42 74h84z" fill="#d53636"/><text x="400" y="55" text-anchor="middle" font-family="Arial" font-size="34" font-weight="bold">TOP</text>
+    <circle cx="400" cy="380" r="180" fill="#e8b891" stroke="#142d3d" stroke-width="12"/>
+    <circle cx="340" cy="350" r="18"/><circle cx="460" cy="350" r="18"/><path d="M320 455q80 70 160 0" fill="none" stroke="#142d3d" stroke-width="14"/>
+    <path d="M100 1050q70-390 300-390t300 390" fill="hsl(${hue} 55% 38%)" stroke="#142d3d" stroke-width="14"/>
+    <text x="400" y="930" text-anchor="middle" font-family="Arial" font-size="45" font-weight="bold" fill="white">UNIT TEST</text>
+    <path d="M0 525h800M400 0v1050" stroke="#fff" stroke-opacity=".35" stroke-width="4" stroke-dasharray="20 15"/>
+  </svg></g>`;
+}
+
+function pictureUnitSheetSvg(recipeName, placements, sheetIndex, sheetCount) {
+  const units = placements.map((placement, index) => syntheticPortraitSvg(...placement, index)).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="3150" viewBox="0 0 2400 3150">
+    <rect width="2400" height="3150" fill="white"/>${units}
+    <rect x="8" y="3075" width="2384" height="67" fill="white" fill-opacity=".88"/>
+    <text x="30" y="3125" font-family="Arial" font-size="34" fill="#111">${escapeXml(recipeName)} — sheet ${sheetIndex + 1} of ${sheetCount}</text>
+  </svg>`;
+}
+
+async function rasterizeUnitSheet(webContents, svg, width, height) {
+  const source = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = ${width};
+        canvas.height = ${height};
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.94));
+      } catch (error) { reject(error.message); }
+    };
+    image.onerror = () => reject('Chromium could not decode the unit sheet SVG.');
+    image.src = ${JSON.stringify(source)};
+  })`);
+}
+
+async function testPictureUnitRenders(event) {
+  const outputFolder = path.join(projectRoot, 'exports', 'picture-unit-tests');
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const results = [];
+  for (const recipe of pictureUnitRecipes()) {
+    const files = [];
+    let placementCount = 0;
+    for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
+      const placements = recipe.sheets[sheetIndex];
+      placementCount += placements.length;
+      const svg = pictureUnitSheetSvg(recipe.name, placements, sheetIndex, recipe.sheets.length);
+      const dataUrl = await rasterizeUnitSheet(event.sender, svg, 2400, 3150);
+      const image = nativeImage.createFromDataURL(dataUrl);
+      const size = image.getSize();
+      if (image.isEmpty() || size.width !== 2400 || size.height !== 3150) throw new Error(`${recipe.name} sheet ${sheetIndex + 1} did not rasterize at 2400 x 3150 (received ${size.width} x ${size.height}, empty: ${image.isEmpty()}).`);
+      const filename = `${String(results.length + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}-of-${recipe.sheets.length}.jpg`;
+      const outputPath = path.join(outputFolder, filename);
+      const jpeg = setJpegDensity(image.toJPEG(94), 300);
+      fs.writeFileSync(outputPath, jpeg);
+      if (jpeg.length < 25000) throw new Error(`${recipe.name} sheet ${sheetIndex + 1} produced an unexpectedly small file.`);
+      files.push({ outputPath, width: size.width, height: size.height, bytes: jpeg.length });
+    }
+    const passed = placementCount === recipe.expectedPrints;
+    results.push({ name: recipe.name, status: passed ? 'passed' : 'failed', expectedPrints: recipe.expectedPrints, renderedPrints: placementCount, sheets: files });
+  }
+  const report = {
+    passed: results.every((result) => result.status === 'passed'),
+    templateProductsExcluded: true,
+    outputFolder,
+    createdAt: new Date().toISOString(),
+    totals: { abilities: results.length, sheets: results.reduce((total, result) => total + result.sheets.length, 0), failed: results.filter((result) => result.status !== 'passed').length },
+    results
+  };
+  fs.writeFileSync(path.join(outputFolder, 'picture-unit-test-report.json'), JSON.stringify(report, null, 2));
+  return report;
+}
+
+async function getUnitRenderSetup(_event, jobIdValue = null) {
+  const jobs = await querySql(`
+    SELECT j.id, c.display_name AS clientName, j.name AS jobName, j.type,
+           j.package_plan_id AS packagePlanId, COALESCE(pp.name, '') AS packagePlan,
+           COUNT(DISTINCT o.id) AS orders,
+           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' THEN o.id END) AS paidOrders,
+           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND s.primary_image_asset_id IS NOT NULL THEN o.id END) AS readyOrders
+    FROM jobs j
+    JOIN clients c ON c.id = j.client_id
+    LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
+    LEFT JOIN orders o ON o.job_id = j.id
+    LEFT JOIN subjects s ON s.id = o.subject_id
+    GROUP BY j.id
+    ORDER BY c.display_name, j.name;
+  `);
+  const jobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.readyOrders) > 0)?.id || jobs[0]?.id || null);
+  if (!jobId) return { jobs, selectedJobId: null, filters: { grades: [], homerooms: [], orders: [] } };
+  const filters = {
+    grades: (await querySql(`SELECT DISTINCT COALESCE(s.grade, '') AS value FROM subjects s JOIN orders o ON o.subject_id = s.id WHERE o.job_id = ${jobId} AND o.paid_status = 'paid' ORDER BY value;`)).map((row) => row.value).filter(Boolean),
+    homerooms: (await querySql(`SELECT DISTINCT COALESCE(s.homeroom, '') AS value FROM subjects s JOIN orders o ON o.subject_id = s.id WHERE o.job_id = ${jobId} AND o.paid_status = 'paid' ORDER BY value;`)).map((row) => row.value).filter(Boolean),
+    orders: await querySql(`
+      SELECT o.id, s.legacy_ref_num AS ref,
+             COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName,
+             GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
+             CASE WHEN s.primary_image_asset_id IS NULL THEN 0 ELSE 1 END AS hasPhoto
+      FROM orders o JOIN subjects s ON s.id = o.subject_id
+      LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
+      GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
+    `)
+  };
+  return { jobs, selectedJobId: jobId, filters };
+}
+
+async function chooseUnitRenderOutputFolder() {
+  const result = await dialog.showOpenDialog({ title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
+  return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
+}
+
+function unitRenderSortValue(order, sortBy) {
+  if (sortBy === 'grade') return `${order.grade || 'No Grade'}_${order.lastName || ''}_${order.firstName || ''}`;
+  if (sortBy === 'homeroom') return `${order.homeroom || 'No Homeroom'}_${order.lastName || ''}_${order.firstName || ''}`;
+  return `${order.lastName || 'No Last'}_${order.firstName || ''}`;
+}
+
+function imageDataUrlFromPath(imagePathValue) {
+  const filePath = resolveProjectPath(imagePathValue);
+  if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return null;
+  const extension = path.extname(filePath).toLowerCase();
+  const mime = extension === '.png' ? 'image/png' : 'image/jpeg';
+  return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
+}
+
+async function rasterizePhotoUnitSheet(webContents, imageSource, placements, label) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const sourceImage = new Image();
+    sourceImage.onload = () => {
+      try {
+        const canvas = document.createElement('canvas'); canvas.width = 2400; canvas.height = 3150;
+        const context = canvas.getContext('2d'); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+        const drawCover = (x, y, width, height, rotate) => {
+          context.save(); context.beginPath(); context.rect(x, y, width, height); context.clip();
+          if (rotate) { context.translate(x + width, y); context.rotate(Math.PI / 2); x = 0; y = 0; const swap = width; width = height; height = swap; }
+          const scale = Math.max(width / sourceImage.naturalWidth, height / sourceImage.naturalHeight);
+          const drawWidth = sourceImage.naturalWidth * scale; const drawHeight = sourceImage.naturalHeight * scale;
+          context.drawImage(sourceImage, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+          context.restore();
+        };
+        ${JSON.stringify(placements)}.forEach((placement) => drawCover(placement[0], placement[1], placement[2], placement[3], placement[2] > placement[3]));
+        context.fillStyle = 'rgba(255,255,255,.88)'; context.fillRect(8, 3075, 2384, 67);
+        context.fillStyle = '#111'; context.font = '34px Arial'; context.fillText(${JSON.stringify(label)}, 30, 3125);
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    };
+    sourceImage.onerror = () => reject('Could not decode the selected student image.');
+    sourceImage.src = ${JSON.stringify(imageSource)};
+  })`);
+}
+
+function envelopeSvg(order, contents, imageSource, large = false) {
+  const width = large ? 3450 : 2625; const height = large ? 4950 : 3975;
+  const photoX = large ? 150 : 100; const photoY = large ? 1080 : 740; const photoWidth = large ? 620 : 600; const photoHeight = 750;
+  const textX = large ? 850 : 800; const nameY = large ? 1230 : 840;
+  const orderY = large ? 1530 : 1140; const contentY = orderY + 100;
+  const safeContents = contents.slice(0, 18);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <rect width="${width}" height="${height}" fill="white"/><rect x="20" y="20" width="${width - 40}" height="${height - 40}" fill="none" stroke="#9aa8b2" stroke-width="8" stroke-dasharray="28 18"/>
+    <rect x="20" y="20" width="${width - 40}" height="220" fill="#e9eef2"/><text x="70" y="115" font-family="Arial" font-size="62" font-weight="bold">${large ? 'LARGE ' : ''}ORDER ENVELOPE</text><text x="70" y="185" font-family="Arial" font-size="42" fill="#596a76">BLANK CANVAS PROOF — TEMPLATE PENDING</text>
+    ${imageSource ? `<image href="${imageSource}" x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" fill="#eef2f5"/><text x="${photoX + 80}" y="${photoY + 380}" font-family="Arial" font-size="48">NO PHOTO</text>`}
+    <text x="${textX}" y="${nameY}" font-family="Arial" font-size="120" font-weight="bold">${escapeXml(`${order.firstName || ''} ${order.lastName || ''}`.trim())}</text>
+    <text x="${textX}" y="${nameY + 100}" font-family="Arial" font-size="72">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text>
+    <text x="${textX}" y="${nameY + 190}" font-family="Arial" font-size="66">${escapeXml(order.clientName || '')}</text>
+    <text x="${textX}" y="${orderY}" font-family="Arial" font-size="68" font-weight="bold">Order ${escapeXml(order.packageCodes || '')}</text>
+    ${safeContents.map((content, index) => `<text x="${textX}" y="${contentY + index * 62}" font-family="Arial" font-size="44">${escapeXml(content)}</text>`).join('')}
+    <text x="${photoX}" y="${photoY + photoHeight + 120}" font-family="Arial" font-size="50">Ref Num: ${escapeXml(order.ref || '')}</text>
+    <rect x="${photoX}" y="${photoY + photoHeight + 165}" width="620" height="150" fill="none" stroke="#111" stroke-width="5"/><text x="${photoX + 40}" y="${photoY + photoHeight + 265}" font-family="monospace" font-size="70">*${escapeXml(order.ref || '')}*</text>
+    <g transform="translate(${width - 100} 500) rotate(90)"><text font-family="Arial" font-size="68">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text></g>
+  </svg>`;
+}
+
+function orderLabelSvg(order, contents, imageSource) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600"><rect width="1200" height="600" fill="white"/><rect x="5" y="5" width="1190" height="590" fill="none" stroke="#9aa8b2" stroke-width="5"/>
+    ${imageSource ? `<image href="${imageSource}" x="25" y="25" width="520" height="550" preserveAspectRatio="xMidYMid slice"/>` : ''}
+    <text x="580" y="90" font-family="Arial" font-size="54" font-weight="bold">${escapeXml(`${order.firstName || ''} ${order.lastName || ''}`.trim())}</text><text x="580" y="160" font-family="Arial" font-size="44">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text><text x="580" y="220" font-family="Arial" font-size="38">${escapeXml(order.clientName || '')}</text>
+    <text x="580" y="280" font-family="Arial" font-size="34" font-weight="bold">Order ${escapeXml(order.packageCodes || '')}</text>${contents.slice(0, 5).map((content, index) => `<text x="580" y="325" font-family="Arial" font-size="26" transform="translate(0 ${index * 32})">${escapeXml(content)}</text>`).join('')}
+    <text x="580" y="505" font-family="Arial" font-size="34">Ref Num: ${escapeXml(order.ref || '')}</text><text x="580" y="555" font-family="monospace" font-size="42">*${escapeXml(order.ref || '')}*</text></svg>`;
+}
+
+async function runUnitRender(event, input = {}) {
+  const jobId = numericId(input.jobId); const outputFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
+  if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
+  const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
+  const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
+  const orders = await querySql(`
+    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+           c.display_name AS clientName, j.name AS jobName, j.package_plan_id AS packagePlanId,
+           GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
+    FROM orders o JOIN jobs j ON j.id = o.job_id JOIN clients c ON c.id = j.client_id JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
+    GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
+  `);
+  const selectedOrders = orders.filter((order) => source === 'all' || (source === 'grade' && order.grade === sourceValue) || (source === 'homeroom' && order.homeroom === sourceValue) || (source === 'individual' && Number(order.id) === Number(sourceValue)));
+  const itemRows = selectedOrders.length ? await querySql(`
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue, p.name AS productName, p.category, COALESCE(pci.quantity, 1) AS quantity
+    FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id LEFT JOIN products p ON p.id = pci.product_id
+    WHERE oi.order_id IN (${selectedOrders.map((order) => Number(order.id)).join(',')})
+    ORDER BY oi.order_id, oi.id, pci.sort_order;
+  `) : [];
+  const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []])); itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
+  selectedOrders.sort((a, b) => unitRenderSortValue(a, sortBy).localeCompare(unitRenderSortValue(b, sortBy)));
+  const folders = { units: path.join(outputFolder, 'Units'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
+  Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
+  const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], unsupportedItems: [], errors: [] };
+  for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
+    event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
+    const imageSource = imageDataUrlFromPath(order.imagePath); const contents = items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
+    const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
+    if (input.includeUnits !== false) {
+      if (!imageSource) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+      else for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+        const item = items[itemIndex]; const recipe = recipes.get(String(item.rawValue || '').toLowerCase()) || recipes.get(String(item.productName || '').toLowerCase());
+        if (!recipe) { if (item.rawValue || item.productName) result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName }); continue; }
+        for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
+          const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], `${recipe.name} — ${sheetIndex + 1} of ${recipe.sheets.length}`);
+          const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+          fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
+        }
+      }
+    }
+    const hasLarge = contents.some((item) => /10x13|art\s*print/i.test(item));
+    const hasSmall = contents.some((item) => !/10x13|art\s*print|mug|waterbottle|plaque/i.test(item));
+    if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, imageSource, false), 2625, 3975); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
+    if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, imageSource, true), 3450, 4950); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
+    if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, imageSource), 1200, 600); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+  }
+  result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [item.item, item])).values());
+  fs.writeFileSync(path.join(outputFolder, 'unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString(), proofMode: true }, null, 2));
+  event.sender.send('unit-render:progress', { current: selectedOrders.length, total: selectedOrders.length, message: 'Render complete' });
+  return result;
+}
+
+async function testBlankEnvelopeRenders(event, outputFolderValue) {
+  const outputFolder = path.resolve(normalizeText(outputFolderValue, 'Output folder', 1000));
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const order = { firstName: 'Sample', lastName: 'Student', grade: '05', homeroom: 'Teacher', clientName: 'Sample School', packageCodes: '1.31', ref: '12345' };
+  const contents = ['2-8x10', '2-5x7', '8 Wallets', '10x13 MiniPoster'];
+  const outputs = [];
+  for (const large of [false, true]) {
+    const width = large ? 3450 : 2625; const height = large ? 4950 : 3975;
+    const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, null, large), width, height);
+    const outputPath = path.join(outputFolder, large ? 'blank-large-envelope-proof.jpg' : 'blank-envelope-proof.jpg');
+    fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+    outputs.push({ outputPath, width, height });
+  }
+  return { outputs };
+}
+
+async function getStudentListSetup(_event, jobIdValue = null, listIdValue = null) {
+  const jobs = await querySql(`
+    SELECT j.id, j.name AS jobName, c.display_name AS clientName,
+      COUNT(DISTINCT s.id) AS subjects, COUNT(DISTINCT sg.id) AS lists
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    LEFT JOIN subjects s ON s.job_id = j.id
+    LEFT JOIN subject_groups sg ON sg.job_id = j.id AND sg.group_type = 'list'
+    GROUP BY j.id ORDER BY c.display_name, j.name;
+  `);
+  const jobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.subjects) > 0)?.id || jobs[0]?.id || null);
+  if (!jobId) return { jobs, selectedJobId: null, lists: [], subjects: [], selectedList: null };
+  const lists = await querySql(`SELECT sg.id, sg.name, COUNT(sgm.id) AS memberCount
+    FROM subject_groups sg LEFT JOIN subject_group_members sgm ON sgm.group_id = sg.id
+    WHERE sg.job_id = ${jobId} AND sg.group_type = 'list' GROUP BY sg.id ORDER BY sg.name;`);
+  const listId = listIdValue ? numericId(listIdValue) : (lists[0]?.id || null);
+  const subjects = await querySql(`SELECT s.id, s.legacy_ref_num AS ref, s.external_id AS externalId,
+    s.first_name AS firstName, s.last_name AS lastName, s.display_name AS displayName,
+    s.grade, s.homeroom, s.subject_type AS subjectType,
+    CASE WHEN s.primary_image_asset_id IS NULL THEN 0 ELSE 1 END AS hasPhoto
+    FROM subjects s WHERE s.job_id = ${jobId}
+    ORDER BY s.last_name, s.first_name, CAST(s.legacy_ref_num AS INTEGER), s.id;`);
+  const selectedList = listId ? (await querySql(`SELECT sg.id, sg.name,
+    (SELECT GROUP_CONCAT(ordered.subject_id, ',') FROM
+      (SELECT subject_id FROM subject_group_members WHERE group_id = sg.id ORDER BY sort_order, id) ordered) AS memberIds
+    FROM subject_groups sg
+    WHERE sg.id = ${listId} AND sg.job_id = ${jobId} AND sg.group_type = 'list'
+    LIMIT 1;`))[0] || null : null;
+  if (selectedList) selectedList.memberIds = String(selectedList.memberIds || '').split(',').filter(Boolean).map(Number);
+  return { jobs, selectedJobId: jobId, lists, subjects, selectedList };
+}
+
+async function saveStudentList(_event, input = {}) {
+  const jobId = numericId(input.jobId);
+  const listId = input.id ? numericId(input.id) : null;
+  const name = normalizeText(input.name, 'List name', 120);
+  const memberIds = Array.from(new Set((Array.isArray(input.memberIds) ? input.memberIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+  return writeSql((database) => {
+    const subjects = memberIds.length ? rowsFromDatabase(database, `SELECT id FROM subjects WHERE job_id = ${jobId} AND id IN (${memberIds.join(',')});`) : [];
+    if (subjects.length !== memberIds.length) throw new Error('One or more selected students do not belong to this job.');
+    let id = listId;
+    if (id) {
+      const existing = rowsFromDatabase(database, `SELECT id FROM subject_groups WHERE id = ${id} AND job_id = ${jobId} AND group_type = 'list';`)[0];
+      if (!existing) throw new Error('Student list not found.');
+      database.run('UPDATE subject_groups SET name = ? WHERE id = ?;', [name, id]);
+      database.run('DELETE FROM subject_group_members WHERE group_id = ?;', [id]);
+    } else {
+      database.run("INSERT INTO subject_groups (job_id, name, group_type) VALUES (?, ?, 'list');", [jobId, name]);
+      id = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+    }
+    const statement = database.prepare('INSERT INTO subject_group_members (group_id, subject_id, sort_order) VALUES (?, ?, ?);');
+    try { memberIds.forEach((subjectId, index) => statement.run([id, subjectId, index])); } finally { statement.free(); }
+    return { id, jobId, name, memberCount: memberIds.length };
+  });
+}
+
+async function deleteStudentList(_event, listIdValue) {
+  const listId = numericId(listIdValue);
+  return writeSql((database) => {
+    const existing = rowsFromDatabase(database, `SELECT id FROM subject_groups WHERE id = ${listId} AND group_type = 'list';`)[0];
+    if (!existing) throw new Error('Student list not found.');
+    database.run('DELETE FROM subject_group_members WHERE group_id = ?;', [listId]);
+    database.run('DELETE FROM subject_groups WHERE id = ?;', [listId]);
+    return { id: listId, deleted: true };
+  });
+}
+
+const ONLINE_ORDER_FIELDS = [
+  { key: 'sourceReference', label: 'Online Order Number', required: true, aliases: ['order', 'order id', 'order number', 'order #', 'transaction id'] },
+  { key: 'subjectRef', label: 'TRECS Reference', aliases: ['ref', 'reference', 'reference number', 'camera card'] },
+  { key: 'externalId', label: 'Student ID', aliases: ['student id', 'studentid', 'school id'] },
+  { key: 'firstName', label: 'First Name', aliases: ['first', 'first name', 'firstname'] },
+  { key: 'lastName', label: 'Last Name', aliases: ['last', 'last name', 'lastname', 'surname'] },
+  { key: 'packageCodes', label: 'Package Codes', required: true, aliases: ['codes', 'package', 'package code', 'package codes', 'items'] },
+  { key: 'paidStatus', label: 'Paid Status', aliases: ['paid', 'payment status', 'paid status'] },
+  { key: 'entryTiming', label: 'Entry Timing', aliases: ['entry timing', 'timing'] },
+  { key: 'familyKey', label: 'Family Key', aliases: ['family', 'family key'] },
+  { key: 'amount', label: 'Amount', aliases: ['amount', 'total', 'payment amount'] },
+  { key: 'paymentMethod', label: 'Payment Method', aliases: ['method', 'payment method', 'tender'] },
+  { key: 'notes', label: 'Notes', aliases: ['notes', 'note', 'comments'] }
+];
+
+function onlineOrderColumns(rows) {
+  const header = rows[0] || [];
+  const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  return Array.from({ length: width }, (_unused, index) => ({ index, name: header[index] || `Column ${index + 1}`, sample: rows.slice(1, 4).map((row) => row[index] || '').filter(Boolean) }));
+}
+
+function guessedOnlineOrderMapping(columns) {
+  const mapping = {};
+  columns.forEach((column) => {
+    const name = String(column.name).toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const field = ONLINE_ORDER_FIELDS.find((candidate) => candidate.aliases.includes(name));
+    if (field && mapping[field.key] === undefined) mapping[field.key] = column.index;
+  });
+  return mapping;
+}
+
+function normalizedOnlinePaidStatus(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (['paid', 'yes', 'true', '1', 'complete', 'completed'].includes(text)) return 'paid';
+  if (['unpaid', 'no', 'false', '0', 'pending'].includes(text)) return 'unpaid';
+  return 'unknown';
+}
+
+function normalizedEntryTiming(value) {
+  const text = String(value || '').trim().toLowerCase().replace(/[ -]+/g, '_');
+  return ['before_photo', 'after_photo', 'after_batch_print', 'unknown'].includes(text) ? text : 'unknown';
+}
+
+function matchOnlineSubject(subjects, values) {
+  const ref = String(values.subjectRef || '').trim().toLowerCase();
+  const externalId = String(values.externalId || '').trim().toLowerCase();
+  const firstName = String(values.firstName || '').trim().toLowerCase();
+  const lastName = String(values.lastName || '').trim().toLowerCase();
+  let matches = ref ? subjects.filter((subject) => String(subject.ref || '').trim().toLowerCase() === ref) : [];
+  if (!matches.length && externalId) matches = subjects.filter((subject) => String(subject.externalId || '').trim().toLowerCase() === externalId);
+  if (!matches.length && (firstName || lastName)) matches = subjects.filter((subject) => String(subject.firstName || '').trim().toLowerCase() === firstName && String(subject.lastName || '').trim().toLowerCase() === lastName);
+  return matches;
+}
+
+async function onlineOrderPreviewData(jobIdValue, filePathValue, mappingValue = null) {
+  const jobId = numericId(jobIdValue);
+  const filePath = normalizeText(filePathValue, 'Online order file', 1000);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('Online order file was not found.');
+  const rows = nonEmptySchoolDataRows(await readSchoolDataRows(filePath));
+  if (rows.length < 2) throw new Error('Online order file has no data rows.');
+  const columns = onlineOrderColumns(rows);
+  const mapping = mappingValue || guessedOnlineOrderMapping(columns);
+  const subjects = await querySql(`SELECT id, legacy_ref_num AS ref, external_id AS externalId, first_name AS firstName, last_name AS lastName, primary_image_asset_id AS primaryImageId FROM subjects WHERE job_id = ${jobId};`);
+  const seen = new Set();
+  const previewRows = rows.slice(1).map((row, index) => {
+    const values = Object.fromEntries(ONLINE_ORDER_FIELDS.map((field) => [field.key, importRowValue(row, mapping, field.key)]));
+    const matches = matchOnlineSubject(subjects, values);
+    let status = 'ready'; let message = 'Ready to import';
+    if (!values.sourceReference || !values.packageCodes) { status = 'invalid'; message = 'Order number and package codes are required'; }
+    else if (seen.has(values.sourceReference.toLowerCase())) { status = 'duplicate'; message = 'Duplicate order number in this file'; }
+    else if (!matches.length) { status = 'unmatched'; message = 'No matching student'; }
+    else if (matches.length > 1) { status = 'ambiguous'; message = 'More than one student matched'; }
+    seen.add(String(values.sourceReference || '').toLowerCase());
+    return { rowNumber: index + 2, values, subject: matches.length === 1 ? matches[0] : null, status, message };
+  });
+  return { jobId, filePath, fileName: path.basename(filePath), columns, fields: ONLINE_ORDER_FIELDS, mapping, rows: previewRows, totals: { rows: previewRows.length, ready: previewRows.filter((row) => row.status === 'ready').length, problems: previewRows.filter((row) => row.status !== 'ready').length } };
+}
+
+async function chooseOnlineOrderFile(event, jobIdValue) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Online Order Export', properties: ['openFile'], filters: [{ name: 'Online orders', extensions: ['csv', 'txt', 'xls', 'xlsx', 'xlsm'] }] });
+  return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, ...(await onlineOrderPreviewData(jobIdValue, result.filePaths[0])) };
+}
+
+async function previewOnlineOrders(_event, input = {}) {
+  return onlineOrderPreviewData(input.jobId, input.filePath, input.mapping || null);
+}
+
+async function importOnlineOrders(_event, input = {}) {
+  const preview = await onlineOrderPreviewData(input.jobId, input.filePath, input.mapping || null);
+  const validRows = preview.rows.filter((row) => row.status === 'ready');
+  if (!validRows.length) throw new Error('There are no matched online orders ready to import.');
+  const importedAt = new Date().toISOString();
+  const result = await writeSql((database) => {
+    const job = rowsFromDatabase(database, `SELECT package_plan_id AS packagePlanId, root_path AS rootPath FROM jobs WHERE id = ${preview.jobId};`)[0];
+    if (!job) throw new Error('Job not found.');
+    let inserted = 0; let updated = 0; const orderIds = [];
+    validRows.forEach((row) => {
+      const values = row.values; const subject = row.subject;
+      const existing = rowsFromDatabase(database, `SELECT id FROM orders WHERE job_id = ${preview.jobId} AND source = 'online' AND source_reference = ${sqlLiteral(values.sourceReference)} LIMIT 1;`)[0];
+      const renderStatus = subject.primaryImageId ? 'ready' : 'not_ready';
+      let orderId;
+      if (existing) {
+        orderId = Number(existing.id); updated += 1;
+        database.run(`UPDATE orders SET subject_id = ?, family_key = ?, entry_timing = ?, status = 'open', paid_status = ?, render_status = ?, notes = ?, updated_at = ? WHERE id = ?;`, [subject.id, optionalText(values.familyKey), normalizedEntryTiming(values.entryTiming), normalizedOnlinePaidStatus(values.paidStatus), renderStatus, optionalText(values.notes, 2000), importedAt, orderId]);
+        database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
+        database.run('DELETE FROM payments WHERE order_id = ?;', [orderId]);
+      } else {
+        inserted += 1;
+        database.run(`INSERT INTO orders (job_id, subject_id, family_key, source, source_reference, entry_timing, status, paid_status, render_status, notes, created_at, updated_at) VALUES (?, ?, ?, 'online', ?, ?, 'open', ?, ?, ?, ?, ?);`, [preview.jobId, subject.id, optionalText(values.familyKey), values.sourceReference, normalizedEntryTiming(values.entryTiming), normalizedOnlinePaidStatus(values.paidStatus), renderStatus, optionalText(values.notes, 2000), importedAt, importedAt]);
+        orderId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+      }
+      const parsed = orderCodesFromInput(values.packageCodes);
+      const itemStatement = database.prepare(`INSERT INTO order_items (order_id, subject_id, package_plan_id, package_code, quantity, raw_code, status, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, 'open', ?, ?);`);
+      try { parsed.codes.forEach((code) => itemStatement.run([orderId, subject.id, job.packagePlanId, code, code, importedAt, importedAt])); } finally { itemStatement.free(); }
+      const amount = Number(String(values.amount || '').replace(/[$,]/g, ''));
+      if (Number.isFinite(amount) && amount !== 0) database.run(`INSERT INTO payments (order_id, method, amount, status, reference, created_at) VALUES (?, ?, ?, ?, ?, ?);`, [orderId, optionalText(values.paymentMethod), amount, normalizedOnlinePaidStatus(values.paidStatus), values.sourceReference, importedAt]);
+      orderIds.push(Number(orderId));
+    });
+    return { inserted, updated, orderIds, skipped: preview.rows.length - validRows.length, rootPath: job.rootPath };
+  });
+  const copiedSourcePath = copySchoolDataSourceFile(preview.filePath, resolveProjectPath(result.rootPath));
+  return { ...result, fileName: preview.fileName, copiedSourcePath };
+}
+
+async function getBatchRenderSetup() {
+  const setup = await getUnitRenderSetup(null, null);
+  const history = await querySql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
+    COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status = 'failed' THEN 1 ELSE 0 END) AS failedJobs
+    FROM render_batches rb LEFT JOIN render_batch_jobs rbj ON rbj.render_batch_id = rb.id
+    GROUP BY rb.id ORDER BY rb.id DESC LIMIT 20;`);
+  return { jobs: setup.jobs, history, locks: await getJobSessions() };
+}
+
+async function runBatchRender(event, input = {}) {
+  const jobIds = Array.from(new Set((Array.isArray(input.jobIds) ? input.jobIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))).sort((a, b) => a - b);
+  if (jobIds.length < 2) throw new Error('Select at least two jobs for a batch render.');
+  const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
+  if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
+  const acquired = [];
+  try {
+    for (const jobId of jobIds) {
+      const lock = await acquireJobSession(event, jobId, 'batch_render');
+      if (!lock.acquired) throw new Error(`${lock.job.clientName} / ${lock.job.name} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
+      acquired.push(jobId);
+    }
+    const jobs = await querySql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
+    const name = optionalText(input.name, 160) || `Production Batch ${new Date().toLocaleString()}`;
+    const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom') };
+    const batch = await writeSql((database) => {
+      database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, started_at, created_by) VALUES (?, ?, 'running', ?, ?, CURRENT_TIMESTAMP, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
+      const batchId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+      const statement = database.prepare(`INSERT INTO render_batch_jobs (render_batch_id, job_id, sort_order, status) VALUES (?, ?, ?, 'queued');`);
+      try { jobs.forEach((job, index) => statement.run([batchId, job.id, index])); } finally { statement.free(); }
+      return { id: Number(batchId), name };
+    });
+    const results = []; let failed = 0;
+    for (let index = 0; index < jobs.length; index += 1) {
+      const job = jobs[index]; const jobOutput = path.join(outputFolder, safeFolderName(`${job.clientName}_${job.jobName}`)); fs.mkdirSync(jobOutput, { recursive: true });
+      event.sender.send('batch-render:progress', { current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
+      await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batch.id, job.id]));
+      try {
+        const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options });
+        results.push({ job, status: 'completed', result });
+        await writeSql((database) => {
+          database.run(`UPDATE render_batch_jobs SET status = 'completed', result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [JSON.stringify(result), batch.id, job.id]);
+          database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ? AND paid_status = 'paid' AND subject_id IN (SELECT id FROM subjects WHERE job_id = ? AND primary_image_asset_id IS NOT NULL);`, [job.id, job.id]);
+        });
+      } catch (error) {
+        failed += 1; results.push({ job, status: 'failed', error: error.message });
+        await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batch.id, job.id]));
+      }
+    }
+    const status = failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed';
+    await writeSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batch.id]));
+    event.sender.send('batch-render:progress', { current: jobs.length, total: jobs.length, message: 'Batch render complete' });
+    return { batchId: batch.id, name: batch.name, status, outputFolder, results };
+  } finally {
+    if (acquired.length) await releaseJobSession(event, acquired);
+  }
+}
+
+ipcMain.handle('student-lists:get-setup', getStudentListSetup);
+ipcMain.handle('student-lists:save', saveStudentList);
+ipcMain.handle('student-lists:delete', deleteStudentList);
+ipcMain.handle('online-orders:choose-file', chooseOnlineOrderFile);
+ipcMain.handle('online-orders:preview', previewOnlineOrders);
+ipcMain.handle('online-orders:import', importOnlineOrders);
+ipcMain.handle('batch-render:get-setup', getBatchRenderSetup);
+ipcMain.handle('batch-render:choose-output-folder', chooseUnitRenderOutputFolder);
+ipcMain.handle('batch-render:run', runBatchRender);
+
+function eventImageNumber(filename) {
+  return path.basename(String(filename || ''), path.extname(String(filename || ''))).trim();
+}
+
+function eventImageFiles(folderPath) {
+  return fs.readdirSync(folderPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && ['.jpg', '.jpeg', '.png'].includes(path.extname(entry.name).toLowerCase()))
+    .map((entry) => path.join(folderPath, entry.name))
+    .sort((first, second) => path.basename(first).localeCompare(path.basename(second), undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+async function getEventWorkflowSetup(_event, eventJobIdValue = null, entryIdValue = null) {
+  const eventJobs = await querySql(`
+    SELECT j.id, j.client_id AS clientId, j.name AS jobName, j.type, j.root_path AS rootPath,
+      j.package_plan_id AS packagePlanId, c.display_name AS clientName,
+      COUNT(DISTINCT ee.id) AS images,
+      COUNT(DISTINCT CASE WHEN ee.status = 'coded' THEN ee.id END) AS codedImages,
+      COUNT(DISTINCT CASE WHEN ee.status = 'linked' THEN ee.id END) AS linkedImages,
+      COUNT(DISTINCT CASE WHEN ee.status = 'unlinked' THEN ee.id END) AS unlinkedImages
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    LEFT JOIN event_entries ee ON ee.event_job_id = j.id
+    WHERE j.type IN ('event', 'qr_event')
+    GROUP BY j.id ORDER BY c.display_name, j.name;
+  `);
+  const eventJobId = eventJobIdValue ? numericId(eventJobIdValue) : (eventJobs[0]?.id || null);
+  if (!eventJobId) return { eventJobs, selectedEventJobId: null, fallJobs: [], linkedFallJobId: null, queue: [], selectedEntry: null, filters: { grades: [], homerooms: [] } };
+  const eventJob = (await querySql(`SELECT j.id, j.client_id AS clientId, j.name AS jobName, j.type, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${eventJobId} LIMIT 1;`))[0];
+  if (!eventJob) throw new Error('Event job not found.');
+  const fallJobs = await querySql(`SELECT j.id, j.name AS jobName, j.type, j.shoot_date AS shootDate,
+    COUNT(DISTINCT s.id) AS subjects, COUNT(DISTINCT CASE WHEN s.primary_image_asset_id IS NOT NULL THEN s.id END) AS photographed
+    FROM jobs j LEFT JOIN subjects s ON s.job_id = j.id
+    WHERE j.client_id = ${Number(eventJob.clientId)} AND j.id <> ${eventJobId} AND j.type IN ('fall', 'spring')
+    GROUP BY j.id ORDER BY CASE WHEN j.type = 'fall' THEN 0 ELSE 1 END, j.shoot_date DESC, j.name DESC;`);
+  const link = (await querySql(`SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' ORDER BY id DESC LIMIT 1;`))[0];
+  const linkedFallJobId = link?.fallJobId || null;
+  const queue = await querySql(`SELECT ee.id, ee.event_image_asset_id AS imageAssetId, ee.image_number AS imageNumber, ee.status, ee.notes,
+    ia.filename, ia.current_path AS imagePath,
+    COUNT(esl.id) AS linkCount, COUNT(esl.order_id) AS orderCount,
+    GROUP_CONCAT(COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))), ' / ') AS linkedNames
+    FROM event_entries ee JOIN image_assets ia ON ia.id = ee.event_image_asset_id
+    LEFT JOIN event_subject_links esl ON esl.event_entry_id = ee.id LEFT JOIN subjects s ON s.id = esl.fall_subject_id
+    WHERE ee.event_job_id = ${eventJobId} GROUP BY ee.id
+    ORDER BY CASE ee.status WHEN 'unlinked' THEN 0 WHEN 'linked' THEN 1 ELSE 2 END, ee.image_number COLLATE NOCASE, ee.id;`);
+  const requestedEntryId = entryIdValue ? numericId(entryIdValue) : null;
+  const selectedId = requestedEntryId || queue.find((entry) => entry.status !== 'coded')?.id || queue[0]?.id || null;
+  const selectedEntry = selectedId ? (await querySql(`SELECT ee.id, ee.event_job_id AS eventJobId, ee.fall_job_id AS fallJobId,
+    ee.event_image_asset_id AS imageAssetId, ee.image_number AS imageNumber, ee.status, ee.notes, ia.filename, ia.current_path AS imagePath
+    FROM event_entries ee JOIN image_assets ia ON ia.id = ee.event_image_asset_id WHERE ee.id = ${Number(selectedId)} AND ee.event_job_id = ${eventJobId} LIMIT 1;`))[0] || null : null;
+  if (selectedEntry) {
+    selectedEntry.links = await querySql(`SELECT esl.id, esl.fall_subject_id AS subjectId, esl.order_id AS orderId, esl.confirmed_by AS confirmedBy, esl.confirmed_at AS confirmedAt,
+      s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom, s.primary_image_asset_id AS fallImageAssetId,
+      GROUP_CONCAT(oi.package_code, '.') AS packageCodes, o.paid_status AS paidStatus
+      FROM event_subject_links esl JOIN subjects s ON s.id = esl.fall_subject_id
+      LEFT JOIN orders o ON o.id = esl.order_id LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE esl.event_entry_id = ${Number(selectedEntry.id)} GROUP BY esl.id ORDER BY esl.sort_order, esl.id;`);
+  }
+  const filters = linkedFallJobId ? {
+    grades: (await querySql(`SELECT DISTINCT COALESCE(grade, '') AS value FROM subjects WHERE job_id = ${Number(linkedFallJobId)} ORDER BY value;`)).map((row) => row.value).filter(Boolean),
+    homerooms: (await querySql(`SELECT DISTINCT COALESCE(homeroom, '') AS value FROM subjects WHERE job_id = ${Number(linkedFallJobId)} ORDER BY value;`)).map((row) => row.value).filter(Boolean)
+  } : { grades: [], homerooms: [] };
+  const packageCodes = eventJob.packagePlanId ? await querySql(`SELECT code, COALESCE(name, '') AS name FROM package_codes WHERE package_plan_id = ${Number(eventJob.packagePlanId)} AND active = 1 ORDER BY CAST(code AS INTEGER), code LIMIT 40;`) : [];
+  return { eventJobs, selectedEventJobId: eventJobId, eventJob, fallJobs, linkedFallJobId, queue, selectedEntry, filters, packageCodes };
+}
+
+async function configureEventFallJob(_event, input = {}) {
+  const eventJobId = numericId(input.eventJobId); const fallJobId = numericId(input.fallJobId);
+  const result = await writeSql((database) => {
+    const rows = rowsFromDatabase(database, `SELECT e.id AS eventJobId, e.client_id AS eventClientId, f.id AS fallJobId, f.client_id AS fallClientId FROM jobs e JOIN jobs f ON f.id = ${fallJobId} WHERE e.id = ${eventJobId};`);
+    if (!rows.length || Number(rows[0].eventClientId) !== Number(rows[0].fallClientId)) throw new Error('The event and fall jobs must belong to the same school.');
+    const current = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
+    const linkedCount = rowsFromDatabase(database, `SELECT COUNT(*) AS value FROM event_subject_links esl JOIN event_entries ee ON ee.id = esl.event_entry_id WHERE ee.event_job_id = ${eventJobId};`)[0].value;
+    if (current?.fallJobId && Number(current.fallJobId) !== fallJobId && Number(linkedCount) > 0) throw new Error('This event already has matched students. Remove those matches before changing the fall job.');
+    database.run(`DELETE FROM job_links WHERE source_job_id = ? AND relationship_type = 'event_fall';`, [eventJobId]);
+    database.run(`INSERT INTO job_links (source_job_id, target_job_id, relationship_type) VALUES (?, ?, 'event_fall');`, [eventJobId, fallJobId]);
+    database.run(`UPDATE event_entries SET fall_job_id = ?, updated_at = CURRENT_TIMESTAMP WHERE event_job_id = ?;`, [fallJobId, eventJobId]);
+    return { eventJobId, fallJobId };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(eventJobId);
+  return result;
+}
+
+async function importEventImageFolderCore(eventJobIdValue, folderPathValue) {
+  const eventJobId = numericId(eventJobIdValue); const sourceFolder = path.resolve(normalizeText(folderPathValue, 'Event image folder', 1000));
+  if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) throw new Error('Event image folder was not found.');
+  const files = eventImageFiles(sourceFolder); if (!files.length) throw new Error('The selected folder does not contain JPG, JPEG, or PNG event images.');
+  const result = await writeSql((database) => {
+    const job = rowsFromDatabase(database, `SELECT id, root_path AS rootPath FROM jobs WHERE id = ${eventJobId};`)[0]; if (!job) throw new Error('Event job not found.');
+    const fallLink = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
+    const destinationFolder = path.join(resolveProjectPath(job.rootPath), 'EventImages'); fs.mkdirSync(destinationFolder, { recursive: true });
+    let imported = 0; let existing = 0; const importedIds = [];
+    files.forEach((sourcePath) => {
+      const filename = path.basename(sourcePath);
+      let asset = rowsFromDatabase(database, `SELECT id, current_path AS currentPath FROM image_assets WHERE job_id = ${eventJobId} AND source = 'event_folder' AND filename = ${sqlLiteral(filename)} ORDER BY id DESC LIMIT 1;`)[0];
+      if (!asset) {
+        let destinationPath = path.join(destinationFolder, filename);
+        if (path.resolve(sourcePath).toLowerCase() !== path.resolve(destinationPath).toLowerCase()) {
+          destinationPath = fs.existsSync(destinationPath) ? uniquePath(destinationFolder, filename) : destinationPath;
+          fs.copyFileSync(sourcePath, destinationPath);
+        }
+        const relativePath = path.relative(projectRoot, destinationPath);
+        database.run(`INSERT INTO image_assets (job_id, shoot_stage, original_path, current_path, filename, source, status, captured_at, imported_at, metadata_json)
+          VALUES (?, 'other', ?, ?, ?, 'event_folder', 'imported', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?);`, [eventJobId, relativePath, relativePath, path.basename(destinationPath), JSON.stringify({ sourceFolder, originalFilename: filename })]);
+        asset = { id: rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id, currentPath: relativePath }; imported += 1;
+      } else existing += 1;
+      database.run(`INSERT OR IGNORE INTO event_entries (event_job_id, fall_job_id, event_image_asset_id, image_number, status) VALUES (?, ?, ?, ?, 'unlinked');`, [eventJobId, fallLink?.fallJobId || null, asset.id, eventImageNumber(filename)]);
+      importedIds.push(Number(asset.id));
+    });
+    return { eventJobId, folderPath: sourceFolder, imported, existing, total: files.length, imageAssetIds: importedIds };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(eventJobId);
+  return result;
+}
+
+async function chooseEventImageFolder(event, eventJobIdValue) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Event Image Folder', properties: ['openDirectory'] });
+  return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, ...(await importEventImageFolderCore(eventJobIdValue, result.filePaths[0])) };
+}
+
+async function importEventImageFolder(_event, eventJobIdValue, folderPathValue) { return importEventImageFolderCore(eventJobIdValue, folderPathValue); }
+
+async function searchEventFallStudents(_event, input = {}) {
+  const eventJobId = numericId(input.eventJobId); const search = optionalText(input.search, 160) || '';
+  const link = (await querySql(`SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`))[0];
+  if (!link?.fallJobId) return [];
+  const grade = optionalText(input.grade, 80); const homeroom = optionalText(input.homeroom, 160);
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = await querySql(`SELECT s.id, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName,
+    COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS name,
+    s.grade, s.homeroom, s.primary_image_asset_id AS fallImageAssetId, ia.filename AS fallImageFilename
+    FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id WHERE s.job_id = ${Number(link.fallJobId)}
+    ${grade ? `AND COALESCE(s.grade, '') = ${sqlLiteral(grade)}` : ''} ${homeroom ? `AND COALESCE(s.homeroom, '') = ${sqlLiteral(homeroom)}` : ''}
+    ORDER BY s.last_name, s.first_name, CAST(s.legacy_ref_num AS INTEGER), s.id;`);
+  return rows.filter((subject) => !words.length || words.every((word) => [subject.ref, subject.externalId, subject.firstName, subject.lastName, subject.name, subject.grade, subject.homeroom].some((value) => String(value || '').toLowerCase().includes(word)))).slice(0, 80);
+}
+
+async function saveEventMatch(_event, input = {}) {
+  const eventJobId = numericId(input.eventJobId); const entryId = numericId(input.entryId); const fallSubjectId = numericId(input.fallSubjectId);
+  const orderText = optionalText(input.orderCodes, 500); const paidStatus = normalizePaidStatus(input.paidStatus || 'unknown'); const notes = optionalText(input.notes, 2000);
+  if (!input.confirmed) throw new Error('Confirm that the fall thumbnail matches the student in the event photo.');
+  const result = await writeSql((database) => {
+    const row = rowsFromDatabase(database, `SELECT ee.id, ee.event_image_asset_id AS eventImageId, ee.fall_job_id AS fallJobId, j.package_plan_id AS packagePlanId,
+      s.id AS subjectId FROM event_entries ee JOIN jobs j ON j.id = ee.event_job_id JOIN subjects s ON s.id = ${fallSubjectId}
+      WHERE ee.id = ${entryId} AND ee.event_job_id = ${eventJobId} AND s.job_id = ee.fall_job_id LIMIT 1;`)[0];
+    if (!row) throw new Error('The event image and fall student are not linked to the configured jobs.');
+    let link = rowsFromDatabase(database, `SELECT id, order_id AS orderId FROM event_subject_links WHERE event_entry_id = ${entryId} AND fall_subject_id = ${fallSubjectId} LIMIT 1;`)[0];
+    if (!link) {
+      const sortOrder = rowsFromDatabase(database, `SELECT COUNT(*) AS value FROM event_subject_links WHERE event_entry_id = ${entryId};`)[0].value;
+      database.run(`INSERT INTO event_subject_links (event_entry_id, fall_subject_id, sort_order, confirmed_by, confirmed_at, notes) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?);`, [entryId, fallSubjectId, sortOrder, systemInfo().userName, notes]);
+      link = { id: rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id, orderId: null };
+    } else database.run(`UPDATE event_subject_links SET confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP, notes = ? WHERE id = ?;`, [systemInfo().userName, notes, link.id]);
+    let orderId = link.orderId ? Number(link.orderId) : null;
+    if (orderText) {
+      const parsed = orderCodesFromInput(orderText);
+      if (orderId) {
+        database.run(`UPDATE orders SET subject_id = ?, paid_status = ?, render_status = 'ready', notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?;`, [fallSubjectId, paidStatus, notes, orderId, eventJobId]);
+        database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
+      } else {
+        database.run(`INSERT INTO orders (job_id, subject_id, source, source_reference, entry_timing, status, paid_status, render_status, notes) VALUES (?, ?, 'paper', ?, 'after_photo', 'open', ?, 'ready', ?);`, [eventJobId, fallSubjectId, `EVENT:${entryId}:${fallSubjectId}`, paidStatus, notes]);
+        orderId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+        database.run(`UPDATE event_subject_links SET order_id = ? WHERE id = ?;`, [orderId, link.id]);
+      }
+      const statement = database.prepare(`INSERT INTO order_items (order_id, subject_id, image_asset_id, package_plan_id, package_code, quantity, raw_code, status) VALUES (?, ?, ?, ?, ?, 1, ?, 'open');`);
+      try { parsed.codes.forEach((code) => statement.run([orderId, fallSubjectId, row.eventImageId, row.packagePlanId, code, code])); } finally { statement.free(); }
+    }
+    const counts = rowsFromDatabase(database, `SELECT COUNT(*) AS links, SUM(CASE WHEN order_id IS NOT NULL THEN 1 ELSE 0 END) AS orders FROM event_subject_links WHERE event_entry_id = ${entryId};`)[0];
+    const status = Number(counts.orders || 0) > 0 ? 'coded' : 'linked';
+    database.run(`UPDATE event_entries SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, notes, entryId]);
+    const next = rowsFromDatabase(database, `SELECT id FROM event_entries WHERE event_job_id = ${eventJobId} AND id <> ${entryId} AND status <> 'coded' ORDER BY CASE WHEN id > ${entryId} THEN 0 ELSE 1 END, id LIMIT 1;`)[0];
+    return { entryId, fallSubjectId, orderId, status, nextEntryId: next?.id || entryId };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(eventJobId);
+  return result;
+}
+
+async function removeEventSubjectLink(_event, linkIdValue) {
+  const linkId = numericId(linkIdValue);
+  const result = await writeSql((database) => {
+    const link = rowsFromDatabase(database, `SELECT esl.id, esl.event_entry_id AS entryId, esl.order_id AS orderId, ee.event_job_id AS eventJobId FROM event_subject_links esl JOIN event_entries ee ON ee.id = esl.event_entry_id WHERE esl.id = ${linkId};`)[0];
+    if (!link) throw new Error('Event student link not found.');
+    if (link.orderId) { database.run('DELETE FROM payments WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM order_items WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM orders WHERE id = ?;', [link.orderId]); }
+    database.run('DELETE FROM event_subject_links WHERE id = ?;', [linkId]);
+    const counts = rowsFromDatabase(database, `SELECT COUNT(*) AS links, SUM(CASE WHEN order_id IS NOT NULL THEN 1 ELSE 0 END) AS orders FROM event_subject_links WHERE event_entry_id = ${Number(link.entryId)};`)[0];
+    const status = Number(counts.orders || 0) > 0 ? 'coded' : Number(counts.links || 0) > 0 ? 'linked' : 'unlinked';
+    database.run(`UPDATE event_entries SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, link.entryId]);
+    return { id: linkId, entryId: link.entryId, eventJobId: link.eventJobId, status };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.eventJobId);
+  return result;
+}
+
+ipcMain.handle('event:get-setup', getEventWorkflowSetup);
+ipcMain.handle('event:configure-fall-job', configureEventFallJob);
+ipcMain.handle('event:choose-image-folder', chooseEventImageFolder);
+ipcMain.handle('event:import-image-folder', importEventImageFolder);
+ipcMain.handle('event:search-fall-students', searchEventFallStudents);
+ipcMain.handle('event:save-match', saveEventMatch);
+ipcMain.handle('event:remove-subject-link', removeEventSubjectLink);
+
+const COMPOSITE_LAYOUTS = {
+  traditional24: { label: '24 student', max: 24, cols: [60, 540, 1020, 1500, 1980, 2460], rows: [25, 495, 965, 1435, 1905], photoX: 72, photoY: 0, photoWidth: 336, photoHeight: 420, frameX: 68, frameY: -4, frameWidth: 344, frameHeight: 428, nameX: 20, nameY: 450, nameWidth: 440 },
+  traditional28: { label: '28 student', max: 28, cols: [50, 465, 880, 1295, 1710, 2125, 2540], rows: [25, 495, 965, 1435, 1905], photoX: 40, photoY: 0, photoWidth: 336, photoHeight: 420, frameX: 36, frameY: -4, frameWidth: 344, frameHeight: 428, nameX: 20, nameY: 450, nameWidth: 375 },
+  traditional35: { label: '35 student', max: 35, cols: [50, 465, 880, 1295, 1710, 2125, 2540], rows: [24, 416, 808, 1200, 1592, 1984], photoX: 70, photoY: 0, photoWidth: 274, photoHeight: 343, frameX: 66, frameY: -4, frameWidth: 282, frameHeight: 351, nameX: 20, nameY: 372, nameWidth: 375 },
+  traditional40: { label: '40 student', max: 40, cols: [48, 411, 774, 1137, 1500, 1863, 2226, 2589], rows: [24, 416, 808, 1200, 1592, 1984], photoX: 45, photoY: 0, photoWidth: 274, photoHeight: 343, frameX: 41, frameY: -4, frameWidth: 282, frameHeight: 351, nameX: 21, nameY: 372, nameWidth: 320 },
+  star44: { label: '44 student STAR', max: 44, cols: [40, 405, 770, 1135, 1500, 1865, 2230, 2595], rows: [23, 358, 693, 1028, 1363, 1698, 2033], photoX: 69, photoY: 0, photoWidth: 228, photoHeight: 285, frameX: 65, frameY: -4, frameWidth: 236, frameHeight: 293, nameX: 21, nameY: 315, nameWidth: 330 }
+};
+
+function traditionalCompositeLayout(count) {
+  if (count <= 24) return COMPOSITE_LAYOUTS.traditional24;
+  if (count <= 28) return COMPOSITE_LAYOUTS.traditional28;
+  if (count <= 35) return COMPOSITE_LAYOUTS.traditional35;
+  if (count <= 40) return COMPOSITE_LAYOUTS.traditional40;
+  return null;
+}
+
+function starCompositeLayout(count) {
+  if (count <= 20) return { ...COMPOSITE_LAYOUTS.traditional24, label: '20 student STAR', max: 20 };
+  if (count <= 24) return { ...COMPOSITE_LAYOUTS.traditional28, label: '24 student STAR', max: 24 };
+  if (count <= 31) return { ...COMPOSITE_LAYOUTS.traditional35, label: '31 student STAR', max: 31 };
+  if (count <= 36) return { ...COMPOSITE_LAYOUTS.traditional40, label: '36 student STAR', max: 36 };
+  if (count <= 44) return COMPOSITE_LAYOUTS.star44;
+  return null;
+}
+
+function compositeLegacyPhotoPath(jobRoot, ref) {
+  const root = resolveProjectPath(jobRoot);
+  if (!root || !ref) return null;
+  for (const folder of ['CroppedMed', 'CroppedLarge', 'Images']) {
+    for (const extension of ['.jpg', '.JPG', '.jpeg', '.JPEG']) {
+      const candidate = path.join(root, folder, `${ref}${extension}`);
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    }
+  }
+  return null;
+}
+
+function compositeImagePath(subject, jobRoot) {
+  const databasePath = resolveProjectPath(subject.imagePath);
+  if (databasePath && fs.existsSync(databasePath) && fs.statSync(databasePath).isFile()) return databasePath;
+  return compositeLegacyPhotoPath(jobRoot, subject.ref);
+}
+
+function compositeGradeLabel(grades) {
+  const labels = { KIN: 'Kindergarten', PRE: 'Preschool', TK: 'Transitional Kindergarten', '01': '1st Grade', '02': '2nd Grade', '03': '3rd Grade', '04': '4th Grade', '05': '5th Grade', '06': '6th Grade', '07': '7th Grade', '08': '8th Grade', '09': '9th Grade', '10': '10th Grade', '11': '11th Grade', '12': '12th Grade' };
+  const values = [...new Set(grades.filter(Boolean).map(String))];
+  if (values.length === 1) return labels[values[0]] || (/^\d+$/.test(values[0]) ? `${Number(values[0])}${['th', 'st', 'nd', 'rd'][Number(values[0]) % 10] || 'th'} Grade` : values[0]);
+  return values.join(' / ');
+}
+
+function compositeSchoolYear(jobName) {
+  const match = String(jobName || '').match(/(20\d{2})/);
+  return match ? `${match[1]}-${Number(match[1]) + 1}` : '';
+}
+
+async function compositeJobData(jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const jobs = await querySql(`
+    SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
+    FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId};
+  `);
+  if (!jobs.length) throw new Error('Job was not found.');
+  const job = jobs[0];
+  const subjects = await querySql(`
+    SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
+           s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_medium' ORDER BY iv.id DESC LIMIT 1),
+                    (SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
+    FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE s.job_id = ${jobId} AND TRIM(COALESCE(s.homeroom, '')) != ''
+      AND TRIM(COALESCE(s.first_name, '')) != '' AND TRIM(COALESCE(s.last_name, '')) != ''
+      AND UPPER(COALESCE(s.grade, '')) != 'EXMPT'
+    ORDER BY s.homeroom, s.last_name, s.first_name, s.id;
+  `);
+  subjects.forEach((subject) => {
+    subject.staff = ['faculty', 'staff', 'teacher'].includes(String(subject.subjectType || '').toLowerCase()) || String(subject.grade || '').toUpperCase() === 'FAC';
+    subject.photoPath = compositeImagePath(subject, job.rootPath);
+    subject.hasPhoto = Boolean(subject.photoPath);
+  });
+  const orderProducts = await querySql(`
+    SELECT o.id AS orderId, o.subject_id AS subjectId, o.paid_status AS paidStatus,
+           COALESCE(pm.name, pd.name, pci.raw_value, '') AS productName, COALESCE(pci.quantity, oi.quantity, 1) AS quantity
+    FROM orders o JOIN jobs j ON j.id = o.job_id JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN products pd ON pd.id = oi.product_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id
+    LEFT JOIN products pm ON pm.id = pci.product_id
+    WHERE o.job_id = ${jobId} AND o.subject_id IS NOT NULL AND o.paid_status = 'paid';
+  `);
+  const purchases = new Map();
+  orderProducts.forEach((row) => {
+    const name = String(row.productName || '').toLowerCase().replace(/[^a-z]/g, '');
+    const kind = name.includes('starphoto') ? 'star' : name.includes('classphoto') ? 'traditional' : '';
+    if (!kind) return;
+    const key = Number(row.subjectId); const purchase = purchases.get(key) || { traditional: 0, star: 0 };
+    purchase[kind] += Math.max(1, Number(row.quantity || 1)); purchases.set(key, purchase);
+  });
+  subjects.forEach((subject) => { subject.purchases = purchases.get(Number(subject.id)) || { traditional: 0, star: 0 }; });
+  const classMap = new Map();
+  subjects.forEach((subject) => {
+    if (!classMap.has(subject.homeroom)) classMap.set(subject.homeroom, { homeroom: subject.homeroom, students: [], staff: [] });
+    classMap.get(subject.homeroom)[subject.staff ? 'staff' : 'students'].push(subject);
+  });
+  const classes = [...classMap.values()].map((group) => ({
+    ...group,
+    gradeLabel: compositeGradeLabel(group.students.map((subject) => subject.grade)),
+    photographed: group.students.filter((subject) => subject.hasPhoto).length,
+    traditionalOrders: group.students.reduce((total, subject) => total + subject.purchases.traditional, 0),
+    starOrders: group.students.reduce((total, subject) => total + subject.purchases.star, 0)
+  }));
+  return { job: { ...job, schoolYear: compositeSchoolYear(job.jobName) }, classes };
+}
+
+async function getCompositeSetup(_event, jobIdValue = null) {
+  const jobs = await querySql(`
+    SELECT j.id, c.display_name AS clientName, j.name AS jobName, j.type,
+           COUNT(DISTINCT CASE WHEN TRIM(COALESCE(s.homeroom, '')) != '' THEN s.homeroom END) AS classes,
+           COUNT(CASE WHEN TRIM(COALESCE(s.homeroom, '')) != '' THEN 1 END) AS classSubjects
+    FROM jobs j JOIN clients c ON c.id = j.client_id LEFT JOIN subjects s ON s.job_id = j.id
+    GROUP BY j.id ORDER BY c.display_name, j.name;
+  `);
+  const selectedJobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.classes) > 0)?.id || jobs[0]?.id || null);
+  if (!selectedJobId) return { jobs, selectedJobId: null, job: null, classes: [] };
+  const data = await compositeJobData(selectedJobId);
+  return {
+    jobs,
+    selectedJobId,
+    job: data.job,
+    classes: data.classes.map((group) => ({
+      homeroom: group.homeroom, gradeLabel: group.gradeLabel, students: group.students.length,
+      photographed: group.photographed, staff: group.staff.length,
+      traditionalOrders: group.traditionalOrders, starOrders: group.starOrders,
+      traditionalLayout: traditionalCompositeLayout(group.students.length)?.label || 'Over legacy limit',
+      starLayout: starCompositeLayout(group.students.length)?.label || 'Over legacy limit',
+      featuredStudents: group.students.map((subject) => ({ id: subject.id, ref: subject.ref, name: `${subject.firstName} ${subject.lastName}`, hasPhoto: subject.hasPhoto, starOrders: subject.purchases.star }))
+    }))
+  };
+}
+
+function compositeStudentPositions(type, layout, count) {
+  if (type === 'traditional') return Array.from({ length: count }, (_value, index) => ({ x: layout.cols[index % layout.cols.length], y: layout.rows[Math.floor(index / layout.cols.length) + 1] }));
+  const positions = [];
+  for (let rowIndex = 1; rowIndex < layout.rows.length && positions.length < count; rowIndex += 1) {
+    const startColumn = rowIndex <= 2 ? 2 : 0;
+    for (let column = startColumn; column < layout.cols.length && positions.length < count; column += 1) positions.push({ x: layout.cols[column], y: layout.rows[rowIndex] });
+  }
+  return positions;
+}
+
+function compositePhotoData(subject) {
+  return subject.photoPath ? imageDataUrlFromPath(subject.photoPath) : null;
+}
+
+function compositeSlotSvg(subject, position, layout, includeNames, kind) {
+  const x = position.x; const y = position.y; const photo = compositePhotoData(subject);
+  const fullName = `${subject.firstName || ''} ${subject.lastName || ''}`.trim();
+  const initials = `${String(subject.firstName || '').charAt(0)}${String(subject.lastName || '').charAt(0)}`.toUpperCase();
+  const fontSize = fullName.length > 25 ? 22 : fullName.length > 19 ? 25 : 30;
+  return `<g><rect x="${x + layout.frameX}" y="${y + layout.frameY}" width="${layout.frameWidth}" height="${layout.frameHeight}" rx="5" fill="#172b3a"/>
+    ${photo ? `<image href="${photo}" x="${x + layout.photoX}" y="${y + layout.photoY}" width="${layout.photoWidth}" height="${layout.photoHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${x + layout.photoX}" y="${y + layout.photoY}" width="${layout.photoWidth}" height="${layout.photoHeight}" fill="#dce4e9"/><text x="${x + layout.photoX + layout.photoWidth / 2}" y="${y + layout.photoY + layout.photoHeight / 2}" text-anchor="middle" dominant-baseline="middle" font-family="Arial" font-size="62" font-weight="bold" fill="#8093a0">${escapeXml(initials || subject.ref || '?')}</text>`}
+    ${includeNames ? `<text x="${x + layout.nameX + layout.nameWidth / 2}" y="${y + layout.nameY}" text-anchor="middle" font-family="Arial" font-size="${fontSize}" font-weight="bold" fill="${kind === 'star' ? '#3b2b09' : '#172b3a'}">${escapeXml(fullName)}</text>` : ''}</g>`;
+}
+
+function compositeFeatureGeometry(count) {
+  if (count <= 20) return { x: 194, y: 485, width: 692, height: 860, imageX: 204, imageY: 495, imageWidth: 672, imageHeight: 840, nameY: 1393 };
+  if (count <= 24) return { x: 119, y: 485, width: 692, height: 860, imageX: 129, imageY: 495, imageWidth: 672, imageHeight: 840, nameY: 1393 };
+  if (count <= 31) return { x: 181, y: 406, width: 567, height: 704, imageX: 191, imageY: 416, imageWidth: 547, imageHeight: 684, nameY: 1163 };
+  if (count <= 36) return { x: 128, y: 406, width: 567, height: 704, imageX: 138, imageY: 416, imageWidth: 547, imageHeight: 684, nameY: 1163 };
+  return { x: 192, y: 363, width: 476, height: 590, imageX: 202, imageY: 373, imageWidth: 456, imageHeight: 570, nameY: 1001 };
+}
+
+function compositeSvg(group, type, options = {}, featured = null, purchaserLabel = '') {
+  const students = options.photographedOnly ? group.students.filter((subject) => subject.hasPhoto) : group.students;
+  const layout = type === 'star' ? starCompositeLayout(students.length) : traditionalCompositeLayout(students.length);
+  if (!layout) throw new Error(`${group.homeroom} has ${students.length} students, above the legacy ${type === 'star' ? 'STAR 44' : 'traditional 40'}-student limit.`);
+  const offsetX = purchaserLabel ? 150 : 0; const width = purchaserLabel ? 3150 : 3000;
+  const positions = compositeStudentPositions(type, layout, students.length);
+  const studentSlots = students.map((subject, index) => compositeSlotSvg(subject, positions[index], layout, options.includeNames !== false, type)).join('');
+  const staff = options.includeStaff === false ? [] : group.staff.slice(0, layout.cols.length);
+  const staffSlots = staff.map((subject, index) => compositeSlotSvg(subject, { x: layout.cols[layout.cols.length - 1 - index], y: layout.rows[0] }, layout, options.includeNames !== false, type)).join('');
+  const accent = type === 'star' ? '#b88718' : '#176b87'; const pale = type === 'star' ? '#fff7df' : '#eef7fa';
+  const teacherNames = staff.map((subject) => `${subject.firstName} ${subject.lastName}`).join('; ');
+  const feature = type === 'star' ? compositeFeatureGeometry(students.length) : null;
+  const featuredPhoto = featured ? compositePhotoData(featured) : null;
+  const featureSvg = feature ? `<rect x="${feature.x}" y="${feature.y}" width="${feature.width}" height="${feature.height}" rx="9" fill="#fff" stroke="#d3aa4e" stroke-width="8" ${featured ? '' : 'stroke-dasharray="22 16"'}/>
+    ${featuredPhoto ? `<image href="${featuredPhoto}" x="${feature.imageX}" y="${feature.imageY}" width="${feature.imageWidth}" height="${feature.imageHeight}" preserveAspectRatio="xMidYMid slice"/><path d="M${feature.imageX + feature.imageWidth / 2} ${feature.imageY + 12}l22 42 47 7-34 33 8 47-43-23-43 23 8-47-34-33 47-7z" fill="#f4c542" stroke="#8d6512" stroke-width="5"/>` : `<text x="${feature.x + feature.width / 2}" y="${feature.y + feature.height / 2}" text-anchor="middle" font-family="Arial" font-size="42" font-weight="bold" fill="#b49a61">FEATURED PORTRAIT</text>`}
+    ${featured ? `<text x="${feature.x + feature.width / 2}" y="${feature.nameY}" text-anchor="middle" font-family="Arial" font-size="${`${featured.firstName} ${featured.lastName}`.length > 22 ? 44 : 58}" font-weight="bold" fill="#3b2b09">${escapeXml(`${featured.firstName} ${featured.lastName}`)}</text>` : ''}` : '';
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="2400" viewBox="0 0 ${width} 2400"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${pale}"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="${width}" height="2400" fill="#fff"/>
+    <g transform="translate(${offsetX} 0)"><rect width="3000" height="2400" fill="url(#bg)"/><rect width="3000" height="405" fill="${accent}"/><rect y="390" width="3000" height="15" fill="${type === 'star' ? '#f0c755' : '#75b6c9'}"/>
+    <text x="110" y="145" font-family="Arial" font-size="120" font-weight="bold" fill="#fff">${escapeXml(options.schoolName || '')}</text><text x="110" y="215" font-family="Arial" font-size="42" fill="#fff">${escapeXml(options.principal || '')}</text><text x="110" y="295" font-family="Arial" font-size="64" font-weight="bold" fill="#fff">${escapeXml(options.classHeading || teacherNames || group.homeroom)}</text><text x="110" y="355" font-family="Arial" font-size="46" fill="#fff">${escapeXml(`${group.gradeLabel || ''}${options.schoolYear ? `  |  ${options.schoolYear}` : ''}`)}</text>
+    ${featureSvg}${studentSlots}${staffSlots}</g>${purchaserLabel ? `<g transform="translate(62 2100) rotate(-90)"><text font-family="Arial" font-size="54" fill="#172b3a">${escapeXml(purchaserLabel)}</text></g>` : ''}</svg>`;
+}
+
+function compositeOptions(input, job) {
+  return {
+    schoolName: optionalText(input.schoolName, 255) || job.clientName,
+    principal: optionalText(input.principal, 255),
+    schoolYear: optionalText(input.schoolYear, 100) || job.schoolYear,
+    classHeading: optionalText(input.classHeading, 255),
+    photographedOnly: input.photographedOnly === true,
+    includeStaff: input.includeStaff !== false,
+    includeNames: input.includeNames !== false
+  };
+}
+
+async function previewComposite(event, input = {}) {
+  const data = await compositeJobData(input.jobId); const group = data.classes.find((item) => item.homeroom === String(input.homeroom || ''));
+  if (!group) throw new Error('Choose a class to preview.');
+  const type = input.type === 'star' ? 'star' : 'traditional';
+  const featured = type === 'star' ? group.students.find((subject) => Number(subject.id) === Number(input.featuredSubjectId)) || null : null;
+  const svg = compositeSvg(group, type, compositeOptions(input, data.job), featured);
+  const dataUrl = await rasterizeUnitSheet(event.sender, svg, 3000, 2400);
+  return { dataUrl, width: 3000, height: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
+}
+
+async function chooseCompositeOutputFolder() {
+  const result = await dialog.showOpenDialog({ title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
+  return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
+}
+
+async function runCompositeRender(event, input = {}) {
+  const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
+  if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
+  const data = await compositeJobData(input.jobId); const scope = input.scope === 'all' ? 'all' : 'selected';
+  const groups = scope === 'all' ? data.classes : data.classes.filter((group) => group.homeroom === String(input.homeroom || ''));
+  if (!groups.length) throw new Error('Choose at least one class to render.');
+  const options = compositeOptions(input, data.job); const includeTraditional = input.includeTraditional !== false; const includeStar = input.includeStar !== false;
+  const selectedCounts = groups.map((group) => ({ group, count: options.photographedOnly ? group.students.filter((subject) => subject.hasPhoto).length : group.students.length }));
+  const invalid = selectedCounts.find(({ count }) => (includeTraditional && !traditionalCompositeLayout(count)) || (includeStar && !starCompositeLayout(count)));
+  if (invalid) throw new Error(`${invalid.group.homeroom} has ${invalid.count} selected students and is above a legacy layout limit.`);
+  const folders = { backgrounds: path.join(outputFolder, 'Composite Backgrounds'), students: path.join(outputFolder, 'Student Composites') };
+  Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
+  const result = { jobId: Number(input.jobId), outputFolder, classes: groups.length, traditionalBackgrounds: 0, starBackgrounds: 0, traditionalCopies: 0, starCopies: 0, files: [] };
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index]; event.sender.send('composite:progress', { current: index, total: groups.length, message: `Rendering ${group.homeroom}` });
+    const baseName = safeFolderName(group.homeroom);
+    if (includeTraditional) {
+      const dataUrl = await rasterizeUnitSheet(event.sender, compositeSvg(group, 'traditional', options), 3000, 2400);
+      const outputPath = path.join(folders.backgrounds, `${baseName}.jpg`); fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.traditionalBackgrounds += 1; result.files.push(outputPath);
+    }
+    if (includeStar) {
+      const dataUrl = await rasterizeUnitSheet(event.sender, compositeSvg(group, 'star', options), 3000, 2400);
+      const outputPath = path.join(folders.backgrounds, `_STAR_${baseName}.jpg`); fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.starBackgrounds += 1; result.files.push(outputPath);
+    }
+    if (input.includePurchaserCopies !== false) for (const subject of group.students) {
+      const label = `${group.homeroom}: ${subject.lastName}, ${subject.firstName}`;
+      if (includeTraditional) for (let copy = 0; copy < Number(subject.purchases.traditional || 0); copy += 1) {
+        const dataUrl = await rasterizeUnitSheet(event.sender, compositeSvg(group, 'traditional', options, null, label), 3150, 2400);
+        const outputPath = path.join(folders.students, `${baseName}_${safeFolderName(subject.lastName)}_${safeFolderName(subject.firstName)}_${copy + 1}c.jpg`); fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.traditionalCopies += 1; result.files.push(outputPath);
+      }
+      if (includeStar) for (let copy = 0; copy < Number(subject.purchases.star || 0); copy += 1) {
+        const dataUrl = await rasterizeUnitSheet(event.sender, compositeSvg(group, 'star', options, subject, label), 3150, 2400);
+        const outputPath = path.join(folders.students, `${baseName}_${safeFolderName(subject.lastName)}_${safeFolderName(subject.firstName)}_${copy + 1}s.jpg`); fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.starCopies += 1; result.files.push(outputPath);
+      }
+    }
+  }
+  fs.writeFileSync(path.join(outputFolder, 'composite-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString(), legacyLayouts: true }, null, 2));
+  event.sender.send('composite:progress', { current: groups.length, total: groups.length, message: 'Composite render complete' });
+  return result;
+}
+
+function syntheticCompositeGroup(count, homeroom) {
+  return { homeroom, gradeLabel: '5th Grade', staff: [], students: Array.from({ length: count }, (_value, index) => ({ id: index + 1, ref: String(10000 + index), firstName: `Student ${index + 1}`, lastName: 'Layout', hasPhoto: false, photoPath: null, purchases: { traditional: 0, star: 0 } })) };
+}
+
+async function testCompositeLayouts(event) {
+  const outputFolder = path.join(projectRoot, 'exports', 'composite-layout-tests'); fs.mkdirSync(outputFolder, { recursive: true });
+  const cases = [{ name: 'small', count: 20 }, { name: 'medium', count: 28 }, { name: 'large', count: 40 }]; const outputs = [];
+  for (const testCase of cases) for (const type of ['traditional', 'star']) {
+    const group = syntheticCompositeGroup(testCase.count, `${testCase.name.toUpperCase()}_${testCase.count}`); const featured = type === 'star' ? group.students[0] : null;
+    const svg = compositeSvg(group, type, { schoolName: 'TRECS Layout Test', principal: 'Legacy Java geometry', schoolYear: '2026-2027', includeNames: true, includeStaff: true }, featured);
+    const dataUrl = await rasterizeUnitSheet(event.sender, svg, 3000, 2400); const outputPath = path.join(outputFolder, `${testCase.name}-${type}-${testCase.count}.jpg`);
+    const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300); fs.writeFileSync(outputPath, jpeg); const size = nativeImage.createFromBuffer(jpeg).getSize();
+    outputs.push({ ...testCase, type, outputPath, width: size.width, height: size.height, bytes: jpeg.length, passed: size.width === 3000 && size.height === 2400 && jpeg.length > 25000 });
+  }
+  const report = { passed: outputs.every((item) => item.passed), outputFolder, createdAt: new Date().toISOString(), layouts: outputs }; fs.writeFileSync(path.join(outputFolder, 'composite-layout-test-report.json'), JSON.stringify(report, null, 2)); return report;
+}
+
+async function testPackagePlanRenders(_event, packagePlanIdValue) {
+  const packagePlanId = numericId(packagePlanIdValue);
+  const rows = await querySql(`
+    SELECT DISTINCT p.id, p.name, p.category, p.size, p.metadata_json AS metadataJson
+    FROM package_code_items pci
+    JOIN package_codes pc ON pc.id = pci.package_code_id
+    JOIN products p ON p.id = pci.product_id
+    WHERE pc.package_plan_id = ${packagePlanId} AND pc.active = 1
+    ORDER BY p.category, p.name;
+  `);
+  const outputFolder = path.join(projectRoot, 'exports', 'package-render-tests', `plan-${packagePlanId}`);
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const results = [];
+  for (const product of rows) {
+    const support = productRenderSupport(product);
+    if (support !== 'renderable') {
+      results.push({ productId: product.id, name: product.name, status: support });
+      continue;
+    }
+    const safeName = safeFolderName(product.name) || `product-${product.id}`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1575"><rect width="1200" height="1575" fill="#f4f1ea"/><rect x="90" y="90" width="1020" height="1210" rx="20" fill="#c8d8e8"/><circle cx="600" cy="500" r="210" fill="#527aa3"/><path d="M260 1190 Q600 690 940 1190" fill="#355979"/><text x="600" y="1390" text-anchor="middle" font-family="Arial" font-size="62" fill="#172b3a">${escapeXml(product.name)}</text><text x="600" y="1470" text-anchor="middle" font-family="Arial" font-size="34" fill="#52636f">${escapeXml(product.size || product.category || '')} render test</text></svg>`;
+    const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
+    if (image.isEmpty()) {
+      results.push({ productId: product.id, name: product.name, status: 'failed', error: 'Electron could not rasterize the test layout.' });
+      continue;
+    }
+    const outputPath = path.join(outputFolder, `${safeName}.jpg`);
+    fs.writeFileSync(outputPath, image.toJPEG(92));
+    results.push({ productId: product.id, name: product.name, status: 'rendered', outputPath });
+  }
+  const report = { packagePlanId, outputFolder, createdAt: new Date().toISOString(), results };
+  fs.writeFileSync(path.join(outputFolder, 'render-test-report.json'), JSON.stringify(report, null, 2));
+  return report;
+}
+
+function escapeXml(value) {
+  return String(value || '').replace(/[<>&"']/g, (character) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[character]));
+}
+
+ipcMain.handle('package-editor:get', getPackageEditorData);
+ipcMain.handle('package-editor:create-plan', createPackagePlan);
+ipcMain.handle('package-editor:save-code', savePackageCode);
+ipcMain.handle('package-editor:delete-code', deletePackageCode);
+ipcMain.handle('package-editor:test-renders', testPackagePlanRenders);
+ipcMain.handle('picture-units:test-all', testPictureUnitRenders);
+ipcMain.handle('unit-render:get-setup', getUnitRenderSetup);
+ipcMain.handle('unit-render:choose-output-folder', chooseUnitRenderOutputFolder);
+ipcMain.handle('unit-render:run', runUnitRender);
+ipcMain.handle('unit-render:test-envelope-proofs', testBlankEnvelopeRenders);
+ipcMain.handle('composite:get-setup', getCompositeSetup);
+ipcMain.handle('composite:preview', previewComposite);
+ipcMain.handle('composite:choose-output-folder', chooseCompositeOutputFolder);
+ipcMain.handle('composite:render', runCompositeRender);
+ipcMain.handle('composite:test-layouts', testCompositeLayouts);
 ipcMain.handle('settings:student-fields:get', getStudentFieldSettings);
 ipcMain.handle('settings:student-fields:save', saveStudentFieldSettings);
 
@@ -5304,6 +6762,36 @@ function copyOnsiteCroppedMediumImages(setupFolder, rootPathValue) {
 function clearImportedJobRows(database, jobIdValue) {
   const jobId = numericId(jobIdValue);
   database.run(`
+    DELETE FROM payments WHERE order_id IN (
+      SELECT esl.order_id
+      FROM event_subject_links esl
+      JOIN event_entries ee ON ee.id = esl.event_entry_id
+      JOIN subjects fall_subject ON fall_subject.id = esl.fall_subject_id
+      WHERE ee.event_job_id = ${jobId} OR fall_subject.job_id = ${jobId}
+    );
+    DELETE FROM order_items WHERE order_id IN (
+      SELECT esl.order_id
+      FROM event_subject_links esl
+      JOIN event_entries ee ON ee.id = esl.event_entry_id
+      JOIN subjects fall_subject ON fall_subject.id = esl.fall_subject_id
+      WHERE ee.event_job_id = ${jobId} OR fall_subject.job_id = ${jobId}
+    );
+    DELETE FROM orders WHERE id IN (
+      SELECT esl.order_id
+      FROM event_subject_links esl
+      JOIN event_entries ee ON ee.id = esl.event_entry_id
+      JOIN subjects fall_subject ON fall_subject.id = esl.fall_subject_id
+      WHERE ee.event_job_id = ${jobId} OR fall_subject.job_id = ${jobId}
+    );
+    DELETE FROM event_subject_links WHERE id IN (
+      SELECT esl.id
+      FROM event_subject_links esl
+      JOIN event_entries ee ON ee.id = esl.event_entry_id
+      JOIN subjects fall_subject ON fall_subject.id = esl.fall_subject_id
+      WHERE ee.event_job_id = ${jobId} OR fall_subject.job_id = ${jobId}
+    );
+    DELETE FROM event_entries WHERE event_job_id = ${jobId};
+    DELETE FROM job_links WHERE source_job_id = ${jobId} OR target_job_id = ${jobId};
     DELETE FROM sync_record_mappings WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
     DELETE FROM sync_conflicts WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
     DELETE FROM sync_packages WHERE job_id = ${jobId};
@@ -9948,6 +11436,13 @@ function menuActionMap(window) {
     imageCapture: menuAction(window, 'Image Capture', 'image-capture'),
     envelopeEntry: menuAction(window, 'Envelope Entry', 'envelope-entry'),
     adminItems: menuAction(window, 'Admin Items', 'admin-items'),
+    eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
+    studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
+    onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
+    packagePlanEditor: menuAction(window, 'Package Plan Editor', 'package-plan-editor'),
+    unitRender: menuAction(window, 'Unit Render', 'unit-render'),
+    batchRender: menuAction(window, 'Multi-Job Batch Render', 'batch-render'),
+    compositeBuilder: menuAction(window, 'Class Composite Builder', 'composite-builder'),
     addBlankRecords: menuAction(window, 'Add Blank Records', 'add-records'),
     importSchoolData: menuAction(window, 'Import School Data', 'import-school-data'),
     syncCroppedImages: menuAction(window, 'Sync Cropped Images', 'sync-cropped-images'),
@@ -9997,6 +11492,13 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.eventWorkflow,
+          actions.studentListBuilder,
+          actions.onlineOrderImport,
+          actions.packagePlanEditor,
+          actions.unitRender,
+          actions.batchRender,
+          actions.compositeBuilder,
           { type: 'separator' },
           actions.cropTool,
           actions.makeEndOfDay
@@ -10031,6 +11533,13 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.eventWorkflow,
+          actions.studentListBuilder,
+          actions.onlineOrderImport,
+          actions.packagePlanEditor,
+          actions.unitRender,
+          actions.batchRender,
+          actions.compositeBuilder,
           { type: 'separator' },
           actions.cropTool,
           actions.makeEndOfDay
@@ -10062,6 +11571,13 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.eventWorkflow,
+          actions.studentListBuilder,
+          actions.onlineOrderImport,
+          actions.packagePlanEditor,
+          actions.unitRender,
+          actions.batchRender,
+          actions.compositeBuilder,
           { type: 'separator' },
           actions.importSchoolData,
           actions.syncCroppedImages,
@@ -10088,6 +11604,13 @@ function createContextMenus(window, context) {
         actions.imageCapture,
         actions.envelopeEntry,
         actions.adminItems,
+        actions.eventWorkflow,
+        actions.studentListBuilder,
+        actions.onlineOrderImport,
+        actions.packagePlanEditor,
+        actions.unitRender,
+        actions.batchRender,
+        actions.compositeBuilder,
         actions.addBlankRecords,
         { type: 'separator' },
         actions.importSchoolData,
@@ -10163,6 +11686,7 @@ ipcMain.handle('menu:set-context', (event, contextValue) => {
 function createWindow() {
   logStartup('createWindow');
   const mainWindow = new BrowserWindow({
+    show: process.env.TRECS_UI_TEST !== '1',
     width: 1280,
     height: 860,
     minWidth: 1080,
@@ -10199,8 +11723,20 @@ app.whenReady().then(async () => {
   app.quit();
 });
 
-app.on('window-all-closed', () => {
+let quittingAfterLockRelease = false;
+app.on('window-all-closed', async () => {
   if (process.platform !== 'darwin') {
-    app.quit();
+    if (quittingAfterLockRelease) {
+      app.quit();
+      return;
+    }
+    quittingAfterLockRelease = true;
+    try {
+      await releaseAllOwnedJobSessions();
+    } catch (error) {
+      logStartup('job session release during quit failed', error);
+    } finally {
+      app.quit();
+    }
   }
 });

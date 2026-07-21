@@ -21,7 +21,13 @@
           <button data-view-button="jobs">Jobs</button>
           <button data-view-target="jobs" data-job-tab-target="orders">Orders</button>
           <button data-view-target="jobs" data-job-tab-target="capture">Capture</button>
-          <button data-view-target="jobs" data-job-tab-target="products">Products</button>
+          <button data-view-button="events">Events</button>
+          <button data-view-button="products">Products</button>
+          <button data-view-button="studentLists">Student Lists</button>
+          <button data-view-button="onlineOrders">Online Orders</button>
+          <button data-view-button="unitRender">Unit Render</button>
+          <button data-view-button="batchRender">Batch Render</button>
+          <button data-view-button="composites">Class Composites</button>
         </nav>
       </aside>
 
@@ -66,6 +72,201 @@
                 <h2>Migration</h2>
               </div>
               <dl id="migrationList"></dl>
+            </div>
+          </section>
+        </section>
+
+        <section id="eventsView" class="view">
+          <section class="panel event-workflow-panel">
+            <div class="panel-heading">
+              <div><h2>Event Workflow</h2><p>Match event photographs to the school’s fall students, visually confirm identity, and key picture orders at production speed.</p></div>
+              <span class="status ready">Fall-record linked</span>
+            </div>
+            <div class="event-setup-toolbar">
+              <label><span>Event Job</span><select id="eventJobSelect"></select></label>
+              <label><span>Fall Student Job</span><select id="eventFallJobSelect"></select></label>
+              <button id="linkEventFallJobButton" type="button">Link Fall Job</button>
+              <button id="importEventImagesButton" type="button">Import Event Images</button>
+              <button id="createEventJobButton" type="button">New Event Job</button>
+              <span id="eventSetupStatus" class="tool-status"></span>
+            </div>
+            <div id="eventWorkflowEmpty" class="empty-state" hidden>Create an Event job first, then return here to link it to the matching fall job.</div>
+            <div id="eventWorkflowLayout" class="event-workflow-layout">
+              <aside class="event-queue-column">
+                <div class="column-title"><h3>Event Images</h3><span id="eventQueueCount"></span></div>
+                <label class="event-image-jump"><span>Image #</span><input id="eventImageNumberSearch" placeholder="Type image number + Enter"></label>
+                <div class="segmented event-queue-filters" id="eventQueueFilters"><button class="active" data-event-queue-filter="all" type="button">All</button><button data-event-queue-filter="unlinked" type="button">Unlinked</button><button data-event-queue-filter="linked" type="button">Linked</button><button data-event-queue-filter="coded" type="button">Coded</button></div>
+                <div id="eventImageQueue" class="event-image-queue"></div>
+              </aside>
+              <section class="event-photo-column">
+                <div class="event-current-heading"><div><span>Current Event Image</span><h3 id="eventCurrentImageNumber">Choose an image</h3></div><span id="eventCurrentStatus" class="status review">Waiting</span></div>
+                <div class="event-compare-grid">
+                  <figure><figcaption>Event photo</figcaption><div id="eventPhotoPreview" class="event-photo-preview"><div class="empty-state">Import and choose an event image.</div></div></figure>
+                  <figure><figcaption>Fall thumbnail — identity check</figcaption><div id="eventFallPreview" class="event-photo-preview fall"><div class="empty-state">Select a fall student result.</div></div></figure>
+                </div>
+                <div class="event-linked-section"><div class="column-title"><h3>People Already Linked to This Image</h3><button id="eventAddAnotherButton" type="button">Add Another Person</button></div><div id="eventExistingLinks" class="event-existing-links"></div></div>
+              </section>
+              <section class="event-match-column">
+                <div class="column-title"><h3>Find Fall Student</h3><span id="eventCandidateCount"></span></div>
+                <label><span>Search</span><input id="eventStudentSearch" type="search" placeholder="Name, reference, ID, grade, or homeroom"></label>
+                <div class="event-filter-row"><label><span>Grade</span><select id="eventGradeFilter"><option value="">All Grades</option></select></label><label><span>Homeroom</span><select id="eventHomeroomFilter"><option value="">All Homerooms</option></select></label></div>
+                <div id="eventStudentResults" class="event-student-results"><div class="empty-state">Link a fall job to begin searching.</div></div>
+                <form id="eventOrderForm" class="event-order-form">
+                  <div id="eventSelectedStudent" class="event-selected-student"><span>No fall student selected.</span></div>
+                  <label class="event-confirm-line"><input name="confirmed" type="checkbox"><span>I confirmed the fall thumbnail matches the person in the event photo.</span></label>
+                  <label><span>Picture Order Code</span><input name="orderCodes" autocomplete="off" placeholder="Example: 1 or 1.2"></label>
+                  <div id="eventPackageCodeShortcuts" class="event-code-shortcuts"></div>
+                  <div class="event-order-row"><label><span>Payment</span><select name="paidStatus"><option value="paid">Paid</option><option value="unpaid">Unpaid</option><option value="unknown">Unknown</option></select></label><label><span>Notes</span><input name="notes"></label></div>
+                  <p id="eventOrderStatus" class="tool-status">Select an image and fall student.</p>
+                  <div class="event-save-actions"><button id="eventSaveStayButton" type="button">Save + Add Another</button><button id="eventSaveNextButton" class="primary" type="submit">Save + Next Image</button></div>
+                </form>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section id="productsView" class="view">
+          <section class="panel products-page-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Package Plan Editor</h2>
+                <p>Build the order codes and product contents used by TRECS jobs.</p>
+              </div>
+            </div>
+            <div id="productsPageContent" class="products-page-content">
+              <div class="empty-state">Loading package plans...</div>
+            </div>
+          </section>
+        </section>
+
+        <section id="studentListsView" class="view">
+          <section class="panel production-tool-panel">
+            <div class="panel-heading"><div><h2>Student List Builder</h2><p>Create reusable ordered lists for camera cards, ID cards, directories, admin items, and production filters.</p></div><span class="status ready">Shared list records</span></div>
+            <div class="production-toolbar">
+              <label><span>Job</span><select id="studentListJobSelect"></select></label>
+              <label class="grow"><span>Find Students</span><input id="studentListSearch" type="search" placeholder="Name, reference, ID, grade, or homeroom"></label>
+              <button id="newStudentListButton" type="button">New List</button>
+            </div>
+            <div class="student-list-builder">
+              <aside><div class="column-title"><h3>Saved Lists</h3><span id="studentListCount"></span></div><div id="studentListsSaved" class="production-list"></div></aside>
+              <section><div class="column-title"><h3>Available Students</h3><button id="addSelectedStudentsButton" type="button">Add Selected</button></div><div id="studentListAvailable" class="student-picker-list"></div></section>
+              <section><div class="column-title"><h3>List Members</h3><span id="studentListMemberCount"></span></div><label><span>List Name</span><input id="studentListName" maxlength="120" placeholder="Example: Retake Camera Cards"></label><div id="studentListMembers" class="student-picker-list"></div><div class="button-row"><button id="deleteStudentListButton" class="danger" type="button">Delete</button><button id="saveStudentListButton" class="primary" type="button">Save List</button></div><p id="studentListStatus" class="tool-status">Choose a job and list.</p></section>
+            </div>
+          </section>
+        </section>
+
+        <section id="onlineOrdersView" class="view">
+          <section class="panel production-tool-panel">
+            <div class="panel-heading"><div><h2>Online Order Import</h2><p>Match exported online orders to students, review problems, and safely update repeat imports by order number.</p></div><span class="status ready">Duplicate-safe import</span></div>
+            <div class="production-toolbar"><label><span>Job</span><select id="onlineOrderJobSelect"></select></label><button id="chooseOnlineOrderFileButton" type="button">Choose CSV / Excel File</button><span id="onlineOrderFileName" class="file-summary">No file chosen</span></div>
+            <div id="onlineOrderMapping" class="mapping-grid"></div>
+            <div class="online-order-summary" id="onlineOrderSummary"><div class="empty-state">Choose an online-order export to preview matching.</div></div>
+            <div class="table-scroll production-preview-table"><table><thead><tr><th>Row</th><th>Order</th><th>Student Data</th><th>Matched Student</th><th>Codes</th><th>Status</th></tr></thead><tbody id="onlineOrderPreviewBody"></tbody></table></div>
+            <div class="production-footer"><p id="onlineOrderStatus" class="tool-status">Imports do not create duplicate online orders when the same order number is imported again.</p><button id="importOnlineOrdersButton" class="primary" type="button" disabled>Import Ready Orders</button></div>
+          </section>
+        </section>
+
+        <section id="batchRenderView" class="view">
+          <section class="panel production-tool-panel">
+            <div class="panel-heading"><div><h2>Multi-Job Batch Render</h2><p>Queue paid picture units and packaging across several jobs in one persistent production batch.</p></div><span class="status ready">Network-lock aware</span></div>
+            <div class="batch-render-layout">
+              <form id="batchRenderForm" class="batch-render-options">
+                <label><span>Batch Name</span><input name="name" placeholder="Production batch name"></label>
+                <fieldset><legend>Jobs (select at least two)</legend><div id="batchRenderJobs" class="batch-job-list"></div></fieldset>
+                <label><span>Output By</span><select name="sortBy"><option value="homeroom">Homeroom</option><option value="grade">Grade</option><option value="last">Last Name</option></select></label>
+                <div class="unit-render-checks"><label class="checkbox-line"><input name="includeUnits" type="checkbox" checked><span>Picture Units</span></label><label class="checkbox-line"><input name="includeEnvelopes" type="checkbox" checked><span>Envelopes</span></label><label class="checkbox-line"><input name="includeLabels" type="checkbox"><span>Order Labels</span></label></div>
+                <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose batch output folder"><button id="browseBatchRenderOutputButton" type="button">Browse</button></div></label>
+                <progress id="batchRenderProgress" value="0" max="100"></progress><p id="batchRenderStatus" class="tool-status">Select jobs and an output folder.</p><button id="startBatchRenderButton" class="primary" type="submit">Start Batch Render</button>
+              </form>
+              <section><div class="column-title"><h3>Recent Batches</h3><button id="refreshBatchRenderButton" type="button">Refresh</button></div><div id="batchRenderHistory" class="production-list"></div><div class="network-lock-note"><strong>Job locking</strong><p>Selected jobs are reserved in a consistent order before rendering. Locks renew while TRECS is open and expire after two minutes if a workstation disconnects.</p></div></section>
+            </div>
+          </section>
+        </section>
+
+        <section id="unitRenderView" class="view">
+          <section class="panel unit-render-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Unit Render</h2>
+                <p>Render paid picture orders, packaging envelopes, and optional order labels.</p>
+              </div>
+              <span class="status ready">Blank-envelope proof mode</span>
+            </div>
+            <form id="unitRenderForm" class="unit-render-form">
+              <section class="unit-render-options">
+                <h3>Render Setup</h3>
+                <label><span>Job</span><select name="jobId" required></select></label>
+                <label><span>Package Plan</span><input name="packagePlan" readonly></label>
+                <label><span>Render Orders</span><select name="source"><option value="all">All Paid Orders</option><option value="grade">Grade</option><option value="homeroom">Homeroom</option><option value="individual">Individual Order</option></select></label>
+                <label id="unitRenderFilterField" hidden><span id="unitRenderFilterLabel">Filter</span><select name="sourceValue"></select></label>
+                <label><span>Output By</span><select name="sortBy"><option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option></select></label>
+                <div class="unit-render-checks">
+                  <label class="checkbox-line"><input name="includeUnits" type="checkbox" checked><span>Include Picture Units</span></label>
+                  <label class="checkbox-line"><input name="includeEnvelopes" type="checkbox" checked><span>Include Envelopes</span></label>
+                  <label class="checkbox-line"><input name="includeLabels" type="checkbox"><span>Include Order Labels</span></label>
+                  <label class="checkbox-line disabled-option"><input type="checkbox" disabled><span>Include Template Add-ons (coming next)</span></label>
+                </div>
+                <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose where rendered files will be created"><button id="browseUnitRenderOutputButton" type="button">Browse</button></div></label>
+              </section>
+              <section class="unit-render-summary">
+                <h3>Ready to Render</h3>
+                <div id="unitRenderMetrics" class="unit-render-metrics"><div class="empty-state">Choose a job to see its render queue.</div></div>
+                <div class="unit-render-proof-note"><strong>Envelope proof for tomorrow</strong><p>Small and large envelopes use the legacy dimensions and data placement on a blank canvas. Running this does not change order production status.</p></div>
+                <progress id="unitRenderProgress" value="0" max="100"></progress>
+                <p id="unitRenderStatus">Choose an output folder, then render.</p>
+                <button class="primary unit-render-start" id="startUnitRenderButton" type="submit">Render Orders</button>
+              </section>
+            </form>
+          </section>
+        </section>
+
+        <section id="compositesView" class="view">
+          <section class="panel composite-builder-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Class Composite Builder</h2>
+                <p>Build traditional class composites and personalized STAR composites with the proven Java layouts.</p>
+              </div>
+              <span class="status ready">Legacy layout geometry</span>
+            </div>
+            <div class="composite-job-row">
+              <label><span>Job</span><select id="compositeJobSelect"></select></label>
+              <div id="compositeJobMetrics" class="composite-job-metrics"></div>
+            </div>
+            <div class="composite-builder-grid">
+              <aside class="composite-class-column">
+                <div class="composite-column-heading"><h3>Classes</h3><span id="compositeClassCount"></span></div>
+                <div id="compositeClassList" class="composite-class-list"><div class="empty-state">Choose a job.</div></div>
+              </aside>
+              <section class="composite-preview-column">
+                <div class="composite-preview-toolbar">
+                  <div class="segmented" id="compositePreviewType"><button class="active" type="button" data-composite-type="traditional">Traditional</button><button type="button" data-composite-type="star">STAR</button></div>
+                  <label id="compositeFeaturedField" hidden><span>Featured Student</span><select id="compositeFeaturedStudent"></select></label>
+                  <button id="refreshCompositePreviewButton" type="button">Refresh Preview</button>
+                </div>
+                <div class="composite-preview-stage" id="compositePreviewStage"><div class="empty-state">Select a class to preview its layout.</div></div>
+                <p id="compositePreviewMeta" class="composite-preview-meta"></p>
+              </section>
+              <form id="compositeRenderForm" class="composite-options-column">
+                <h3>Render Setup</h3>
+                <label><span>School Name</span><input name="schoolName"></label>
+                <label><span>Principal / Subtitle</span><input name="principal"></label>
+                <label><span>School Year</span><input name="schoolYear" placeholder="2026-2027"></label>
+                <label><span>Selected Class Heading</span><input name="classHeading" placeholder="Uses homeroom when blank"></label>
+                <label><span>Render Scope</span><select name="scope"><option value="selected">Selected Class</option><option value="all">All Classes</option></select></label>
+                <div class="composite-checks">
+                  <label class="checkbox-line"><input name="includeTraditional" type="checkbox" checked><span>Traditional Backgrounds</span></label>
+                  <label class="checkbox-line"><input name="includeStar" type="checkbox" checked><span>STAR Backgrounds</span></label>
+                  <label class="checkbox-line"><input name="includePurchaserCopies" type="checkbox" checked><span>Paid Purchaser Copies</span></label>
+                  <label class="checkbox-line"><input name="includeNames" type="checkbox" checked><span>Student Names</span></label>
+                  <label class="checkbox-line"><input name="includeStaff" type="checkbox" checked><span>Class Staff</span></label>
+                  <label class="checkbox-line"><input name="photographedOnly" type="checkbox"><span>Photographed Students Only</span></label>
+                </div>
+                <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose composite output folder"><button id="browseCompositeOutputButton" type="button">Browse</button></div></label>
+                <progress id="compositeProgress" value="0" max="100"></progress>
+                <p id="compositeStatus">Choose a class to preview, then select an output folder.</p>
+                <button class="primary" id="renderCompositesButton" type="submit">Render Composites</button>
+              </form>
             </div>
           </section>
         </section>
@@ -275,7 +476,6 @@
                 <button data-job-tab="orders">Orders</button>
                 <button data-job-tab="capture">Capture</button>
                 <button data-job-tab="images">Images</button>
-                <button data-job-tab="products">Products</button>
               </div>
             </div>
             <div id="jobWorkflowContent" class="workflow-content">
