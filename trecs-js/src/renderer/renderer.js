@@ -1,4 +1,6 @@
 const databasePath = document.getElementById('databasePath');
+const appShell = document.getElementById('appShell');
+const toggleSidebarButton = document.getElementById('toggleSidebarButton');
 const metricGrid = document.getElementById('metricGrid');
 const jobsTableBody = document.getElementById('jobsTableBody');
 const migrationList = document.getElementById('migrationList');
@@ -70,6 +72,7 @@ const unitRenderFilterLabel = document.getElementById('unitRenderFilterLabel');
 const unitRenderMetrics = document.getElementById('unitRenderMetrics');
 const unitRenderProgress = document.getElementById('unitRenderProgress');
 const unitRenderStatus = document.getElementById('unitRenderStatus');
+const exportImagePrepButton = document.getElementById('exportImagePrepButton');
 const browseUnitRenderOutputButton = document.getElementById('browseUnitRenderOutputButton');
 const startUnitRenderButton = document.getElementById('startUnitRenderButton');
 const batchRenderView = document.getElementById('batchRenderView');
@@ -7760,17 +7763,59 @@ function packageProductOptions(selectedId = '') {
   `).join('');
 }
 
+function productCategoryOptions(selected = '') {
+  const selectedValue = String(selected || 'print');
+  const categories = [
+    ['print', 'Print'],
+    ['print_bundle', 'Print Bundle'],
+    ['group_print', 'Group / Composite Print'],
+    ['id_card', 'ID Card'],
+    ['image_prep', 'ImagePrep'],
+    ['specialty', 'Photoshop Handoff / Specialty'],
+    ['digital', 'Digital'],
+    ['envelope_text', 'Envelope Text Only'],
+    ['unknown', 'Other / Needs Review']
+  ];
+  if (selectedValue && !categories.some(([value]) => value === selectedValue)) {
+    categories.push([selectedValue, `${formatStatusLabel(selectedValue)} (legacy)`]);
+  }
+  return categories.map(([value, label]) => `<option value="${value}" ${selectedValue === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+}
+
+function productCatalogRows() {
+  const products = (jobsState.packageEditor && jobsState.packageEditor.products) || [];
+  if (!products.length) return '<div class="empty-state">Load default products or add a product to begin review.</div>';
+  return products.map((product) => {
+    const reviewed = product.reviewed === true;
+    const support = formatStatusLabel(product.renderStatus || 'unknown');
+    return `<article class="product-review-row ${reviewed ? 'reviewed' : ''}" data-product-review="${product.id}">
+      <span class="review-check" title="${reviewed ? 'Reviewed' : 'Not reviewed'}">${reviewed ? '✓' : ''}</span>
+      <input name="productName" value="${escapeHtml(product.name || '')}" placeholder="Product name">
+      <select name="productCategory">${productCategoryOptions(product.category || 'print')}</select>
+      <input name="productSize" type="hidden" value="${escapeHtml(product.size || '')}">
+      <label class="checkbox-line compact" title="Needs a student image to render or export"><input name="productRequiresImage" type="checkbox" ${product.requiresImage === 0 || product.requiresImage === false ? '' : 'checked'}><span>Needs Photo</span></label>
+      <small>${escapeHtml(support)}</small>
+      <button data-test-product="${product.id}" type="button">Test</button>
+      <button data-toggle-product-reviewed="${product.id}" type="button">${reviewed ? 'Unreview' : 'Mark Reviewed'}</button>
+      <button class="danger" data-delete-product="${product.id}" type="button">Delete</button>
+    </article>`;
+  }).join('');
+}
+
 function packageItemRow(item = {}) {
   return `<div class="package-item-row">
     <span class="package-item-handle" title="Items render in this order">≡</span>
     <select name="productId" required><option value="">Choose product...</option>${packageProductOptions(item.productId)}</select>
     <label>Qty <input name="quantity" type="number" min="1" max="999" value="${Number(item.quantity || 1)}"></label>
+    <button data-test-package-item type="button">Test Item</button>
     <button data-remove-package-item type="button">Remove</button>
   </div>`;
 }
 
 function drawPackageEditor(selectedCodeId = null) {
   const editor = jobsState.packageEditor;
+  const productsExpanded = jobsState.productsPanelExpanded === true;
+  const productsCollapsed = jobsState.productsPanelCollapsed === true;
   const selected = selectedCodeId === 0
     ? null
     : editor.codes.find((code) => Number(code.id) === Number(selectedCodeId)) || editor.codes[0] || null;
@@ -7780,46 +7825,331 @@ function drawPackageEditor(selectedCodeId = null) {
         <label><span>Package Plan</span><select id="packageEditorPlan">${editor.plans.map((plan) => `<option value="${plan.id}" ${Number(plan.id) === Number(editor.selectedPlanId) ? 'selected' : ''}>${escapeHtml(plan.name)} (v${plan.version})</option>`).join('')}</select></label>
         <button id="newPackagePlanButton" type="button">New Plan</button>
         <button id="newPackageCodeButton" type="button">New Code</button>
-        <button id="testPictureUnitsButton" type="button">Test Picture Units</button>
-        <button id="testPackageRendersButton" type="button">Audit Render Support</button>
         <span id="packageEditorStatus"></span>
       </div>
+      <form id="newPackagePlanForm" class="new-package-plan-form" hidden>
+        <label><span>Plan Name</span><input name="name" required placeholder="Example: Fall 2026"></label>
+        <label><span>Version</span><input name="version" type="number" min="1" value="1"></label>
+        <button class="primary" type="submit">Create Plan</button>
+        <button id="cancelNewPackagePlanButton" type="button">Cancel</button>
+      </form>
+      <section class="product-catalog-panel">
+        <div>
+          <h3>Product Catalog</h3>
+          <p>${formatNumber(editor.products.length)} product${editor.products.length === 1 ? '' : 's'} available for package contents.</p>
+        </div>
+        <button id="seedDefaultProductsButton" type="button">Load Default Products</button>
+        <button id="newProductButton" type="button">Add Product</button>
+      </section>
+      <form id="newProductForm" class="new-product-form" hidden>
+        <input name="id" type="hidden">
+        <label><span>Name</span><input name="name" required placeholder="Example: StarPhoto"></label>
+        <label><span>Category</span><select name="category">
+          <option value="print">Print</option>
+          <option value="print_bundle">Print Bundle</option>
+          <option value="group_print">Group / Composite Print</option>
+          <option value="id_card">ID Card</option>
+          <option value="image_prep">ImagePrep</option>
+          <option value="specialty">Photoshop Handoff / Specialty</option>
+          <option value="digital">Digital</option>
+          <option value="envelope_text">Envelope Text Only</option>
+          <option value="unknown">Other / Needs Review</option>
+        </select></label>
+        <input name="size" type="hidden">
+        <label class="checkbox-line" title="Needs a student image to render or export"><input name="requiresImage" type="checkbox" checked><span>Needs Photo</span></label>
+        <button class="primary" type="submit">Save Product</button>
+        <button id="cancelNewProductButton" type="button">Cancel</button>
+      </form>
+      <section class="product-review-panel ${productsExpanded ? 'expanded' : ''} ${productsCollapsed ? 'collapsed' : ''}">
+        <div class="column-title product-review-heading"><div><strong>Products</strong><span>${productsCollapsed ? 'Product list hidden.' : 'Edit products, test a single item, or mark render setup reviewed.'}</span></div><div class="product-review-actions"><button id="collapseProductPanelButton" type="button">${productsCollapsed ? 'Show Products' : 'Hide Products'}</button><button id="toggleProductPanelButton" type="button" ${productsCollapsed ? 'disabled' : ''}>${productsExpanded ? 'Compact' : 'Expand'}</button><button id="saveProductListButton" type="button" ${productsCollapsed ? 'disabled' : ''}>Save Product List</button><button id="saveProductsDefaultButton" type="button" ${productsCollapsed ? 'disabled' : ''}>Save as Default Products</button></div></div>
+        <div class="product-review-list">${productCatalogRows()}</div>
+      </section>
       <div class="package-editor-layout">
         <aside class="package-code-list">
-          ${editor.codes.length ? editor.codes.map((code) => `<button data-package-code="${code.id}" class="${selected && Number(code.id) === Number(selected.id) ? 'active' : ''}" type="button"><strong>${escapeHtml(code.name || 'Unnamed package')}</strong><span>Code ${escapeHtml(code.code)}</span><small>${code.items.length} item${code.items.length === 1 ? '' : 's'}</small></button>`).join('') : '<div class="empty-state">No codes in this plan.</div>'}
+          ${editor.codes.length ? editor.codes.map((code) => `<button data-package-code="${code.id}" class="${selected && Number(code.id) === Number(selected.id) ? 'active' : ''} ${code.reviewed ? 'reviewed' : ''}" type="button"><strong>${code.reviewed ? '<span class="review-check">✓</span>' : ''}${escapeHtml(code.name || 'Unnamed package')}</strong><span>Code ${escapeHtml(code.code)}</span><small>${code.items.length} item${code.items.length === 1 ? '' : 's'}</small></button>`).join('') : '<div class="empty-state">No codes in this plan.</div>'}
         </aside>
         <form id="packageCodeForm" class="package-code-form">
           <input name="id" type="hidden" value="${selected ? selected.id : ''}">
           <div class="package-code-heading"><label><span>Order Code</span><input name="code" required value="${selected ? escapeHtml(selected.code) : ''}" placeholder="1"></label><label class="grow"><span>Customer-facing Name</span><input name="name" value="${selected ? escapeHtml(selected.name || '') : ''}" placeholder="Package A"></label></div>
           <div class="package-item-heading"><div><h3>Package Contents</h3><p>Each row is a product, service, modifier, or fulfillment instruction.</p></div><button id="addPackageItemButton" type="button">Add Item</button></div>
           <div id="packageItemRows">${selected && selected.items.length ? selected.items.map(packageItemRow).join('') : packageItemRow()}</div>
-          <div class="form-actions"><button id="deletePackageCodeButton" class="danger" type="button" ${selected ? '' : 'disabled'}>Delete Code</button><button class="primary" type="submit">Save Package</button></div>
+          <div class="form-actions"><button id="deletePackageCodeButton" class="danger" type="button" ${selected ? '' : 'disabled'}>Delete Code</button><button id="testPackageCodeButton" type="button" ${selected ? '' : 'disabled'}>Test</button><button id="markPackageReviewedButton" type="button" ${selected ? '' : 'disabled'}>${selected?.reviewed ? 'Unreview' : 'Mark Reviewed'}</button><button class="primary" type="submit">Save Package</button></div>
         </form>
       </div>
     </div>`;
   bindPackageEditor(selected);
 }
 
+function collectProductListRows() {
+  return Array.from(document.querySelectorAll('[data-product-review]')).map((row) => ({
+    id: Number(row.dataset.productReview),
+    name: row.querySelector('[name="productName"]').value,
+    category: row.querySelector('[name="productCategory"]').value,
+    size: row.querySelector('[name="productSize"]').value,
+    requiresImage: row.querySelector('[name="productRequiresImage"]').checked
+  }));
+}
+
+function rememberProductListScroll() {
+  const list = document.querySelector('.product-review-list');
+  if (list) jobsState.productListScrollTop = list.scrollTop;
+}
+
+function restoreProductListScroll() {
+  const list = document.querySelector('.product-review-list');
+  if (!list || !Number.isFinite(Number(jobsState.productListScrollTop))) return;
+  list.scrollTop = Number(jobsState.productListScrollTop);
+}
+
 function bindPackageEditor(selected) {
   const status = document.querySelector('#packageEditorStatus');
+  const productList = document.querySelector('.product-review-list');
+  if (productList) {
+    restoreProductListScroll();
+    productList.addEventListener('scroll', () => {
+      jobsState.productListScrollTop = productList.scrollTop;
+    });
+  }
   document.querySelector('#packageEditorPlan').addEventListener('change', async (event) => {
     jobsState.packageEditorPlanId = Number(event.target.value);
     await renderProductsPage();
   });
   document.querySelectorAll('[data-package-code]').forEach((button) => button.addEventListener('click', () => drawPackageEditor(Number(button.dataset.packageCode))));
   document.querySelector('#addPackageItemButton').addEventListener('click', () => document.querySelector('#packageItemRows').insertAdjacentHTML('beforeend', packageItemRow()));
-  document.querySelector('#packageItemRows').addEventListener('click', (event) => {
-    if (event.target.matches('[data-remove-package-item]')) event.target.closest('.package-item-row').remove();
+  document.querySelector('#packageItemRows').addEventListener('click', async (event) => {
+    if (event.target.matches('[data-remove-package-item]')) {
+      event.target.closest('.package-item-row').remove();
+      return;
+    }
+    if (event.target.matches('[data-test-package-item]')) {
+      const row = event.target.closest('.package-item-row');
+      const productId = Number(row.querySelector('[name="productId"]').value || 0);
+      const quantity = Number(row.querySelector('[name="quantity"]').value || 1);
+      if (!productId) {
+        status.textContent = 'Choose a product before testing the item.';
+        return;
+      }
+      event.target.disabled = true;
+      try {
+        const result = await trecsApi('testPackageItemRender').testPackageItemRender({ productId, quantity });
+        const count = Number(result.rendered || result.handoffs || result.imagePrep || 0);
+        status.textContent = `Tested ${count} output${count === 1 ? '' : 's'}. ${result.outputFolder}`;
+      } catch (error) {
+        status.textContent = error.message || 'Item test failed.';
+      } finally {
+        event.target.disabled = false;
+      }
+    }
   });
   document.querySelector('#newPackageCodeButton').addEventListener('click', () => drawPackageEditor(0));
-  document.querySelector('#newPackagePlanButton').addEventListener('click', async () => {
-    const name = window.prompt('Name for the new package plan:');
-    if (!name) return;
+  const newPlanForm = document.querySelector('#newPackagePlanForm');
+  document.querySelector('#newPackagePlanButton').addEventListener('click', () => {
+    newPlanForm.hidden = false;
+    newPlanForm.elements.name.focus();
+    status.textContent = '';
+  });
+  document.querySelector('#cancelNewPackagePlanButton').addEventListener('click', () => {
+    newPlanForm.hidden = true;
+    newPlanForm.reset();
+  });
+  newPlanForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitButton = newPlanForm.querySelector('[type="submit"]');
+    submitButton.disabled = true;
     try {
-      const result = await trecsApi('createPackagePlan').createPackagePlan({ name });
+      status.textContent = 'Creating package plan...';
+      const result = await trecsApi('createPackagePlan').createPackagePlan({ name: newPlanForm.elements.name.value, version: newPlanForm.elements.version.value });
       jobsState.packageEditorPlanId = result.id;
       await renderProductsPage();
-    } catch (error) { status.textContent = error.message; }
+    } catch (error) {
+      status.textContent = error.message || 'Could not create package plan.';
+      submitButton.disabled = false;
+    }
+  });
+  const newProductForm = document.querySelector('#newProductForm');
+  document.querySelector('#newProductButton').addEventListener('click', () => {
+    newProductForm.reset();
+    newProductForm.elements.id.value = '';
+    newProductForm.elements.requiresImage.checked = true;
+    newProductForm.hidden = false;
+    newProductForm.elements.name.focus();
+    status.textContent = '';
+  });
+  document.querySelector('#cancelNewProductButton').addEventListener('click', () => {
+    newProductForm.hidden = true;
+    newProductForm.reset();
+  });
+  document.querySelector('#collapseProductPanelButton').addEventListener('click', (event) => {
+    const panel = document.querySelector('.product-review-panel');
+    jobsState.productsPanelCollapsed = !jobsState.productsPanelCollapsed;
+    panel.classList.toggle('collapsed', jobsState.productsPanelCollapsed);
+    event.currentTarget.textContent = jobsState.productsPanelCollapsed ? 'Show Products' : 'Hide Products';
+    document.querySelector('#toggleProductPanelButton').disabled = jobsState.productsPanelCollapsed;
+    document.querySelector('#saveProductListButton').disabled = jobsState.productsPanelCollapsed;
+    document.querySelector('#saveProductsDefaultButton').disabled = jobsState.productsPanelCollapsed;
+  });
+  document.querySelector('#toggleProductPanelButton').addEventListener('click', (event) => {
+    const panel = document.querySelector('.product-review-panel');
+    panel.classList.toggle('expanded');
+    jobsState.productsPanelExpanded = panel.classList.contains('expanded');
+    event.currentTarget.textContent = jobsState.productsPanelExpanded ? 'Collapse' : 'Expand';
+  });
+  document.querySelector('#saveProductListButton').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      rememberProductListScroll();
+      status.textContent = 'Saving product list...';
+      const result = await trecsApi('saveProductsBatch').saveProductsBatch(collectProductListRows());
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      drawPackageEditor(selected ? Number(selected.id) : null);
+      document.querySelector('#packageEditorStatus').textContent = `Saved ${result.saved} products.`;
+    } catch (error) {
+      status.textContent = error.message || 'Could not save product list.';
+      event.currentTarget.disabled = false;
+    }
+  });
+  document.querySelector('#saveProductsDefaultButton').addEventListener('click', async (event) => {
+    if (!window.confirm('Save the current product list as the default products loaded by TRECS?')) return;
+    event.currentTarget.disabled = true;
+    try {
+      rememberProductListScroll();
+      status.textContent = 'Saving default products...';
+      const result = await trecsApi('saveProductsAsDefault').saveProductsAsDefault(collectProductListRows());
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      drawPackageEditor(selected ? Number(selected.id) : null);
+      document.querySelector('#packageEditorStatus').textContent = `Saved ${result.saved} default products. ${result.outputPath}`;
+    } catch (error) {
+      status.textContent = error.message || 'Could not save default products.';
+      event.currentTarget.disabled = false;
+    }
+  });
+  document.querySelector('.product-review-list').addEventListener('click', async (event) => {
+    const editButton = event.target.closest('[data-edit-product]');
+    const testButton = event.target.closest('[data-test-product]');
+    const toggleButton = event.target.closest('[data-toggle-product-reviewed]');
+    const deleteButton = event.target.closest('[data-delete-product]');
+    if (editButton) {
+      const product = jobsState.packageEditor.products.find((row) => Number(row.id) === Number(editButton.dataset.editProduct));
+      if (!product) return;
+      newProductForm.hidden = false;
+      newProductForm.elements.id.value = product.id;
+      newProductForm.elements.name.value = product.name || '';
+      newProductForm.elements.category.value = product.category || 'print';
+      newProductForm.elements.size.value = product.size || '';
+      newProductForm.elements.requiresImage.checked = product.requiresImage !== 0 && product.requiresImage !== false;
+      newProductForm.elements.name.focus();
+      status.textContent = `Editing ${product.name}.`;
+      return;
+    }
+    if (testButton) {
+      testButton.disabled = true;
+      try {
+        const result = await trecsApi('testProductRender').testProductRender(Number(testButton.dataset.testProduct));
+        const count = Number(result.files?.length || result.sheets || 0);
+        status.textContent = result.status === 'photoshop_handoff'
+          ? `Created Photoshop handoff files. ${result.outputPath}`
+          : result.status === 'image_prep'
+            ? `Created ImagePrep source files. ${result.outputPath}`
+          : `Tested ${count} sheet${count === 1 ? '' : 's'}. ${result.outputPath || ''}`;
+      } catch (error) {
+        status.textContent = error.message || 'Product test failed.';
+      } finally {
+        testButton.disabled = false;
+      }
+      return;
+    }
+    if (toggleButton) {
+      const productId = Number(toggleButton.dataset.toggleProductReviewed);
+      const product = jobsState.packageEditor.products.find((row) => Number(row.id) === productId);
+      toggleButton.disabled = true;
+      try {
+        rememberProductListScroll();
+        const result = await trecsApi('markProductReviewed').markProductReviewed(productId, !(product && product.reviewed));
+        jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+        drawPackageEditor(selected ? Number(selected.id) : null);
+        document.querySelector('#packageEditorStatus').textContent = `${result.reviewed ? 'Reviewed' : 'Unreviewed'} ${result.name}.`;
+      } catch (error) {
+        status.textContent = error.message || 'Could not update product review status.';
+        toggleButton.disabled = false;
+      }
+      return;
+    }
+    if (deleteButton) {
+      const product = jobsState.packageEditor.products.find((row) => Number(row.id) === Number(deleteButton.dataset.deleteProduct));
+      if (!product || !window.confirm(`Delete product ${product.name}?`)) return;
+      deleteButton.disabled = true;
+      try {
+        rememberProductListScroll();
+        const result = await trecsApi('deleteProduct').deleteProduct(product.id);
+        jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+        drawPackageEditor(selected ? Number(selected.id) : null);
+        document.querySelector('#packageEditorStatus').textContent = `Deleted product ${result.name}.`;
+      } catch (error) {
+        status.textContent = error.message || 'Could not delete product.';
+        deleteButton.disabled = false;
+      }
+    }
+  });
+  document.querySelector('#seedDefaultProductsButton').addEventListener('click', async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      rememberProductListScroll();
+      status.textContent = 'Loading default products...';
+      const result = await trecsApi('seedDefaultProducts').seedDefaultProducts();
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      drawPackageEditor(selected ? Number(selected.id) : null);
+      document.querySelector('#packageEditorStatus').textContent = `Loaded ${result.productCount} products (${result.added} new).`;
+    } catch (error) {
+      status.textContent = error.message || 'Could not load default products.';
+      event.currentTarget.disabled = false;
+    }
+  });
+  document.querySelector('#testPackageCodeButton').addEventListener('click', async (event) => {
+    if (!selected) return;
+    event.currentTarget.disabled = true;
+    try {
+      status.textContent = `Testing ${selected.name || selected.code}...`;
+      const result = await trecsApi('testPackageCodeRender').testPackageCodeRender(selected.id);
+      status.textContent = `Rendered ${result.rendered} output${Number(result.rendered) === 1 ? '' : 's'} with SampleCroppedLarge.jpg${result.skipped.length ? `; ${result.skipped.length} item(s) need setup` : ''}. ${result.outputFolder}`;
+    } catch (error) {
+      status.textContent = error.message || 'Package test failed.';
+    } finally {
+      event.currentTarget.disabled = false;
+    }
+  });
+  document.querySelector('#markPackageReviewedButton').addEventListener('click', async (event) => {
+    if (!selected) return;
+    event.currentTarget.disabled = true;
+    try {
+      const result = await trecsApi('markPackageCodeReviewed').markPackageCodeReviewed(selected.id, !selected.reviewed);
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      drawPackageEditor(selected.id);
+      document.querySelector('#packageEditorStatus').textContent = `${result.reviewed ? 'Reviewed' : 'Unreviewed'} ${result.name || result.code}.`;
+    } catch (error) {
+      status.textContent = error.message || 'Could not update package review status.';
+      event.currentTarget.disabled = false;
+    }
+  });
+  newProductForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitButton = newProductForm.querySelector('[type="submit"]');
+    submitButton.disabled = true;
+    try {
+      status.textContent = 'Saving product...';
+      const product = await trecsApi('createProduct').createProduct({
+        id: newProductForm.elements.id.value || null,
+        name: newProductForm.elements.name.value,
+        category: newProductForm.elements.category.value,
+        size: newProductForm.elements.size.value,
+        requiresImage: newProductForm.elements.requiresImage.checked
+      });
+      jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      drawPackageEditor(selected ? Number(selected.id) : null);
+      document.querySelector('#packageEditorStatus').textContent = `Saved product ${product?.name || ''}.`;
+    } catch (error) {
+      status.textContent = error.message || 'Could not save product.';
+      submitButton.disabled = false;
+    }
   });
   document.querySelector('#packageCodeForm').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -7838,27 +8168,6 @@ function bindPackageEditor(selected) {
     await trecsApi('deletePackageCode').deletePackageCode(selected.id);
     jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
     drawPackageEditor();
-  });
-  document.querySelector('#testPackageRendersButton').addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
-    status.textContent = 'Testing configured products...';
-    try {
-      const report = await trecsApi('testPackagePlanRenders').testPackagePlanRenders(jobsState.packageEditorPlanId);
-      const rendered = report.results.filter((row) => row.status === 'rendered').length;
-      const needsTemplate = report.results.filter((row) => row.status === 'template_required').length;
-      const nonRendering = report.results.filter((row) => row.status === 'non_rendering').length;
-      status.textContent = `${rendered} rendered; ${needsTemplate} need templates; ${nonRendering} non-rendering. ${report.outputFolder}`;
-    } catch (error) { status.textContent = error.message; }
-    finally { event.currentTarget.disabled = false; }
-  });
-  document.querySelector('#testPictureUnitsButton').addEventListener('click', async (event) => {
-    event.currentTarget.disabled = true;
-    status.textContent = 'Rendering template-free picture-unit tests...';
-    try {
-      const report = await trecsApi('testPictureUnitRenders').testPictureUnitRenders();
-      status.textContent = `${report.totals.abilities} unit layouts passed across ${report.totals.sheets} sheets. ${report.outputFolder}`;
-    } catch (error) { status.textContent = error.message; }
-    finally { event.currentTarget.disabled = false; }
   });
 }
 
@@ -8249,6 +8558,33 @@ async function browseUnitRenderOutput() {
   unitRenderStatus.textContent = 'Output folder selected.';
 }
 
+async function exportUnitImagePrep() {
+  if (jobsState.unitRenderRunning) return;
+  const jobId = Number(unitRenderForm.elements.jobId.value);
+  if (!(await acquireUiJobLock(jobId, 'image_prep'))) return;
+  jobsState.unitRenderRunning = true;
+  exportImagePrepButton.disabled = true;
+  startUnitRenderButton.disabled = true;
+  unitRenderProgress.value = 0;
+  unitRenderStatus.textContent = 'Exporting ImagePrep source files...';
+  try {
+    const result = await trecsApi('exportImagePrep').exportImagePrep({
+      jobId,
+      source: unitRenderForm.elements.source.value,
+      sourceValue: unitRenderForm.elements.sourceValue.value
+    });
+    unitRenderStatus.textContent = `Image Prep exported ${result.exported} image${Number(result.exported) === 1 ? '' : 's'} across ${result.prepTypes || 0} prep item${Number(result.prepTypes || 0) === 1 ? '' : 's'}${result.missingPhotos.length ? `; ${result.missingPhotos.length} missing photo(s)` : ''}.`;
+  } catch (error) {
+    unitRenderStatus.textContent = error.message || 'ImagePrep export failed.';
+    console.error(error);
+  } finally {
+    await releaseUiJobLocks(jobId);
+    jobsState.unitRenderRunning = false;
+    exportImagePrepButton.disabled = false;
+    startUnitRenderButton.disabled = false;
+  }
+}
+
 async function submitUnitRender(event) {
   event.preventDefault();
   if (jobsState.unitRenderRunning) return;
@@ -8275,7 +8611,7 @@ async function submitUnitRender(event) {
       includeLabels: unitRenderForm.elements.includeLabels.checked,
       outputFolder
     });
-    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped.`;
+    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}.`;
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'Render failed.';
     console.error(error);
@@ -8300,6 +8636,8 @@ function compositeInput() {
     featuredSubjectId: Number(compositeFeaturedStudent.value || group?.featuredStudents?.[0]?.id || 0),
     schoolName: compositeRenderForm.elements.schoolName.value,
     principal: compositeRenderForm.elements.principal.value,
+    additionalStaff1Id: Number(compositeRenderForm.elements.additionalStaff1Id.value || 0),
+    additionalStaff2Id: Number(compositeRenderForm.elements.additionalStaff2Id.value || 0),
     schoolYear: compositeRenderForm.elements.schoolYear.value,
     classHeading: compositeRenderForm.elements.classHeading.value,
     photographedOnly: compositeRenderForm.elements.photographedOnly.checked,
@@ -8342,6 +8680,29 @@ function updateCompositeFeaturedStudents() {
   compositeFeaturedStudent.innerHTML = featured.map((student) => `<option value="${student.id}">${escapeHtml(`${student.name} — Ref ${student.ref || ''}${student.hasPhoto ? '' : ' — NO PHOTO'}${student.starOrders ? ` — ${student.starOrders} STAR` : ''}`)}</option>`).join('');
 }
 
+function compositeStaffLabel(staff) {
+  const details = [staff.homeroom, staff.grade || staff.subjectType].filter(Boolean).join(' / ');
+  return `${staff.name || `Ref ${staff.ref || staff.id}`}${details ? ` - ${details}` : ''}${staff.hasPhoto ? '' : ' - NO PHOTO'}`;
+}
+
+function setSidebarCollapsed(collapsed) {
+  appShell.classList.toggle('sidebar-collapsed', collapsed);
+  toggleSidebarButton.title = collapsed ? 'Show menu' : 'Hide menu';
+  toggleSidebarButton.setAttribute('aria-label', collapsed ? 'Show menu' : 'Hide menu');
+}
+
+function updateCompositeAdditionalStaffOptions() {
+  const staff = jobsState.compositeSetup?.staff || [];
+  const options = `<option value="">None</option>${staff.map((subject) => `<option value="${subject.id}">${escapeHtml(compositeStaffLabel(subject))}</option>`).join('')}`;
+  ['additionalStaff1Id', 'additionalStaff2Id'].forEach((field) => {
+    const select = compositeRenderForm.elements[field];
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = options;
+    if (staff.some((subject) => String(subject.id) === current)) select.value = current;
+  });
+}
+
 function renderCompositeJobSummary() {
   const setup = jobsState.compositeSetup; const classes = setup?.classes || [];
   const students = classes.reduce((total, group) => total + Number(group.students || 0), 0);
@@ -8359,6 +8720,7 @@ async function loadCompositeSetup(jobId = null) {
   compositeJobSelect.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(`${job.clientName} — ${job.jobName} — ${job.classes} classes`)}</option>`).join('');
   compositeRenderForm.elements.schoolName.value = setup.job?.clientName || '';
   compositeRenderForm.elements.schoolYear.value = setup.job?.schoolYear || '';
+  updateCompositeAdditionalStaffOptions();
   jobsState.compositeHomeroom = setup.classes[0]?.homeroom || '';
   renderCompositeJobSummary();
   renderCompositeClasses();
@@ -8673,6 +9035,10 @@ async function loadDashboard() {
 }
 
 loadDashboard();
+
+toggleSidebarButton.addEventListener('click', () => {
+  setSidebarCollapsed(!appShell.classList.contains('sidebar-collapsed'));
+});
 
 viewButtons.forEach((button) => {
   button.addEventListener('click', () => {
@@ -9475,6 +9841,7 @@ unitRenderForm.elements.jobId.addEventListener('change', () => {
 });
 unitRenderForm.elements.source.addEventListener('change', renderUnitRenderFilter);
 browseUnitRenderOutputButton.addEventListener('click', browseUnitRenderOutput);
+exportImagePrepButton.addEventListener('click', exportUnitImagePrep);
 unitRenderForm.addEventListener('submit', submitUnitRender);
 compositeJobSelect.addEventListener('change', () => {
   loadCompositeSetup(Number(compositeJobSelect.value)).catch((error) => {
@@ -9488,6 +9855,8 @@ compositePreviewType.querySelectorAll('[data-composite-type]').forEach((button) 
   refreshCompositePreview();
 }));
 compositeFeaturedStudent.addEventListener('change', refreshCompositePreview);
+compositeRenderForm.elements.additionalStaff1Id.addEventListener('change', refreshCompositePreview);
+compositeRenderForm.elements.additionalStaff2Id.addEventListener('change', refreshCompositePreview);
 refreshCompositePreviewButton.addEventListener('click', refreshCompositePreview);
 browseCompositeOutputButton.addEventListener('click', browseCompositeOutput);
 compositeRenderForm.addEventListener('submit', submitCompositeRender);

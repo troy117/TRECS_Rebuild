@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS package_codes (
   name TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   legacy_code_name TEXT,
+  metadata_json TEXT,
   UNIQUE(package_plan_id, code)
 );
 

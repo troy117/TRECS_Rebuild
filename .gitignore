@@ -39,5 +39,6 @@ AdminItems/
 *.log
 trecs-js/.electron-user-data/
 path.txt
+path-server.txt
 Thumbs.db
 Desktop.ini

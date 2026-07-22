@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <div class="app-shell">
+    <div class="app-shell" id="appShell">
       <aside class="sidebar">
         <div class="brand">
           <div class="mark">T</div>
@@ -33,6 +33,7 @@
 
       <main>
         <header class="topbar">
+          <button id="toggleSidebarButton" class="icon-button sidebar-toggle" type="button" title="Hide menu" aria-label="Hide menu">☰</button>
           <div>
             <h1>Dashboard</h1>
             <p id="databasePath"></p>
@@ -200,6 +201,9 @@
                 <label><span>Render Orders</span><select name="source"><option value="all">All Paid Orders</option><option value="grade">Grade</option><option value="homeroom">Homeroom</option><option value="individual">Individual Order</option></select></label>
                 <label id="unitRenderFilterField" hidden><span id="unitRenderFilterLabel">Filter</span><select name="sourceValue"></select></label>
                 <label><span>Output By</span><select name="sortBy"><option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option></select></label>
+                <div class="unit-render-image-prep">
+                  <button id="exportImagePrepButton" type="button">Export All Image Prep Items</button>
+                </div>
                 <div class="unit-render-checks">
                   <label class="checkbox-line"><input name="includeUnits" type="checkbox" checked><span>Include Picture Units</span></label>
                   <label class="checkbox-line"><input name="includeEnvelopes" type="checkbox" checked><span>Include Envelopes</span></label>
@@ -251,6 +255,8 @@
                 <h3>Render Setup</h3>
                 <label><span>School Name</span><input name="schoolName"></label>
                 <label><span>Principal / Subtitle</span><input name="principal"></label>
+                <label><span>Additional Staff 1</span><select name="additionalStaff1Id"><option value="">None</option></select></label>
+                <label><span>Additional Staff 2</span><select name="additionalStaff2Id"><option value="">None</option></select></label>
                 <label><span>School Year</span><input name="schoolYear" placeholder="2026-2027"></label>
                 <label><span>Selected Class Heading</span><input name="classHeading" placeholder="Uses homeroom when blank"></label>
                 <label><span>Render Scope</span><select name="scope"><option value="selected">Selected Class</option><option value="all">All Classes</option></select></label>

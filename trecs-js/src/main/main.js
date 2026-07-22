@@ -711,6 +711,7 @@ function createProgramDatabaseSchema(database) {
       name TEXT,
       active INTEGER NOT NULL DEFAULT 1,
       legacy_code_name TEXT,
+      metadata_json TEXT,
       UNIQUE(package_plan_id, code)
     );
 
@@ -1222,6 +1223,7 @@ async function ensurePrototypeDatabaseShape() {
     changed = ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'") || changed;
     changed = ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT') || changed;
     changed = ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT') || changed;
+    changed = ensureColumn(database, 'package_codes', 'metadata_json', 'TEXT') || changed;
     changed = ensureColumn(database, 'render_batches', 'output_path', 'TEXT') || changed;
     changed = ensureColumn(database, 'render_batches', 'options_json', 'TEXT') || changed;
     changed = ensureColumn(database, 'render_batches', 'result_json', 'TEXT') || changed;
@@ -1280,6 +1282,13 @@ function safeFolderName(value) {
     .trim();
 
   return name.slice(0, 80) || 'job';
+}
+
+function safeFileToken(value) {
+  return safeFolderName(value)
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'item';
 }
 
 function timestampForFolder(date = new Date()) {
@@ -2429,13 +2438,21 @@ async function getPackageEditorData(_event, packagePlanIdValue = null) {
     ORDER BY active DESC, name, version DESC;
   `);
   const selectedPlanId = requestedPlanId || (plans.length ? Number(plans[0].id) : null);
-  const products = await querySql(`
+  let products = await querySql(`
     SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
     FROM products
     ORDER BY category, name;
   `);
+  products = products.filter((product) => !isDeprecatedMultiCopyProductName(product.name));
+  products.forEach((product) => {
+    const metadata = parseProductMetadata(product.metadataJson);
+    product.reviewed = metadata.reviewed === true;
+    product.reviewedAt = metadata.reviewed_at || '';
+    product.reviewNotes = metadata.review_notes || '';
+    product.renderStatus = productRenderSupport(product);
+  });
   const codes = selectedPlanId ? await querySql(`
-    SELECT id, code, name, active, legacy_code_name AS legacyCodeName
+    SELECT id, code, name, active, legacy_code_name AS legacyCodeName, metadata_json AS metadataJson
     FROM package_codes
     WHERE package_plan_id = ${selectedPlanId}
     ORDER BY CAST(code AS INTEGER), code;
@@ -2450,6 +2467,11 @@ async function getPackageEditorData(_event, packagePlanIdValue = null) {
     WHERE pci.package_code_id IN (${codeIds.join(',')})
     ORDER BY pci.package_code_id, pci.sort_order, pci.id;
   `) : [];
+  codes.forEach((code) => {
+    const metadata = parseProductMetadata(code.metadataJson);
+    code.reviewed = metadata.reviewed === true;
+    code.reviewedAt = metadata.reviewed_at || '';
+  });
   const byCode = new Map(codes.map((code) => [Number(code.id), { ...code, items: [] }]));
   items.forEach((item) => byCode.get(Number(item.packageCodeId))?.items.push(item));
   return { plans, selectedPlanId, products, codes: Array.from(byCode.values()) };
@@ -2478,7 +2500,7 @@ async function savePackageCode(_event, input = {}) {
         [code, name, input.active === false ? 0 : 1, name, packageCodeId, planId]);
       database.run('DELETE FROM package_code_items WHERE package_code_id = ?;', [packageCodeId]);
     } else {
-      database.run(`INSERT INTO package_codes (package_plan_id, code, name, active, legacy_code_name) VALUES (?, ?, ?, 1, ?);`, [planId, code, name, name]);
+      database.run(`INSERT INTO package_codes (package_plan_id, code, name, active, legacy_code_name, metadata_json) VALUES (?, ?, ?, 1, ?, ?);`, [planId, code, name, name, '{}']);
       packageCodeId = Number(database.exec('SELECT last_insert_rowid() AS id;')[0].values[0][0]);
     }
     incomingItems.forEach((item, index) => {
@@ -2501,36 +2523,662 @@ async function deletePackageCode(_event, packageCodeIdValue) {
   });
 }
 
+function parseProductMetadata(metadataJson) {
+  try {
+    return metadataJson ? JSON.parse(metadataJson) : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function isDeprecatedMultiCopyProductName(name) {
+  return new Set([
+    '2-8x10',
+    '3-8x10',
+    '4-5x7',
+    '6-5x7',
+    '8-4x5',
+    '8-3x5',
+    '16 Wallets',
+    '24 Wallets',
+    '32 Wallets'
+  ]).has(String(name || '').trim());
+}
+
+function normalizeProductInput(input = {}) {
+  return {
+    id: input.id ? numericId(input.id) : null,
+    name: optionalText(input.name, 255),
+    category: optionalText(input.category, 100) || 'print',
+    size: optionalText(input.size, 100) || null,
+    requiresImage: input.requiresImage === false ? 0 : 1
+  };
+}
+
+async function createProduct(_event, input = {}) {
+  const normalized = normalizeProductInput(input);
+  const productId = normalized.id;
+  const { name, category, size, requiresImage } = normalized;
+  if (!name) throw new Error('Product name is required');
+  return writeSql((database) => {
+    if (productId) {
+      const existing = rowsFromDatabase(database, `SELECT id, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
+      if (!existing) throw new Error('Product was not found.');
+      database.run(`
+        UPDATE products
+        SET name = ?, category = ?, size = ?, requires_image = ?, updated_at = datetime('now')
+        WHERE id = ?;
+      `, [name, category, size, requiresImage, productId]);
+    } else {
+      database.run(`
+        INSERT INTO products (name, category, size, requires_image, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(name) DO UPDATE SET
+          category = excluded.category,
+          size = excluded.size,
+          requires_image = excluded.requires_image,
+          updated_at = datetime('now');
+      `, [name, category, size, requiresImage, JSON.stringify({ created_from: 'package_editor' })]);
+    }
+    const statement = database.prepare('SELECT id, name, category, size, requires_image AS requiresImage FROM products WHERE id = COALESCE(?, id) AND name = ? LIMIT 1;');
+    try {
+      statement.bind([productId, name]);
+      return statement.step() ? statement.getAsObject() : null;
+    } finally {
+      statement.free();
+    }
+  });
+}
+
+function saveProductRows(database, products) {
+  const saved = [];
+  products.forEach((input) => {
+    const normalized = normalizeProductInput(input);
+    const { id, name, category, size, requiresImage } = normalized;
+    if (!name) return;
+    if (id) {
+      const existing = rowsFromDatabase(database, `SELECT id FROM products WHERE id = ${id} LIMIT 1;`)[0];
+      if (!existing) throw new Error(`Product ${id} was not found.`);
+      database.run(`
+        UPDATE products
+        SET name = ?, category = ?, size = ?, requires_image = ?, updated_at = datetime('now')
+        WHERE id = ?;
+      `, [name, category, size, requiresImage, id]);
+      saved.push(id);
+    } else {
+      database.run(`
+        INSERT INTO products (name, category, size, requires_image, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(name) DO UPDATE SET
+          category = excluded.category,
+          size = excluded.size,
+          requires_image = excluded.requires_image,
+          updated_at = datetime('now');
+      `, [name, category, size, requiresImage, JSON.stringify({ created_from: 'package_editor' })]);
+      const row = rowsFromDatabase(database, `SELECT id FROM products WHERE name = '${sqlQuote(name)}' LIMIT 1;`)[0];
+      if (row) saved.push(Number(row.id));
+    }
+  });
+  return saved;
+}
+
+function sqlQuote(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
+function csvCell(value) {
+  const text = String(value || '');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+async function saveProductsBatch(_event, products = []) {
+  if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
+  return writeSql((database) => {
+    const saved = saveProductRows(database, products);
+    return { saved: saved.length };
+  });
+}
+
+async function saveProductsAsDefault(_event, products = []) {
+  if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
+  return writeSql((database) => {
+    saveProductRows(database, products);
+    const rows = rowsFromDatabase(database, `
+      SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
+      FROM products
+      ORDER BY category, name;
+    `).filter((product) => !isDeprecatedMultiCopyProductName(product.name));
+    const ids = rows.map((row) => Number(row.id)).filter(Boolean);
+    const aliases = ids.length ? rowsFromDatabase(database, `
+      SELECT p.name AS productName, pa.alias, pa.notes
+      FROM product_aliases pa
+      JOIN products p ON p.id = pa.product_id
+      WHERE pa.product_id IN (${ids.join(',')})
+      ORDER BY p.name, pa.alias;
+    `) : [];
+    const productValues = rows.map((row) => `  ('${sqlQuote(row.name)}', '${sqlQuote(row.category || 'print')}', ${row.size ? `'${sqlQuote(row.size)}'` : 'NULL'}, ${Number(row.requiresImage) ? 1 : 0}, '${sqlQuote(row.metadataJson || '{}')}')`);
+    const aliasSql = aliases.map((alias) => `INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
+SELECT id, '${sqlQuote(alias.alias)}', '${sqlQuote(alias.notes || 'Default product alias')}' FROM products WHERE name = '${sqlQuote(alias.productName)}';`).join('\n\n');
+    const seedSql = `BEGIN TRANSACTION;\n\nINSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES\n${productValues.join(',\n')};\n\n${aliasSql}\n\nCOMMIT;\n`;
+    const outputPath = path.join(projectRoot, 'database', 'product_seed.sql');
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, seedSql, 'utf8');
+    return { saved: rows.length, outputPath };
+  });
+}
+
+async function deleteProduct(_event, productIdValue) {
+  const productId = numericId(productIdValue);
+  return writeSql((database) => {
+    const product = rowsFromDatabase(database, `SELECT id, name FROM products WHERE id = ${productId} LIMIT 1;`)[0];
+    if (!product) throw new Error('Product was not found.');
+    const usage = rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM package_code_items WHERE product_id = ${productId};`)[0]?.count || 0;
+    if (Number(usage) > 0) throw new Error(`Remove this product from ${usage} package item${Number(usage) === 1 ? '' : 's'} before deleting it.`);
+    database.run('DELETE FROM product_aliases WHERE product_id = ?;', [productId]);
+    database.run('DELETE FROM products WHERE id = ?;', [productId]);
+    return { deleted: productId, name: product.name };
+  });
+}
+
+async function seedDefaultProducts() {
+  const candidates = [
+    path.join(projectRoot, 'database', 'product_seed.sql'),
+    path.join(defaultProjectRoot, 'database', 'product_seed.sql'),
+    path.join(bundledResourceRoot, 'database', 'product_seed.sql')
+  ];
+  const seedPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!seedPath) throw new Error('Could not find database/product_seed.sql.');
+  return writeSql((database) => {
+    const before = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
+    const seedSql = fs.readFileSync(seedPath, 'utf8').replace(/^\s*BEGIN TRANSACTION;\s*/i, '').replace(/\s*COMMIT;\s*$/i, '');
+    database.run(seedSql);
+    pictureUnitRecipes().filter((recipe) => !isDeprecatedMultiCopyProductName(recipe.name)).forEach((recipe) => {
+      const category = recipe.name.includes('&') || /^(\d+-|4 Wall|8 Mini|16|24|32)/.test(recipe.name) ? 'print_bundle' : recipe.name.includes('Group') ? 'group_print' : 'print';
+      database.run(`INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES (?, ?, ?, 1, ?);`,
+        [recipe.name, category, recipe.name.includes('8x10') ? '8x10' : null, JSON.stringify({ legacy_group: 'print_unit', render_recipe: recipe.name })]);
+      (recipe.aliases || []).forEach((alias) => {
+        database.run(`INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
+          SELECT id, ?, 'Legacy unit render alias' FROM products WHERE name = ?;`, [alias, recipe.name]);
+      });
+    });
+    [
+      ['NameAll', 'NameAll'],
+      ['Specific Border', 'Specific Border']
+    ].forEach(([name, folder]) => {
+      database.run(`INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES (?, 'image_prep', NULL, 1, ?);`,
+        [name, JSON.stringify({ image_prep_folder: folder })]);
+    });
+    const after = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
+    return { seedPath, productCount: Number(after), added: Math.max(0, Number(after) - Number(before)) };
+  });
+}
+
 function productRenderSupport(product) {
   const category = String(product.category || '');
-  if (['render_modifier', 'service', 'fulfillment', 'workflow', 'package_builder', 'package_marker'].includes(category)) return 'non_rendering';
+  if (category === 'image_prep') return 'image_prep';
+  if (category === 'specialty' || isPhotoshopHandoffProduct(product)) return 'photoshop_handoff';
+  if (['envelope_text', 'render_modifier', 'service', 'fulfillment', 'workflow', 'package_builder', 'package_marker', 'specialty_bundle'].includes(category)) return 'non_rendering';
   if (['print', 'print_bundle', 'id_card'].includes(category)) return 'renderable';
   return 'template_required';
 }
 
+function isPhotoshopHandoffProduct(product) {
+  const metadata = parseProductMetadata(product.metadataJson);
+  const name = String(product.name || '');
+  const legacyGroup = String(metadata.legacy_group || '');
+  return /fun\s*pack|funpack|magnet/i.test(name) || /fun\s*pack|funpack|magnet/i.test(legacyGroup);
+}
+
+function productUnitRecipe(product) {
+  const productName = String(product.name || '').toLowerCase();
+  return pictureUnitRecipes().find((recipe) => recipe.name.toLowerCase() === productName || (recipe.aliases || []).some((alias) => alias.toLowerCase() === productName)) || null;
+}
+
+function isTenByThirteenProduct(product) {
+  const productName = String(product.productName || product.name || product.rawValue || '').toLowerCase();
+  const size = String(product.size || '').toLowerCase();
+  return size === '10x13' || /10\s*x\s*13/.test(productName);
+}
+
+function isImagePrepItem(item) {
+  return String(item.category || '').toLowerCase() === 'image_prep';
+}
+
+function imagePrepFolderName(item) {
+  const metadata = parseProductMetadata(item.metadataJson);
+  return safeFolderName(metadata.image_prep_folder || item.productName || item.rawValue || item.name || 'ImagePrep');
+}
+
+function findFirstImageFile(folder) {
+  if (!folder || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) return null;
+  const entries = fs.readdirSync(folder, { withFileTypes: true });
+  for (const entry of entries.filter((item) => item.isFile()).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (/\.(jpe?g|png)$/i.test(entry.name)) return path.join(folder, entry.name);
+  }
+  for (const entry of entries.filter((item) => item.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+    const found = findFirstImageFile(path.join(folder, entry.name));
+    if (found) return found;
+  }
+  return null;
+}
+
+async function sampleCroppedLargeImagePath() {
+  const fixedSample = path.join(projectRoot, 'SampleCroppedLarge.jpg');
+  if (fs.existsSync(fixedSample) && fs.statSync(fixedSample).isFile()) return fixedSample;
+  return null;
+}
+
+async function rasterizeProductRenderTest(webContents, product, outputFolder) {
+  const support = productRenderSupport(product);
+  if (support === 'image_prep') return writeImagePrepTest(product, outputFolder, { itemNumber: 1, itemTotal: 1 });
+  if (support === 'photoshop_handoff') return writePhotoshopHandoffTest(product, outputFolder, { itemNumber: 1, itemTotal: 1 });
+  if (support !== 'renderable') return { productId: product.id, name: product.name, status: support };
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'SampleCroppedLarge.jpg was not found in the TRECS data root.' };
+  const imageSource = imageDataUrlFromPath(samplePath);
+  if (!imageSource) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'The CroppedLarge sample could not be read.' };
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const safeName = safeFolderName(product.name) || `product-${product.id}`;
+  if (isTenByThirteenProduct(product)) {
+    const dataUrl = await rasterizeTenByThirteen(webContents, imageSource, {
+      studentName: 'First Last',
+      schoolRef: 'Sample School: 10000',
+      printInfo: '10x13'
+    });
+    const outputPath = path.join(outputFolder, `${safeName}_1.jpg`);
+    fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+    return { productId: product.id, name: product.name, status: 'rendered', outputPath, files: [outputPath], sampleImagePath: samplePath, sheets: 1 };
+  }
+  const recipe = productUnitRecipe(product);
+  if (!recipe) return { productId: product.id, name: product.name, status: 'template_required', message: 'This product does not have a print-unit recipe yet.' };
+  const files = [];
+  for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
+    const label = {
+      schoolName: 'Sample School',
+      studentName: 'Homeroom: Last, First',
+      printInfo: `${recipe.name}: ${sheetIndex + 1} of ${recipe.sheets.length}`
+    };
+    const dataUrl = await rasterizePhotoUnitSheet(webContents, imageSource, recipe.sheets[sheetIndex], label);
+    const outputPath = path.join(outputFolder, `${safeName}_${sheetIndex + 1}.jpg`);
+    fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+    files.push(outputPath);
+  }
+  return { productId: product.id, name: product.name, status: 'rendered', outputPath: files[0], files, sampleImagePath: samplePath, sheets: files.length };
+}
+
+async function writePhotoshopHandoffTest(product, outputFolder, options = {}) {
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'SampleCroppedLarge.jpg was not found in the TRECS data root.' };
+  const addOnsRoot = path.join(projectRoot, 'exports', 'product-render-tests', 'AddOns');
+  const sourceFolder = path.join(addOnsRoot, 'Source');
+  fs.mkdirSync(sourceFolder, { recursive: true });
+  const imageName = `SampleImage${path.extname(samplePath).toLowerCase() || '.jpg'}`;
+  const imagePath = path.join(sourceFolder, imageName);
+  const manifestPath = path.join(sourceFolder, 'AddOns.txt');
+  if (!fs.existsSync(imagePath)) fs.copyFileSync(samplePath, imagePath);
+  const row = [
+    product.name || '',
+    imageName,
+    'Sort',
+    'Last',
+    'First'
+  ].map(csvCell).join(',');
+  fs.appendFileSync(manifestPath, `${row}\r\n`, 'utf8');
+  return { productId: product.id, name: product.name, status: 'photoshop_handoff', outputFolder: addOnsRoot, outputPath: imagePath, files: [imagePath, manifestPath], sampleImagePath: samplePath, sheets: 0 };
+}
+
+async function writeImagePrepTest(product, outputFolder, options = {}) {
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'SampleCroppedLarge.jpg was not found in the TRECS data root.' };
+  const imagePrepRoot = path.join(projectRoot, 'exports', 'product-render-tests', 'ImagePrep');
+  const sourceFolder = path.join(imagePrepRoot, 'Source');
+  fs.mkdirSync(sourceFolder, { recursive: true });
+  const imageName = `SampleImage${path.extname(samplePath).toLowerCase() || '.jpg'}`;
+  const imagePath = path.join(sourceFolder, imageName);
+  const manifestPath = path.join(sourceFolder, 'ImagePrep.txt');
+  if (!fs.existsSync(imagePath)) fs.copyFileSync(samplePath, imagePath);
+  const row = [
+    product.name || '',
+    imageName,
+    'Sort',
+    'Last',
+    'First'
+  ].map(csvCell).join(',');
+  fs.appendFileSync(manifestPath, `${row}\r\n`, 'utf8');
+  return { productId: product.id, name: product.name, status: 'image_prep', outputFolder: imagePrepRoot, outputPath: imagePath, files: [imagePath, manifestPath], sampleImagePath: samplePath, sheets: 0 };
+}
+
+async function testProductRender(event, productIdValue) {
+  const productId = numericId(productIdValue);
+  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  if (!rows.length) throw new Error('Product was not found.');
+  const outputFolder = path.join(projectRoot, 'exports', 'product-render-tests', safeFolderName(rows[0].name) || `product-${productId}`);
+  return rasterizeProductRenderTest(event.sender, rows[0], outputFolder);
+}
+
+async function testPackageItemRender(event, input = {}) {
+  const productId = numericId(input.productId);
+  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  if (!rows.length) throw new Error('Product was not found.');
+  const product = rows[0];
+  const quantity = Math.max(1, Math.min(999, Number.parseInt(input.quantity || '1', 10) || 1));
+  const outputFolder = path.join(projectRoot, 'exports', 'package-item-render-tests', safeFolderName(product.name) || `product-${productId}`);
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const support = productRenderSupport(product);
+  if (support === 'image_prep') {
+    const result = { productId, name: product.name, outputFolder, rendered: 0, imagePrep: 0, files: [], skipped: [] };
+    for (let index = 0; index < quantity; index += 1) {
+      const handoff = await writeImagePrepTest(product, outputFolder, { itemNumber: index + 1, itemTotal: quantity });
+      if (handoff.status === 'image_prep') {
+        result.imagePrep += 1;
+        result.files.push(...handoff.files);
+      } else {
+        result.skipped.push(handoff);
+      }
+    }
+    fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+    return result;
+  }
+  if (support === 'photoshop_handoff') {
+    const result = { productId, name: product.name, outputFolder, rendered: 0, handoffs: 0, files: [], skipped: [] };
+    for (let index = 0; index < quantity; index += 1) {
+      const handoff = await writePhotoshopHandoffTest(product, outputFolder, { itemNumber: index + 1, itemTotal: quantity });
+      if (handoff.status === 'photoshop_handoff') {
+        result.handoffs += 1;
+        result.files.push(...handoff.files);
+      } else {
+        result.skipped.push(handoff);
+      }
+    }
+    fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+    return result;
+  }
+  if (support !== 'renderable') throw new Error(`This product is ${formatStatusForError(support)} and does not render a sheet.`);
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) throw new Error('SampleCroppedLarge.jpg was not found in the TRECS data root.');
+  const imageSource = imageDataUrlFromPath(samplePath);
+  if (!imageSource) throw new Error('The SampleCroppedLarge.jpg file could not be read.');
+  if (isTenByThirteenProduct(product)) {
+    const result = { productId, name: product.name, outputFolder, sampleImagePath: samplePath, rendered: 0, files: [], skipped: [] };
+    for (let index = 0; index < quantity; index += 1) {
+      const dataUrl = await rasterizeTenByThirteen(event.sender, imageSource, {
+        studentName: 'First Last',
+        schoolRef: 'Sample School: 10000',
+        printInfo: `10x13: ${index + 1} of ${quantity}`
+      });
+      const outputPath = path.join(outputFolder, `${safeFileToken('Sort_last_first')}_${safeFileToken(product.name)}_${String(index + 1).padStart(2, '0')}of${String(quantity).padStart(2, '0')}.jpg`);
+      fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+      result.rendered += 1;
+      result.files.push(outputPath);
+    }
+    fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+    return result;
+  }
+  const recipe = productUnitRecipe(product);
+  if (!recipe) throw new Error('This product does not have a print-unit recipe yet.');
+  const total = quantity * recipe.sheets.length;
+  const result = { productId, name: product.name, outputFolder, sampleImagePath: samplePath, rendered: 0, files: [], skipped: [] };
+  for (let copyIndex = 0; copyIndex < quantity; copyIndex += 1) {
+    for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
+      const sheetNumber = (copyIndex * recipe.sheets.length) + sheetIndex + 1;
+      const label = {
+        schoolName: 'Sample School',
+        studentName: 'Sort: Last, First',
+        printInfo: `${recipe.name}: ${sheetNumber} of ${total}`
+      };
+      const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], label);
+      const outputPath = path.join(outputFolder, `${safeFileToken('Sort_last_first')}_${safeFileToken(recipe.name)}_${String(sheetNumber).padStart(2, '0')}of${String(total).padStart(2, '0')}.jpg`);
+      fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+      result.rendered += 1;
+      result.files.push(outputPath);
+    }
+  }
+  fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  return result;
+}
+
+function formatStatusForError(status) {
+  return String(status || 'not ready').replace(/_/g, ' ');
+}
+
+async function testPackageCodeRender(event, packageCodeIdValue) {
+  const packageCodeId = numericId(packageCodeIdValue);
+  const codeRows = await querySql(`SELECT id, code, name FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`);
+  if (!codeRows.length) throw new Error('Package code was not found.');
+  const items = await querySql(`
+    SELECT pci.id, pci.quantity, p.id AS productId, p.name, p.category, p.size, p.metadata_json AS metadataJson
+    FROM package_code_items pci
+    JOIN products p ON p.id = pci.product_id
+    WHERE pci.package_code_id = ${packageCodeId}
+    ORDER BY pci.sort_order, pci.id;
+  `);
+  if (!items.length) throw new Error('Add at least one package item before testing.');
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) throw new Error('SampleCroppedLarge.jpg was not found in the TRECS data root.');
+  const imageSource = imageDataUrlFromPath(samplePath);
+  if (!imageSource) throw new Error('The SampleCroppedLarge.jpg file could not be read.');
+  const packageName = codeRows[0].name || `Code ${codeRows[0].code}`;
+  const outputFolder = path.join(projectRoot, 'exports', 'package-code-render-tests', safeFolderName(packageName) || `code-${packageCodeId}`);
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const result = { packageCodeId, code: codeRows[0].code, name: codeRows[0].name, outputFolder, sampleImagePath: samplePath, rendered: 0, skipped: [], files: [] };
+  const recipeSheetTotals = new Map();
+  const recipeSortOrders = new Map();
+  const handoffSheetTotals = new Map();
+  const handoffSortOrders = new Map();
+  items.forEach((item) => {
+    const support = productRenderSupport(item);
+    if (support === 'image_prep') {
+      const quantity = Math.max(1, Number(item.quantity || 1));
+      const key = String(item.name || item.productId).toLowerCase();
+      if (!handoffSortOrders.has(key)) handoffSortOrders.set(key, recipeSortOrders.size + handoffSortOrders.size + 1);
+      handoffSheetTotals.set(key, (handoffSheetTotals.get(key) || 0) + quantity);
+      return;
+    }
+    if (support === 'photoshop_handoff') {
+      const quantity = Math.max(1, Number(item.quantity || 1));
+      const key = String(item.name || item.productId).toLowerCase();
+      if (!handoffSortOrders.has(key)) handoffSortOrders.set(key, recipeSortOrders.size + handoffSortOrders.size + 1);
+      handoffSheetTotals.set(key, (handoffSheetTotals.get(key) || 0) + quantity);
+      return;
+    }
+    if (support !== 'renderable') return;
+    if (isTenByThirteenProduct(item)) {
+      const quantity = Math.max(1, Number(item.quantity || 1));
+      const key = '10x13';
+      if (!recipeSortOrders.has(key)) recipeSortOrders.set(key, recipeSortOrders.size + 1);
+      recipeSheetTotals.set(key, (recipeSheetTotals.get(key) || 0) + quantity);
+      return;
+    }
+    const recipe = productUnitRecipe(item);
+    if (!recipe) return;
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const key = recipe.name.toLowerCase();
+    if (!recipeSortOrders.has(key)) recipeSortOrders.set(key, recipeSortOrders.size + 1);
+    recipeSheetTotals.set(key, (recipeSheetTotals.get(key) || 0) + (quantity * recipe.sheets.length));
+  });
+  const recipeSheetCounters = new Map();
+  for (const item of items) {
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const support = productRenderSupport(item);
+    if (support === 'image_prep') {
+      const handoffKey = String(item.name || item.productId).toLowerCase();
+      const handoffTotal = handoffSheetTotals.get(handoffKey) || quantity;
+      for (let index = 0; index < quantity; index += 1) {
+        const handoffNumber = (recipeSheetCounters.get(handoffKey) || 0) + 1;
+        recipeSheetCounters.set(handoffKey, handoffNumber);
+        const proof = await writeImagePrepTest(item, outputFolder, { itemNumber: handoffNumber, itemTotal: handoffTotal });
+        if (proof.status === 'image_prep') {
+          result.rendered += 1;
+          result.files.push(...proof.files);
+        } else {
+          result.skipped.push({ productId: item.productId, name: item.name, status: proof.status, message: proof.message || '' });
+        }
+      }
+      continue;
+    }
+    if (support === 'photoshop_handoff') {
+      const handoffKey = String(item.name || item.productId).toLowerCase();
+      const handoffTotal = handoffSheetTotals.get(handoffKey) || quantity;
+      for (let index = 0; index < quantity; index += 1) {
+        const handoffNumber = (recipeSheetCounters.get(handoffKey) || 0) + 1;
+        recipeSheetCounters.set(handoffKey, handoffNumber);
+        const proof = await writePhotoshopHandoffTest(item, outputFolder, { itemNumber: handoffNumber, itemTotal: handoffTotal });
+        if (proof.status === 'photoshop_handoff') {
+          result.rendered += 1;
+          result.files.push(...proof.files);
+        } else {
+          result.skipped.push({ productId: item.productId, name: item.name, status: proof.status, message: proof.message || '' });
+        }
+      }
+      continue;
+    }
+    if (support !== 'renderable') {
+      result.skipped.push({ productId: item.productId, name: item.name, status: support, message: '' });
+      continue;
+    }
+    if (isTenByThirteenProduct(item)) {
+      const recipeKey = '10x13';
+      const sheetTotal = recipeSheetTotals.get(recipeKey) || quantity;
+      for (let index = 0; index < quantity; index += 1) {
+        const sheetNumber = (recipeSheetCounters.get(recipeKey) || 0) + 1;
+        recipeSheetCounters.set(recipeKey, sheetNumber);
+        const dataUrl = await rasterizeTenByThirteen(event.sender, imageSource, {
+          studentName: 'First Last',
+          schoolRef: 'Sample School: 10000',
+          printInfo: `10x13: ${sheetNumber} of ${sheetTotal}`
+        });
+        const groupNumber = String(recipeSortOrders.get(recipeKey) || 99).padStart(2, '0');
+        const fileName = `${safeFileToken('Sort_last_first')}_${groupNumber}_${safeFileToken(item.name || '10x13')}_${String(sheetNumber).padStart(2, '0')}of${String(sheetTotal).padStart(2, '0')}.jpg`;
+        const outputPath = path.join(outputFolder, fileName);
+        fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+        result.rendered += 1;
+        result.files.push(outputPath);
+      }
+      continue;
+    }
+    const recipe = productUnitRecipe(item);
+    if (!recipe) {
+      result.skipped.push({ productId: item.productId, name: item.name, status: 'template_required', message: 'This product does not have a print-unit recipe yet.' });
+      continue;
+    }
+    const recipeKey = recipe.name.toLowerCase();
+    const sheetTotal = recipeSheetTotals.get(recipeKey) || (quantity * recipe.sheets.length);
+    for (let copyIndex = 0; copyIndex < quantity; copyIndex += 1) {
+      for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
+        const sheetNumber = (recipeSheetCounters.get(recipeKey) || 0) + 1;
+        recipeSheetCounters.set(recipeKey, sheetNumber);
+        const label = {
+          schoolName: 'Sample School',
+          studentName: 'Sort: Last, First',
+          printInfo: `${recipe.name}: ${sheetNumber} of ${sheetTotal}`
+        };
+        const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], label);
+        const groupNumber = String(recipeSortOrders.get(recipeKey) || 99).padStart(2, '0');
+        const fileName = `${safeFileToken('Sort_last_first')}_${groupNumber}_${safeFileToken(recipe.name)}_${String(sheetNumber).padStart(2, '0')}of${String(sheetTotal).padStart(2, '0')}.jpg`;
+        const outputPath = path.join(outputFolder, fileName);
+        fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+        result.rendered += 1;
+        result.files.push(outputPath);
+      }
+    }
+  }
+  fs.writeFileSync(path.join(outputFolder, 'package-code-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  return result;
+}
+
+async function markProductReviewed(_event, productIdValue, reviewedValue = true) {
+  const productId = numericId(productIdValue);
+  return writeSql((database) => {
+    const row = rowsFromDatabase(database, `SELECT id, name, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
+    if (!row) throw new Error('Product was not found.');
+    const metadata = parseProductMetadata(row.metadataJson);
+    metadata.reviewed = reviewedValue !== false;
+    metadata.reviewed_at = metadata.reviewed ? new Date().toISOString() : '';
+    database.run('UPDATE products SET metadata_json = ?, updated_at = datetime(\'now\') WHERE id = ?;', [JSON.stringify(metadata), productId]);
+    return { id: productId, name: row.name, reviewed: metadata.reviewed, reviewedAt: metadata.reviewed_at };
+  });
+}
+
+async function markPackageCodeReviewed(_event, packageCodeIdValue, reviewedValue = true) {
+  const packageCodeId = numericId(packageCodeIdValue);
+  return writeSql((database) => {
+    const row = rowsFromDatabase(database, `SELECT id, code, name, metadata_json AS metadataJson FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`)[0];
+    if (!row) throw new Error('Package code was not found.');
+    const metadata = parseProductMetadata(row.metadataJson);
+    metadata.reviewed = reviewedValue !== false;
+    metadata.reviewed_at = metadata.reviewed ? new Date().toISOString() : '';
+    database.run('UPDATE package_codes SET metadata_json = ? WHERE id = ?;', [JSON.stringify(metadata), packageCodeId]);
+    return { id: packageCodeId, code: row.code, name: row.name, reviewed: metadata.reviewed, reviewedAt: metadata.reviewed_at };
+  });
+}
+
+const LEGACY_CROPS = {
+  full: null,
+  fiveBySeven: [128, 0, 2143, 3000],
+  threeByFive: [150, 0, 2100, 3000]
+};
+
+function unitPlacement(x, y, width, height, crop = null, rotate = width > height) {
+  return { x, y, width, height, crop, rotate };
+}
+
 const UNIT_LAYOUTS = {
-  eightByTen: [[0, 0, 2400, 3150]],
-  twoFiveBySeven: [[0, 0, 2100, 1500], [0, 1501, 2100, 1500]],
-  fourFourByFive: [[0, 0, 1200, 1500], [1202, 0, 1200, 1500], [0, 1502, 1200, 1500], [1202, 1502, 1200, 1500]],
-  twoThreeByFive: [[0, 0, 1050, 1500], [1052, 0, 1050, 1500]],
-  fourThreeByFive: [[0, 0, 1050, 1500], [1052, 0, 1050, 1500], [0, 1502, 1050, 1500], [1052, 1502, 1050, 1500]],
-  fourWallets: [[0, 0, 1050, 750], [1052, 0, 1050, 750], [0, 752, 1050, 750], [1052, 752, 1050, 750]],
-  eightWallets: [[0, 0, 1050, 750], [1052, 0, 1050, 750], [0, 752, 1050, 750], [1052, 752, 1050, 750], [0, 1504, 1050, 750], [1054, 1504, 1050, 750], [0, 2254, 1050, 750], [1054, 2254, 1050, 750]],
-  sixteenMini: Array.from({ length: 16 }, (_value, index) => [(index % 4) * 602, Math.floor(index / 4) * 752, 600, 750])
+  eightByTen: [unitPlacement(0, 0, 2400, 3000, LEGACY_CROPS.full, false)],
+  twoFiveBySeven: [
+    unitPlacement(0, 0, 2100, 1500, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(0, 1501, 2100, 1500, LEGACY_CROPS.fiveBySeven, true)
+  ],
+  fourFourByFive: [
+    unitPlacement(0, 0, 1200, 1500, LEGACY_CROPS.full, false),
+    unitPlacement(1202, 0, 1200, 1500, LEGACY_CROPS.full, false),
+    unitPlacement(0, 1502, 1200, 1500, LEGACY_CROPS.full, false),
+    unitPlacement(1202, 1502, 1200, 1500, LEGACY_CROPS.full, false)
+  ],
+  twoThreeByFive: [
+    unitPlacement(0, 0, 1050, 1500, LEGACY_CROPS.threeByFive, false),
+    unitPlacement(1052, 0, 1050, 1500, LEGACY_CROPS.threeByFive, false)
+  ],
+  fourThreeByFive: [
+    unitPlacement(0, 0, 1050, 1500, LEGACY_CROPS.threeByFive, false),
+    unitPlacement(1052, 0, 1050, 1500, LEGACY_CROPS.threeByFive, false),
+    unitPlacement(0, 1502, 1050, 1500, LEGACY_CROPS.threeByFive, false),
+    unitPlacement(1052, 1502, 1050, 1500, LEGACY_CROPS.threeByFive, false)
+  ],
+  fourWallets: [
+    unitPlacement(0, 0, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1052, 0, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(0, 752, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1052, 752, 1050, 750, LEGACY_CROPS.fiveBySeven, true)
+  ],
+  eightWallets: [
+    unitPlacement(0, 0, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1052, 0, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(0, 752, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1052, 752, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(0, 1504, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1054, 1504, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(0, 2254, 1050, 750, LEGACY_CROPS.fiveBySeven, true),
+    unitPlacement(1054, 2254, 1050, 750, LEGACY_CROPS.fiveBySeven, true)
+  ],
+  sixteenMini: Array.from({ length: 16 }, (_value, index) => unitPlacement((index % 4) * 602, Math.floor(index / 4) * 752, 600, 750, LEGACY_CROPS.full, false))
 };
 
 function repeatedUnitSheets(layout, count) {
   return Array.from({ length: count }, () => layout);
 }
 
+function movePlacement(placement, dx, dy) {
+  return { ...placement, x: placement.x + dx, y: placement.y + dy };
+}
+
 function pictureUnitRecipes() {
-  const walletFourFiveSeven = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 2100, 1500]];
-  const walletFourFourFive = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 1200, 1500], [1202, 1504, 1200, 1500]];
-  const walletFourThreeFive = [...UNIT_LAYOUTS.fourWallets, [0, 1504, 1050, 1500], [1052, 1504, 1050, 1500]];
-  const miniEight = UNIT_LAYOUTS.sixteenMini.slice(8).map(([x, y, width, height]) => [x, y - 1504, width, height]);
-  const miniEightBottom = miniEight.map(([x, y, width, height]) => [x, y + 1502, width, height]);
+  const walletFourFiveSeven = [...UNIT_LAYOUTS.fourWallets, unitPlacement(0, 1504, 2100, 1500, LEGACY_CROPS.fiveBySeven, true)];
+  const walletFourFourFive = [...UNIT_LAYOUTS.fourWallets, unitPlacement(0, 1504, 1200, 1500, LEGACY_CROPS.full, false), unitPlacement(1202, 1504, 1200, 1500, LEGACY_CROPS.full, false)];
+  const walletFourThreeFive = [...UNIT_LAYOUTS.fourWallets, unitPlacement(0, 1504, 1050, 1500, LEGACY_CROPS.threeByFive, false), unitPlacement(1052, 1504, 1050, 1500, LEGACY_CROPS.threeByFive, false)];
+  const miniEightBottom = UNIT_LAYOUTS.sixteenMini.slice(8).map((placement) => movePlacement(placement, 0, -2));
   return [
     { name: '8x10', sheets: [UNIT_LAYOUTS.eightByTen], expectedPrints: 1 },
+    { name: '8x10 Group', aliases: ['Group8x10'], sheets: [UNIT_LAYOUTS.eightByTen], expectedPrints: 1 },
     { name: '2-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 2), expectedPrints: 2 },
     { name: '3-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 3), expectedPrints: 3 },
     { name: '2-5x7', sheets: [UNIT_LAYOUTS.twoFiveBySeven], expectedPrints: 2 },
@@ -2547,7 +3195,7 @@ function pictureUnitRecipes() {
     { name: '24 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 3), expectedPrints: 24 },
     { name: '32 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 4), expectedPrints: 32 },
     { name: '16 Mini', sheets: [UNIT_LAYOUTS.sixteenMini], expectedPrints: 16 },
-    { name: '2-3x5 & 5x7', sheets: [[...UNIT_LAYOUTS.twoThreeByFive, [0, 1502, 2100, 1500]]], expectedPrints: 3 },
+    { name: '2-3x5 & 5x7', sheets: [[...UNIT_LAYOUTS.twoThreeByFive, unitPlacement(0, 1502, 2100, 1500, LEGACY_CROPS.fiveBySeven, true)]], expectedPrints: 3 },
     { name: '4 Wall & 5x7', sheets: [walletFourFiveSeven], expectedPrints: 5 },
     { name: '4 Wall & 2-4x5', sheets: [walletFourFourFive], expectedPrints: 6 },
     { name: '4 Wall & 2-3x5', sheets: [walletFourThreeFive], expectedPrints: 6 },
@@ -2577,7 +3225,7 @@ function syntheticPortraitSvg(x, y, width, height, index) {
 }
 
 function pictureUnitSheetSvg(recipeName, placements, sheetIndex, sheetCount) {
-  const units = placements.map((placement, index) => syntheticPortraitSvg(...placement, index)).join('');
+  const units = placements.map((placement, index) => syntheticPortraitSvg(placement.x ?? placement[0], placement.y ?? placement[1], placement.width ?? placement[2], placement.height ?? placement[3], index)).join('');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="3150" viewBox="0 0 2400 3150">
     <rect width="2400" height="3150" fill="white"/>${units}
     <rect x="8" y="3075" width="2384" height="67" fill="white" fill-opacity=".88"/>
@@ -2696,24 +3344,187 @@ function imageDataUrlFromPath(imagePathValue) {
   return `data:${mime};base64,${fs.readFileSync(filePath).toString('base64')}`;
 }
 
+function envelopeTemplatePath(order, large = false) {
+  const templateName = large ? 'BigPortraitEnvelope.jpg' : 'PortraitEnvelope.jpg';
+  const planName = safeFolderName(order.packagePlan || order.packagePlanName || 'Standard');
+  const candidates = [
+    path.join(projectRoot, 'Templates', 'PACKAGE_PLANS', planName, templateName),
+    path.join(projectRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', templateName),
+    path.join(defaultProjectRoot, 'Templates', 'PACKAGE_PLANS', planName, templateName),
+    path.join(defaultProjectRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', templateName),
+    path.join(bundledResourceRoot, 'Templates', 'PACKAGE_PLANS', planName, templateName),
+    path.join(bundledResourceRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', templateName)
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile()) || null;
+}
+
+function envelopeTemplateDataUrl(order, large = false) {
+  return imageDataUrlFromPath(envelopeTemplatePath(order, large));
+}
+
+function preparedImagePathForOrder(order, imagePrepItem) {
+  if (!order.rootPath || !imagePrepItem || !order.imagePath) return null;
+  const jobRoot = resolveProjectPath(order.rootPath);
+  if (!jobRoot) return null;
+  const prepFolder = path.join(jobRoot, 'ImagePrep', imagePrepFolderName(imagePrepItem));
+  const originalPath = resolveProjectPath(order.imagePath);
+  const candidates = [];
+  if (originalPath) candidates.push(path.join(prepFolder, path.basename(originalPath)));
+  const ref = safeFileToken(order.ref || '');
+  if (ref && fs.existsSync(prepFolder) && fs.statSync(prepFolder).isDirectory()) {
+    fs.readdirSync(prepFolder)
+      .filter((filename) => /\.(jpe?g|png)$/i.test(filename) && safeFileToken(path.basename(filename, path.extname(filename))).startsWith(ref))
+      .forEach((filename) => candidates.push(path.join(prepFolder, filename)));
+  }
+  return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile()) || null;
+}
+
+function unitRenderOrderWhereClause(jobId, source, sourceValue) {
+  const filters = [`o.job_id = ${jobId}`, `o.paid_status = 'paid'`];
+  if (source === 'grade') filters.push(`s.grade = '${sqlQuote(sourceValue)}'`);
+  if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
+  if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
+  return filters.join(' AND ');
+}
+
+async function imagePrepExport(event, input = {}) {
+  const jobId = numericId(input.jobId);
+  const source = String(input.source || 'all');
+  const sourceValue = optionalText(input.sourceValue, 255);
+  const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']);
+  if (!allowedSources.has(source)) throw new Error('Invalid ImagePrep source.');
+  const orders = await querySql(`
+    SELECT o.id, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+           c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
+    FROM orders o
+    JOIN jobs j ON j.id = o.job_id
+    JOIN clients c ON c.id = j.client_id
+    JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE ${unitRenderOrderWhereClause(jobId, source, sourceValue)}
+    ORDER BY s.last_name, s.first_name, o.id;
+  `);
+  if (!orders.length) throw new Error('No paid orders matched this ImagePrep export.');
+  const itemRows = await querySql(`
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue,
+           p.name AS productName, p.category, p.metadata_json AS metadataJson
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id
+    LEFT JOIN products p ON p.id = pci.product_id
+    WHERE oi.order_id IN (${orders.map((order) => Number(order.id)).join(',')})
+      AND p.category = 'image_prep'
+    ORDER BY oi.order_id, oi.id, pci.sort_order;
+  `);
+  if (!itemRows.length) throw new Error('No Image Prep items were found in the selected paid orders.');
+  const itemsByOrder = new Map(orders.map((order) => [Number(order.id), []]));
+  itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
+  const jobRoot = resolveProjectPath(orders[0].rootPath);
+  if (!jobRoot || !fs.existsSync(jobRoot) || !fs.statSync(jobRoot).isDirectory()) throw new Error('The job folder could not be found.');
+  const imagePrepRoot = path.join(jobRoot, 'ImagePrep');
+  fs.mkdirSync(imagePrepRoot, { recursive: true });
+  const result = { jobId, outputFolder: imagePrepRoot, prepTypes: 0, exported: 0, missingPhotos: [], skippedOrders: 0, files: [], folders: [] };
+  const folderSet = new Set();
+  for (let index = 0; index < orders.length; index += 1) {
+    const order = orders[index];
+    event.sender.send('unit-render:progress', { current: index, total: orders.length, message: `ImagePrep ${order.firstName || ''} ${order.lastName || ''}`.trim() });
+    const prepItems = itemsByOrder.get(Number(order.id)) || [];
+    if (!prepItems.length) {
+      result.skippedOrders += 1;
+      continue;
+    }
+    const sourcePath = resolveProjectPath(order.imagePath);
+    if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+      result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+      continue;
+    }
+    const outputName = path.basename(sourcePath);
+    for (const item of prepItems) {
+      const prepType = imagePrepFolderName(item);
+      const outputFolder = path.join(imagePrepRoot, prepType);
+      fs.mkdirSync(outputFolder, { recursive: true });
+      folderSet.add(outputFolder);
+      const outputPath = path.join(outputFolder, outputName);
+      if (!fs.existsSync(outputPath)) fs.copyFileSync(sourcePath, outputPath);
+      const infoPath = path.join(outputFolder, `${path.basename(outputName, path.extname(outputName))}.txt`);
+      const lines = [
+        `Prep Type: ${prepType}`,
+        `Product: ${item.productName || item.rawValue || ''}`,
+        `School: ${order.clientName || ''}`,
+        `Job: ${order.jobName || ''}`,
+        `Reference: ${order.ref || ''}`,
+        `Student First: ${order.firstName || ''}`,
+        `Student Last: ${order.lastName || ''}`,
+        `Student Name: ${order.lastName || ''}, ${order.firstName || ''}`,
+        `Grade: ${order.grade || ''}`,
+        `Homeroom: ${order.homeroom || ''}`,
+        `Source Image: ${outputName}`
+      ];
+      fs.writeFileSync(infoPath, `${lines.join('\r\n')}\r\n`, 'utf8');
+      result.exported += 1;
+      result.files.push(outputPath, infoPath);
+    }
+  }
+  result.folders = Array.from(folderSet);
+  result.prepTypes = result.folders.length;
+  fs.writeFileSync(path.join(imagePrepRoot, 'image-prep-export-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  event.sender.send('unit-render:progress', { current: orders.length, total: orders.length, message: 'ImagePrep export complete' });
+  return result;
+}
+
 async function rasterizePhotoUnitSheet(webContents, imageSource, placements, label) {
+  const textParts = typeof label === 'string' ? { schoolName: '', studentName: label, printInfo: '' } : {
+    schoolName: label.schoolName || '',
+    studentName: label.studentName || '',
+    printInfo: label.printInfo || ''
+  };
   return webContents.executeJavaScript(`new Promise((resolve, reject) => {
     const sourceImage = new Image();
     sourceImage.onload = () => {
       try {
         const canvas = document.createElement('canvas'); canvas.width = 2400; canvas.height = 3150;
         const context = canvas.getContext('2d'); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
-        const drawCover = (x, y, width, height, rotate) => {
+        const drawPlacement = (placement) => {
+          const x = placement.x ?? placement[0]; const y = placement.y ?? placement[1];
+          const width = placement.width ?? placement[2]; const height = placement.height ?? placement[3];
+          const rotate = placement.rotate ?? width > height;
+          const crop = placement.crop || null;
           context.save(); context.beginPath(); context.rect(x, y, width, height); context.clip();
-          if (rotate) { context.translate(x + width, y); context.rotate(Math.PI / 2); x = 0; y = 0; const swap = width; width = height; height = swap; }
-          const scale = Math.max(width / sourceImage.naturalWidth, height / sourceImage.naturalHeight);
-          const drawWidth = sourceImage.naturalWidth * scale; const drawHeight = sourceImage.naturalHeight * scale;
-          context.drawImage(sourceImage, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+          if (rotate) {
+            context.translate(x + width, y);
+            context.rotate(Math.PI / 2);
+            const sx = crop ? crop[0] : 0; const sy = crop ? crop[1] : 0;
+            const sw = crop ? crop[2] : sourceImage.naturalWidth; const sh = crop ? crop[3] : sourceImage.naturalHeight;
+            context.drawImage(sourceImage, sx, sy, sw, sh, 0, 0, height, width);
+            context.restore();
+            return;
+          }
+          if (!crop && sourceImage.naturalWidth === width && sourceImage.naturalHeight === height) {
+            context.drawImage(sourceImage, x, y);
+            context.restore();
+            return;
+          }
+          const sx = crop ? crop[0] : 0; const sy = crop ? crop[1] : 0;
+          const sw = crop ? crop[2] : sourceImage.naturalWidth; const sh = crop ? crop[3] : sourceImage.naturalHeight;
+          context.drawImage(sourceImage, sx, sy, sw, sh, x, y, width, height);
           context.restore();
         };
-        ${JSON.stringify(placements)}.forEach((placement) => drawCover(placement[0], placement[1], placement[2], placement[3], placement[2] > placement[3]));
-        context.fillStyle = 'rgba(255,255,255,.88)'; context.fillRect(8, 3075, 2384, 67);
-        context.fillStyle = '#111'; context.font = '34px Arial'; context.fillText(${JSON.stringify(label)}, 30, 3125);
+        ${JSON.stringify(placements)}.forEach((placement) => drawPlacement(placement));
+        context.fillStyle = '#fff'; context.fillRect(0, 3000, 2400, 150);
+        context.fillStyle = '#111';
+        context.textBaseline = 'alphabetic';
+        context.font = '35px Arial';
+        context.textAlign = 'left';
+        context.fillText(${JSON.stringify(textParts.schoolName)}, 50, 3035);
+        context.font = '60px Arial';
+        context.textAlign = 'center';
+        context.fillText(${JSON.stringify(textParts.studentName)}, 1200, 3110);
+        context.font = '30px Arial';
+        context.textAlign = 'right';
+        context.fillText(${JSON.stringify(textParts.printInfo)}, 2350, 3050);
         resolve(canvas.toDataURL('image/jpeg', .94));
       } catch (error) { reject(error.message); }
     };
@@ -2722,27 +3533,64 @@ async function rasterizePhotoUnitSheet(webContents, imageSource, placements, lab
   })`);
 }
 
-function envelopeSvg(order, contents, imageSource, large = false) {
+async function rasterizeTenByThirteen(webContents, imageSource, label = {}) {
+  const textParts = {
+    studentName: label.studentName || '',
+    schoolRef: label.schoolRef || '',
+    printInfo: label.printInfo || ''
+  };
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const sourceImage = new Image();
+    sourceImage.onload = () => {
+      try {
+        const canvas = document.createElement('canvas'); canvas.width = 3000; canvas.height = 4200;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(sourceImage, 0, 0, sourceImage.naturalWidth, sourceImage.naturalHeight, -60, 0, 3120, 3900);
+        context.fillStyle = '#fff'; context.fillRect(0, 3900, 3000, 300);
+        context.fillStyle = '#111';
+        context.textBaseline = 'alphabetic';
+        context.font = '70px Arial';
+        context.textAlign = 'center';
+        context.fillText(${JSON.stringify(textParts.studentName)}, 1500, 4050);
+        context.font = '42px Arial';
+        context.textAlign = 'left';
+        context.fillText(${JSON.stringify(textParts.schoolRef)}, 2000, 4150);
+        if (${JSON.stringify(textParts.printInfo)}) {
+          context.textAlign = 'left';
+          context.fillText(${JSON.stringify(textParts.printInfo)}, 60, 4150);
+        }
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    };
+    sourceImage.onerror = () => reject('Could not decode the selected 10x13 image.');
+    sourceImage.src = ${JSON.stringify(imageSource)};
+  })`);
+}
+
+function envelopeSvg(order, contents, imageSource, large = false, templateSource = null) {
   const width = large ? 3450 : 2625; const height = large ? 4950 : 3975;
   const photoX = large ? 150 : 100; const photoY = large ? 1080 : 740; const photoWidth = large ? 620 : 600; const photoHeight = 750;
   const textX = large ? 850 : 800; const nameY = large ? 1230 : 840;
   const orderY = large ? 1530 : 1140; const contentY = orderY + 100;
+  const contentFontSize = large ? 50 : 44; const contentLineHeight = large ? 65 : 62;
   const safeContents = contents.slice(0, 18);
+  const mailHome = safeContents.some((content) => /mail home/i.test(content));
+  const fallbackBackground = `<rect width="${width}" height="${height}" fill="white"/><rect x="20" y="20" width="${width - 40}" height="${height - 40}" fill="none" stroke="#9aa8b2" stroke-width="8" stroke-dasharray="28 18"/><rect x="20" y="20" width="${width - 40}" height="220" fill="#e9eef2"/><text x="70" y="115" font-family="Arial" font-size="62" font-weight="bold">${large ? 'LARGE ' : ''}ORDER ENVELOPE</text><text x="70" y="185" font-family="Arial" font-size="42" fill="#596a76">TEMPLATE NOT FOUND</text>`;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-    <rect width="${width}" height="${height}" fill="white"/><rect x="20" y="20" width="${width - 40}" height="${height - 40}" fill="none" stroke="#9aa8b2" stroke-width="8" stroke-dasharray="28 18"/>
-    <rect x="20" y="20" width="${width - 40}" height="220" fill="#e9eef2"/><text x="70" y="115" font-family="Arial" font-size="62" font-weight="bold">${large ? 'LARGE ' : ''}ORDER ENVELOPE</text><text x="70" y="185" font-family="Arial" font-size="42" fill="#596a76">BLANK CANVAS PROOF — TEMPLATE PENDING</text>
+    ${templateSource ? `<rect width="${width}" height="${height}" fill="white"/><image href="${templateSource}" x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none"/>` : fallbackBackground}
     ${imageSource ? `<image href="${imageSource}" x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" fill="#eef2f5"/><text x="${photoX + 80}" y="${photoY + 380}" font-family="Arial" font-size="48">NO PHOTO</text>`}
     <text x="${textX}" y="${nameY}" font-family="Arial" font-size="120" font-weight="bold">${escapeXml(`${order.firstName || ''} ${order.lastName || ''}`.trim())}</text>
     <text x="${textX}" y="${nameY + 100}" font-family="Arial" font-size="72">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text>
     <text x="${textX}" y="${nameY + 190}" font-family="Arial" font-size="66">${escapeXml(order.clientName || '')}</text>
-    <text x="${textX}" y="${orderY}" font-family="Arial" font-size="68" font-weight="bold">Order ${escapeXml(order.packageCodes || '')}</text>
-    ${safeContents.map((content, index) => `<text x="${textX}" y="${contentY + index * 62}" font-family="Arial" font-size="44">${escapeXml(content)}</text>`).join('')}
+    <text x="${textX}" y="${orderY}" font-family="Arial" font-size="68">------Order ${escapeXml(order.packageCodes || '')}------</text>
+    ${safeContents.map((content, index) => `<text x="${textX}" y="${contentY + index * contentLineHeight}" font-family="Arial" font-size="${contentFontSize}">${escapeXml(content)}</text>`).join('')}
+    ${mailHome ? `<rect x="${large ? 830 : 780}" y="${large ? 1890 : 1500}" width="320" height="78" fill="#ffeb3b"/><text x="${large ? 850 : 800}" y="${large ? 1950 : 1560}" font-family="Arial" font-size="50" font-weight="bold">Mail Home</text>` : ''}
     <text x="${photoX}" y="${photoY + photoHeight + 120}" font-family="Arial" font-size="50">Ref Num: ${escapeXml(order.ref || '')}</text>
     <rect x="${photoX}" y="${photoY + photoHeight + 165}" width="620" height="150" fill="none" stroke="#111" stroke-width="5"/><text x="${photoX + 40}" y="${photoY + photoHeight + 265}" font-family="monospace" font-size="70">*${escapeXml(order.ref || '')}*</text>
     <g transform="translate(${width - 100} 500) rotate(90)"><text font-family="Arial" font-size="68">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text></g>
   </svg>`;
 }
-
 function orderLabelSvg(order, contents, imageSource) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600"><rect width="1200" height="600" fill="white"/><rect x="5" y="5" width="1190" height="590" fill="none" stroke="#9aa8b2" stroke-width="5"/>
     ${imageSource ? `<image href="${imageSource}" x="25" y="25" width="520" height="550" preserveAspectRatio="xMidYMid slice"/>` : ''}
@@ -2758,17 +3606,17 @@ async function runUnitRender(event, input = {}) {
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
   const orders = await querySql(`
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
-           c.display_name AS clientName, j.name AS jobName, j.package_plan_id AS packagePlanId,
+           c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
            GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
     FROM orders o JOIN jobs j ON j.id = o.job_id JOIN clients c ON c.id = j.client_id JOIN subjects s ON s.id = o.subject_id
-    LEFT JOIN order_items oi ON oi.order_id = o.id LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
-    WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
+    LEFT JOIN package_plans pp ON pp.id = j.package_plan_id LEFT JOIN order_items oi ON oi.order_id = o.id LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE ${unitRenderOrderWhereClause(jobId, source, sourceValue)}
     GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
   `);
-  const selectedOrders = orders.filter((order) => source === 'all' || (source === 'grade' && order.grade === sourceValue) || (source === 'homeroom' && order.homeroom === sourceValue) || (source === 'individual' && Number(order.id) === Number(sourceValue)));
+  const selectedOrders = orders;
   const itemRows = selectedOrders.length ? await querySql(`
-    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue, p.name AS productName, p.category, COALESCE(pci.quantity, 1) AS quantity
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue, p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN jobs j ON j.id = o.job_id
     LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
     LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id LEFT JOIN products p ON p.id = pci.product_id
@@ -2777,19 +3625,42 @@ async function runUnitRender(event, input = {}) {
   `) : [];
   const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []])); itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
   selectedOrders.sort((a, b) => unitRenderSortValue(a, sortBy).localeCompare(unitRenderSortValue(b, sortBy)));
-  const folders = { units: path.join(outputFolder, 'Units'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
+  const folders = { units: path.join(outputFolder, 'Units'), tenByThirteens: path.join(outputFolder, '10x13s'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
   Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
   const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
-  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], unsupportedItems: [], errors: [] };
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
     const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
-    const imageSource = imageDataUrlFromPath(order.imagePath); const contents = items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
+    const imagePrepItem = items.find(isImagePrepItem);
+    const preparedPath = imagePrepItem ? preparedImagePathForOrder(order, imagePrepItem) : null;
+    const unitImagePath = imagePrepItem ? preparedPath : order.imagePath;
+    const imageSource = imageDataUrlFromPath(unitImagePath);
+    const envelopeImageSource = imageDataUrlFromPath(order.imagePath);
+    const contents = items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
     const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
     if (input.includeUnits !== false) {
-      if (!imageSource) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+      if (imagePrepItem && !preparedPath) result.missingImagePrep.push({ orderId: order.id, ref: order.ref, prepType: imagePrepFolderName(imagePrepItem) });
+      else if (!imageSource) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
       else for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-        const item = items[itemIndex]; const recipe = recipes.get(String(item.rawValue || '').toLowerCase()) || recipes.get(String(item.productName || '').toLowerCase());
+        const item = items[itemIndex];
+        if (isImagePrepItem(item)) continue;
+        const support = productRenderSupport({ ...item, name: item.productName || item.rawValue });
+        if (support === 'non_rendering') continue;
+        if (isTenByThirteenProduct(item)) {
+          for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) {
+            const dataUrl = await rasterizeTenByThirteen(event.sender, imageSource, {
+              studentName: `${order.firstName || ''} ${order.lastName || ''}`.trim(),
+              schoolRef: `${order.clientName || ''}: ${order.ref || ''}`,
+              printInfo: `${item.productName || item.rawValue || '10x13'}`
+            });
+            const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+            fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
+            result.tenByThirteens += 1;
+          }
+          continue;
+        }
+        const recipe = recipes.get(String(item.rawValue || '').toLowerCase()) || recipes.get(String(item.productName || '').toLowerCase());
         if (!recipe) { if (item.rawValue || item.productName) result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName }); continue; }
         for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
           const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], `${recipe.name} — ${sheetIndex + 1} of ${recipe.sheets.length}`);
@@ -2798,11 +3669,13 @@ async function runUnitRender(event, input = {}) {
         }
       }
     }
-    const hasLarge = contents.some((item) => /10x13|art\s*print/i.test(item));
-    const hasSmall = contents.some((item) => !/10x13|art\s*print|mug|waterbottle|plaque/i.test(item));
-    if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, imageSource, false), 2625, 3975); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
-    if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, imageSource, true), 3450, 4950); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
-    if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, imageSource), 1200, 600); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+    const productionItems = items.filter((item) => !isImagePrepItem(item) && productRenderSupport({ ...item, name: item.productName || item.rawValue }) !== 'non_rendering');
+    const productionContents = productionItems.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
+    const hasLarge = productionContents.some((item) => /10x13|art\s*print/i.test(item));
+    const hasSmall = productionContents.some((item) => !/10x13|art\s*print|mug|waterbottle|plaque/i.test(item));
+    if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, false, envelopeTemplateDataUrl(order, false)), 2625, 3975); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
+    if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, true, envelopeTemplateDataUrl(order, true)), 3450, 4950); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
+    if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, envelopeImageSource), 1200, 600); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
   }
   result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [item.item, item])).values());
   fs.writeFileSync(path.join(outputFolder, 'unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString(), proofMode: true }, null, 2));
@@ -3379,6 +4252,25 @@ async function compositeJobData(jobIdValue) {
     purchase[kind] += Math.max(1, Number(row.quantity || 1)); purchases.set(key, purchase);
   });
   subjects.forEach((subject) => { subject.purchases = purchases.get(Number(subject.id)) || { traditional: 0, star: 0 }; });
+  const allStaff = await querySql(`
+    SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
+           s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_medium' ORDER BY iv.id DESC LIMIT 1),
+                    (SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
+    FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    WHERE s.job_id = ${jobId}
+      AND TRIM(COALESCE(s.first_name, '')) != '' AND TRIM(COALESCE(s.last_name, '')) != ''
+      AND (
+        LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff', 'teacher')
+        OR UPPER(COALESCE(s.grade, '')) = 'FAC'
+      )
+    ORDER BY s.last_name, s.first_name, s.id;
+  `);
+  allStaff.forEach((subject) => {
+    subject.staff = true;
+    subject.photoPath = compositeImagePath(subject, job.rootPath);
+    subject.hasPhoto = Boolean(subject.photoPath);
+  });
   const classMap = new Map();
   subjects.forEach((subject) => {
     if (!classMap.has(subject.homeroom)) classMap.set(subject.homeroom, { homeroom: subject.homeroom, students: [], staff: [] });
@@ -3391,7 +4283,12 @@ async function compositeJobData(jobIdValue) {
     traditionalOrders: group.students.reduce((total, subject) => total + subject.purchases.traditional, 0),
     starOrders: group.students.reduce((total, subject) => total + subject.purchases.star, 0)
   }));
-  return { job: { ...job, schoolYear: compositeSchoolYear(job.jobName) }, classes };
+  const staff = allStaff.sort((a, b) => {
+    const last = String(a.lastName || '').localeCompare(String(b.lastName || ''), undefined, { sensitivity: 'base' });
+    if (last) return last;
+    return String(a.firstName || '').localeCompare(String(b.firstName || ''), undefined, { sensitivity: 'base' });
+  });
+  return { job: { ...job, schoolYear: compositeSchoolYear(job.jobName) }, classes, staff };
 }
 
 async function getCompositeSetup(_event, jobIdValue = null) {
@@ -3409,6 +4306,17 @@ async function getCompositeSetup(_event, jobIdValue = null) {
     jobs,
     selectedJobId,
     job: data.job,
+    staff: data.staff.map((subject) => ({
+      id: subject.id,
+      ref: subject.ref,
+      name: `${subject.firstName} ${subject.lastName}`.trim(),
+      firstName: subject.firstName,
+      lastName: subject.lastName,
+      grade: subject.grade,
+      homeroom: subject.homeroom,
+      subjectType: subject.subjectType,
+      hasPhoto: subject.hasPhoto
+    })),
     classes: data.classes.map((group) => ({
       homeroom: group.homeroom, gradeLabel: group.gradeLabel, students: group.students.length,
       photographed: group.photographed, staff: group.staff.length,
@@ -3432,6 +4340,16 @@ function compositeStudentPositions(type, layout, count) {
 
 function compositePhotoData(subject) {
   return subject.photoPath ? imageDataUrlFromPath(subject.photoPath) : null;
+}
+
+function uniqueCompositeStaff(classStaff = [], additionalStaff = []) {
+  const seen = new Set();
+  return [...classStaff, ...additionalStaff].filter((subject) => {
+    const key = String(subject.id || subject.ref || `${subject.firstName || ''}|${subject.lastName || ''}`);
+    if (!key.trim() || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function compositeSlotSvg(subject, position, layout, includeNames, kind) {
@@ -3459,10 +4377,12 @@ function compositeSvg(group, type, options = {}, featured = null, purchaserLabel
   const offsetX = purchaserLabel ? 150 : 0; const width = purchaserLabel ? 3150 : 3000;
   const positions = compositeStudentPositions(type, layout, students.length);
   const studentSlots = students.map((subject, index) => compositeSlotSvg(subject, positions[index], layout, options.includeNames !== false, type)).join('');
-  const staff = options.includeStaff === false ? [] : group.staff.slice(0, layout.cols.length);
-  const staffSlots = staff.map((subject, index) => compositeSlotSvg(subject, { x: layout.cols[layout.cols.length - 1 - index], y: layout.rows[0] }, layout, options.includeNames !== false, type)).join('');
+  const classStaff = options.includeStaff === false ? [] : group.staff;
+  const teacherNames = classStaff.map((subject) => `${subject.firstName} ${subject.lastName}`).join('; ');
+  const staff = uniqueCompositeStaff(options.additionalStaff || [], classStaff).slice(-layout.cols.length);
+  const firstStaffColumn = Math.max(0, layout.cols.length - staff.length);
+  const staffSlots = staff.map((subject, index) => compositeSlotSvg(subject, { x: layout.cols[firstStaffColumn + index], y: layout.rows[0] }, layout, options.includeNames !== false, type)).join('');
   const accent = type === 'star' ? '#b88718' : '#176b87'; const pale = type === 'star' ? '#fff7df' : '#eef7fa';
-  const teacherNames = staff.map((subject) => `${subject.firstName} ${subject.lastName}`).join('; ');
   const feature = type === 'star' ? compositeFeatureGeometry(students.length) : null;
   const featuredPhoto = featured ? compositePhotoData(featured) : null;
   const featureSvg = feature ? `<rect x="${feature.x}" y="${feature.y}" width="${feature.width}" height="${feature.height}" rx="9" fill="#fff" stroke="#d3aa4e" stroke-width="8" ${featured ? '' : 'stroke-dasharray="22 16"'}/>
@@ -3475,6 +4395,7 @@ function compositeSvg(group, type, options = {}, featured = null, purchaserLabel
 }
 
 function compositeOptions(input, job) {
+  const additionalStaffIds = [input.additionalStaff1Id, input.additionalStaff2Id].map((value) => Number(value)).filter((id) => Number.isInteger(id) && id > 0);
   return {
     schoolName: optionalText(input.schoolName, 255) || job.clientName,
     principal: optionalText(input.principal, 255),
@@ -3482,8 +4403,14 @@ function compositeOptions(input, job) {
     classHeading: optionalText(input.classHeading, 255),
     photographedOnly: input.photographedOnly === true,
     includeStaff: input.includeStaff !== false,
-    includeNames: input.includeNames !== false
+    includeNames: input.includeNames !== false,
+    additionalStaffIds
   };
+}
+
+function applyCompositeAdditionalStaff(options, staff) {
+  options.additionalStaff = options.additionalStaffIds.map((id) => staff.find((subject) => Number(subject.id) === Number(id))).filter(Boolean);
+  return options;
 }
 
 async function previewComposite(event, input = {}) {
@@ -3491,7 +4418,7 @@ async function previewComposite(event, input = {}) {
   if (!group) throw new Error('Choose a class to preview.');
   const type = input.type === 'star' ? 'star' : 'traditional';
   const featured = type === 'star' ? group.students.find((subject) => Number(subject.id) === Number(input.featuredSubjectId)) || null : null;
-  const svg = compositeSvg(group, type, compositeOptions(input, data.job), featured);
+  const svg = compositeSvg(group, type, applyCompositeAdditionalStaff(compositeOptions(input, data.job), data.staff), featured);
   const dataUrl = await rasterizeUnitSheet(event.sender, svg, 3000, 2400);
   return { dataUrl, width: 3000, height: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
 }
@@ -3501,21 +4428,42 @@ async function chooseCompositeOutputFolder() {
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
+function formatCompositeEta(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 1000) return 'under 1s';
+  const totalSeconds = Math.ceil(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function compositeProgressMessage(group, index, total, startedAt) {
+  const completed = index;
+  const prefix = `Rendering ${group.homeroom} (${index + 1} of ${total})`;
+  if (!completed) return `${prefix} - estimating time remaining...`;
+  const averageMs = (Date.now() - startedAt) / completed;
+  const remainingMs = averageMs * (total - completed);
+  return `${prefix} - ETA ${formatCompositeEta(remainingMs)}`;
+}
+
 async function runCompositeRender(event, input = {}) {
   const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
   if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const data = await compositeJobData(input.jobId); const scope = input.scope === 'all' ? 'all' : 'selected';
   const groups = scope === 'all' ? data.classes : data.classes.filter((group) => group.homeroom === String(input.homeroom || ''));
   if (!groups.length) throw new Error('Choose at least one class to render.');
-  const options = compositeOptions(input, data.job); const includeTraditional = input.includeTraditional !== false; const includeStar = input.includeStar !== false;
+  const options = applyCompositeAdditionalStaff(compositeOptions(input, data.job), data.staff); const includeTraditional = input.includeTraditional !== false; const includeStar = input.includeStar !== false;
   const selectedCounts = groups.map((group) => ({ group, count: options.photographedOnly ? group.students.filter((subject) => subject.hasPhoto).length : group.students.length }));
   const invalid = selectedCounts.find(({ count }) => (includeTraditional && !traditionalCompositeLayout(count)) || (includeStar && !starCompositeLayout(count)));
   if (invalid) throw new Error(`${invalid.group.homeroom} has ${invalid.count} selected students and is above a legacy layout limit.`);
   const folders = { backgrounds: path.join(outputFolder, 'Composite Backgrounds'), students: path.join(outputFolder, 'Student Composites') };
   Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
   const result = { jobId: Number(input.jobId), outputFolder, classes: groups.length, traditionalBackgrounds: 0, starBackgrounds: 0, traditionalCopies: 0, starCopies: 0, files: [] };
+  const startedAt = Date.now();
   for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index]; event.sender.send('composite:progress', { current: index, total: groups.length, message: `Rendering ${group.homeroom}` });
+    const group = groups[index]; event.sender.send('composite:progress', { current: index, total: groups.length, message: compositeProgressMessage(group, index, groups.length, startedAt) });
     const baseName = safeFolderName(group.homeroom);
     if (includeTraditional) {
       const dataUrl = await rasterizeUnitSheet(event.sender, compositeSvg(group, 'traditional', options), 3000, 2400);
@@ -3559,7 +4507,7 @@ async function testCompositeLayouts(event) {
   const report = { passed: outputs.every((item) => item.passed), outputFolder, createdAt: new Date().toISOString(), layouts: outputs }; fs.writeFileSync(path.join(outputFolder, 'composite-layout-test-report.json'), JSON.stringify(report, null, 2)); return report;
 }
 
-async function testPackagePlanRenders(_event, packagePlanIdValue) {
+async function testPackagePlanRenders(event, packagePlanIdValue) {
   const packagePlanId = numericId(packagePlanIdValue);
   const rows = await querySql(`
     SELECT DISTINCT p.id, p.name, p.category, p.size, p.metadata_json AS metadataJson
@@ -3573,21 +4521,7 @@ async function testPackagePlanRenders(_event, packagePlanIdValue) {
   fs.mkdirSync(outputFolder, { recursive: true });
   const results = [];
   for (const product of rows) {
-    const support = productRenderSupport(product);
-    if (support !== 'renderable') {
-      results.push({ productId: product.id, name: product.name, status: support });
-      continue;
-    }
-    const safeName = safeFolderName(product.name) || `product-${product.id}`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1575"><rect width="1200" height="1575" fill="#f4f1ea"/><rect x="90" y="90" width="1020" height="1210" rx="20" fill="#c8d8e8"/><circle cx="600" cy="500" r="210" fill="#527aa3"/><path d="M260 1190 Q600 690 940 1190" fill="#355979"/><text x="600" y="1390" text-anchor="middle" font-family="Arial" font-size="62" fill="#172b3a">${escapeXml(product.name)}</text><text x="600" y="1470" text-anchor="middle" font-family="Arial" font-size="34" fill="#52636f">${escapeXml(product.size || product.category || '')} render test</text></svg>`;
-    const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
-    if (image.isEmpty()) {
-      results.push({ productId: product.id, name: product.name, status: 'failed', error: 'Electron could not rasterize the test layout.' });
-      continue;
-    }
-    const outputPath = path.join(outputFolder, `${safeName}.jpg`);
-    fs.writeFileSync(outputPath, image.toJPEG(92));
-    results.push({ productId: product.id, name: product.name, status: 'rendered', outputPath });
+    results.push(await rasterizeProductRenderTest(event.sender, product, outputFolder));
   }
   const report = { packagePlanId, outputFolder, createdAt: new Date().toISOString(), results };
   fs.writeFileSync(path.join(outputFolder, 'render-test-report.json'), JSON.stringify(report, null, 2));
@@ -3600,12 +4534,23 @@ function escapeXml(value) {
 
 ipcMain.handle('package-editor:get', getPackageEditorData);
 ipcMain.handle('package-editor:create-plan', createPackagePlan);
+ipcMain.handle('package-editor:create-product', createProduct);
+ipcMain.handle('package-editor:save-products-batch', saveProductsBatch);
+ipcMain.handle('package-editor:save-products-default', saveProductsAsDefault);
+ipcMain.handle('package-editor:delete-product', deleteProduct);
+ipcMain.handle('package-editor:seed-products', seedDefaultProducts);
 ipcMain.handle('package-editor:save-code', savePackageCode);
 ipcMain.handle('package-editor:delete-code', deletePackageCode);
 ipcMain.handle('package-editor:test-renders', testPackagePlanRenders);
+ipcMain.handle('package-editor:test-product-render', testProductRender);
+ipcMain.handle('package-editor:test-package-item-render', testPackageItemRender);
+ipcMain.handle('package-editor:mark-product-reviewed', markProductReviewed);
+ipcMain.handle('package-editor:test-package-code-render', testPackageCodeRender);
+ipcMain.handle('package-editor:mark-package-code-reviewed', markPackageCodeReviewed);
 ipcMain.handle('picture-units:test-all', testPictureUnitRenders);
 ipcMain.handle('unit-render:get-setup', getUnitRenderSetup);
 ipcMain.handle('unit-render:choose-output-folder', chooseUnitRenderOutputFolder);
+ipcMain.handle('unit-render:image-prep-export', imagePrepExport);
 ipcMain.handle('unit-render:run', runUnitRender);
 ipcMain.handle('unit-render:test-envelope-proofs', testBlankEnvelopeRenders);
 ipcMain.handle('composite:get-setup', getCompositeSetup);
