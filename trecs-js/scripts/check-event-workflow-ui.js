@@ -5,8 +5,19 @@ const path = require('path');
 require('../src/main/main.js');
 
 const workspaceRoot = path.resolve(__dirname, '../..');
-const databasePath = path.join(workspaceRoot, 'database', 'migration_prototype.db');
-const programDatabasePath = path.join(workspaceRoot, 'database', 'program.db');
+function dataRootFromPathFile() {
+  const pathFile = path.join(workspaceRoot, 'path.txt');
+  if (!fs.existsSync(pathFile)) return workspaceRoot;
+  const configured = fs.readFileSync(pathFile, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^["']|["']$/g, ''))
+    .find((line) => line && !line.startsWith('#'));
+  if (!configured) return workspaceRoot;
+  return path.isAbsolute(configured) ? configured : path.resolve(workspaceRoot, configured);
+}
+const dataRoot = dataRootFromPathFile();
+const databasePath = path.join(dataRoot, 'database', 'migration_prototype.db');
+const programDatabasePath = path.join(dataRoot, 'database', 'program.db');
 const outputFolder = path.join(workspaceRoot, 'exports', 'ui-tests');
 const temporaryRoot = path.join(workspaceRoot, 'exports', '_event-workflow-smoke-temp');
 

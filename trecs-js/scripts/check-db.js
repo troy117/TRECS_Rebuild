@@ -3,7 +3,18 @@ const path = require('path');
 const initSqlJs = require('sql.js');
 
 const projectRoot = path.resolve(__dirname, '../..');
-const databasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
+function dataRootFromPathFile() {
+  const pathFile = path.join(projectRoot, 'path.txt');
+  if (!fs.existsSync(pathFile)) return projectRoot;
+  const configured = fs.readFileSync(pathFile, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^["']|["']$/g, ''))
+    .find((line) => line && !line.startsWith('#'));
+  if (!configured) return projectRoot;
+  return path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured);
+}
+const dataRoot = dataRootFromPathFile();
+const databasePath = path.join(dataRoot, 'database', 'migration_prototype.db');
 const sqlWasmPath = path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist');
 
 async function main() {

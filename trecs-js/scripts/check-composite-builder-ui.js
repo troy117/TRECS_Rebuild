@@ -67,12 +67,16 @@ async function run() {
   await wait(500);
   await waitForPreview(window);
   const star = await inspect(window);
+  const selected = await window.webContents.executeJavaScript(`(() => ({
+    jobId: Number(document.getElementById('compositeJobSelect').value),
+    homeroom: document.querySelector('.composite-class-item.selected strong')?.textContent || ''
+  }))()`);
 
   const actualFeature = await window.webContents.executeJavaScript(`(async () => {
-    const setup = await window.trecs.getCompositeSetup(6);
-    const group = setup.classes.find((item) => item.homeroom === 'TEST') || setup.classes[0];
+    const setup = await window.trecs.getCompositeSetup(${Number(selected.jobId)});
+    const group = setup.classes.find((item) => item.homeroom === ${JSON.stringify(selected.homeroom)}) || setup.classes[0];
     const featured = group?.featuredStudents.find((student) => student.hasPhoto) || group?.featuredStudents[0];
-    const preview = await window.trecs.previewComposite({ jobId: 6, homeroom: group.homeroom, type: 'star', featuredSubjectId: featured.id, schoolName: setup.job.clientName, schoolYear: setup.job.schoolYear, includeNames: true, includeStaff: true });
+    const preview = await window.trecs.previewComposite({ jobId: ${Number(selected.jobId)}, homeroom: group.homeroom, type: 'star', featuredSubjectId: featured.id, schoolName: setup.job.clientName, schoolYear: setup.job.schoolYear, includeNames: true, includeStaff: true });
     return { dataUrl: preview.dataUrl, homeroom: group.homeroom, featuredName: featured.name, hasPhoto: featured.hasPhoto, width: preview.width, height: preview.height };
   })()`);
   const layoutTests = await window.webContents.executeJavaScript(`window.trecs.testCompositeLayouts()`);
@@ -82,9 +86,8 @@ async function run() {
   fs.writeFileSync(actualFeaturePath, Buffer.from(actualFeature.dataUrl.split(',')[1], 'base64'));
   const actualFeatureSize = nativeImage.createFromPath(actualFeaturePath).getSize();
   delete actualFeature.dataUrl;
-  const selected = await window.webContents.executeJavaScript(`(() => ({ jobId: Number(document.getElementById('compositeJobSelect').value), homeroom: document.querySelector('.composite-class-item.selected strong').textContent }))()`);
   const render = await window.webContents.executeJavaScript(`window.trecs.renderComposites(${JSON.stringify({
-    jobId: 1,
+    jobId: selected.jobId,
     homeroom: selected.homeroom,
     scope: 'selected',
     schoolName: 'ISLAND',
