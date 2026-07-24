@@ -10,13 +10,16 @@ INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_j
   ('3x5', 'print', '3x5', 1, '{"legacy_group":"print"}'),
   ('2-3x5', 'print_bundle', '3x5', 1, '{"quantity":2,"legacy_group":"print"}'),
   ('4-3x5', 'print_bundle', '3x5', 1, '{"quantity":4,"legacy_group":"print"}'),
+  ('6-3x5', 'print_bundle', '3x5', 1, '{"quantity":6,"legacy_group":"print"}'),
   ('2-3x5 & 5x7', 'print_bundle', NULL, 1, '{"legacy_group":"print"}'),
   ('Wallets', 'print_bundle', 'wallet', 1, '{"legacy_group":"print"}'),
   ('4 Wallets', 'print_bundle', 'wallet', 1, '{"quantity":4,"legacy_group":"print"}'),
   ('8 Wallets', 'print_bundle', 'wallet', 1, '{"quantity":8,"legacy_group":"print"}'),
+  ('12 Wallets', 'print_bundle', 'wallet', 1, '{"quantity":12,"legacy_group":"print"}'),
   ('16 Wallets', 'print_bundle', 'wallet', 1, '{"quantity":16,"legacy_group":"print"}'),
   ('24 Wallets', 'print_bundle', 'wallet', 1, '{"quantity":24,"legacy_group":"print"}'),
   ('Mini Wallets', 'print_bundle', 'mini_wallet', 1, '{"legacy_group":"print"}'),
+  ('8 Mini Wallets', 'print_bundle', 'mini_wallet', 1, '{"quantity":8,"legacy_group":"print"}'),
   ('16 Mini', 'print_bundle', 'mini_wallet', 1, '{"quantity":16,"legacy_group":"print"}'),
   ('8 Mini & 2-3x5', 'print_bundle', NULL, 1, '{"legacy_group":"print"}'),
   ('10x13', 'print', '10x13', 1, '{"legacy_group":"print"}'),
@@ -84,6 +87,8 @@ SELECT id, '2-3x5', 'Exact legacy package item' FROM products WHERE name = '2-3x
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '4-3x5', 'Exact legacy package item' FROM products WHERE name = '4-3x5';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
+SELECT id, '6-3x5', 'Exact legacy package item' FROM products WHERE name = '6-3x5';
+INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '2-3x5 & 5x7', 'Exact legacy package item' FROM products WHERE name = '2-3x5 & 5x7';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '4 Wall & 5x7', 'Legacy wall/wallet bundle needs quantity confirmation' FROM products WHERE name = 'Wallets';
@@ -94,11 +99,15 @@ SELECT id, '4 Wallets', 'Exact legacy package item' FROM products WHERE name = '
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '8 Wallets', 'Exact legacy package item' FROM products WHERE name = '8 Wallets';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
+SELECT id, '12 Wallets', 'Exact legacy package item' FROM products WHERE name = '12 Wallets';
+INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '16 Wallets', 'Exact legacy package item' FROM products WHERE name = '16 Wallets';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '24 Wallets', 'Exact legacy package item' FROM products WHERE name = '24 Wallets';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '16 Mini', 'Exact legacy package item' FROM products WHERE name = '16 Mini';
+INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
+SELECT id, '8 Mini Wallets', 'Exact legacy package item' FROM products WHERE name = '8 Mini Wallets';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)
 SELECT id, '8 Mini & 2-3x5', 'Exact legacy package item' FROM products WHERE name = '8 Mini & 2-3x5';
 INSERT OR IGNORE INTO product_aliases (product_id, alias, notes)

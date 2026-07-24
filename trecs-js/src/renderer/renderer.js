@@ -7901,6 +7901,17 @@ function restoreProductListScroll() {
   list.scrollTop = Number(jobsState.productListScrollTop);
 }
 
+function rememberPackageCodeListScroll() {
+  const list = document.querySelector('.package-code-list');
+  if (list) jobsState.packageCodeListScrollTop = list.scrollTop;
+}
+
+function restorePackageCodeListScroll() {
+  const list = document.querySelector('.package-code-list');
+  if (!list || !Number.isFinite(Number(jobsState.packageCodeListScrollTop))) return;
+  list.scrollTop = Number(jobsState.packageCodeListScrollTop);
+}
+
 function bindPackageEditor(selected) {
   const status = document.querySelector('#packageEditorStatus');
   const productList = document.querySelector('.product-review-list');
@@ -7910,11 +7921,22 @@ function bindPackageEditor(selected) {
       jobsState.productListScrollTop = productList.scrollTop;
     });
   }
+  const packageCodeList = document.querySelector('.package-code-list');
+  if (packageCodeList) {
+    restorePackageCodeListScroll();
+    packageCodeList.addEventListener('scroll', () => {
+      jobsState.packageCodeListScrollTop = packageCodeList.scrollTop;
+    });
+  }
   document.querySelector('#packageEditorPlan').addEventListener('change', async (event) => {
     jobsState.packageEditorPlanId = Number(event.target.value);
+    jobsState.packageCodeListScrollTop = 0;
     await renderProductsPage();
   });
-  document.querySelectorAll('[data-package-code]').forEach((button) => button.addEventListener('click', () => drawPackageEditor(Number(button.dataset.packageCode))));
+  document.querySelectorAll('[data-package-code]').forEach((button) => button.addEventListener('click', () => {
+    rememberPackageCodeListScroll();
+    drawPackageEditor(Number(button.dataset.packageCode));
+  }));
   document.querySelector('#addPackageItemButton').addEventListener('click', () => document.querySelector('#packageItemRows').insertAdjacentHTML('beforeend', packageItemRow()));
   document.querySelector('#packageItemRows').addEventListener('click', async (event) => {
     if (event.target.matches('[data-remove-package-item]')) {
@@ -7941,7 +7963,10 @@ function bindPackageEditor(selected) {
       }
     }
   });
-  document.querySelector('#newPackageCodeButton').addEventListener('click', () => drawPackageEditor(0));
+  document.querySelector('#newPackageCodeButton').addEventListener('click', () => {
+    rememberPackageCodeListScroll();
+    drawPackageEditor(0);
+  });
   const newPlanForm = document.querySelector('#newPackagePlanForm');
   document.querySelector('#newPackagePlanButton').addEventListener('click', () => {
     newPlanForm.hidden = false;
@@ -8050,6 +8075,8 @@ function bindPackageEditor(selected) {
           ? `Created Photoshop handoff files. ${result.outputPath}`
           : result.status === 'image_prep'
             ? `Created ImagePrep source files. ${result.outputPath}`
+          : result.status === 'digital_download'
+            ? `Created digital download card. ${result.outputPath}`
           : `Tested ${count} sheet${count === 1 ? '' : 's'}. ${result.outputPath || ''}`;
       } catch (error) {
         status.textContent = error.message || 'Product test failed.';
@@ -8123,6 +8150,7 @@ function bindPackageEditor(selected) {
     try {
       const result = await trecsApi('markPackageCodeReviewed').markPackageCodeReviewed(selected.id, !selected.reviewed);
       jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
+      rememberPackageCodeListScroll();
       drawPackageEditor(selected.id);
       document.querySelector('#packageEditorStatus').textContent = `${result.reviewed ? 'Reviewed' : 'Unreviewed'} ${result.name || result.code}.`;
     } catch (error) {
@@ -8160,11 +8188,13 @@ function bindPackageEditor(selected) {
       const result = await trecsApi('savePackageCode').savePackageCode({ id: form.elements.id.value || null, packagePlanId: jobsState.packageEditorPlanId, code: form.elements.code.value, name: form.elements.name.value, items });
       jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
       status.textContent = 'Saved';
+      rememberPackageCodeListScroll();
       drawPackageEditor(result.id);
     } catch (error) { status.textContent = error.message; }
   });
   document.querySelector('#deletePackageCodeButton').addEventListener('click', async () => {
     if (!selected || !window.confirm(`Delete package code ${selected.code}?`)) return;
+    rememberPackageCodeListScroll();
     await trecsApi('deletePackageCode').deletePackageCode(selected.id);
     jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
     drawPackageEditor();
@@ -8560,20 +8590,28 @@ async function browseUnitRenderOutput() {
 
 async function exportUnitImagePrep() {
   if (jobsState.unitRenderRunning) return;
+  const outputFolder = unitRenderForm.elements.outputFolder.value;
+  if (!outputFolder) {
+    unitRenderStatus.textContent = 'Choose an output folder first.';
+    unitRenderForm.elements.outputFolder.focus();
+    return;
+  }
   const jobId = Number(unitRenderForm.elements.jobId.value);
   if (!(await acquireUiJobLock(jobId, 'image_prep'))) return;
   jobsState.unitRenderRunning = true;
   exportImagePrepButton.disabled = true;
   startUnitRenderButton.disabled = true;
+  browseUnitRenderOutputButton.disabled = true;
   unitRenderProgress.value = 0;
   unitRenderStatus.textContent = 'Exporting ImagePrep source files...';
   try {
     const result = await trecsApi('exportImagePrep').exportImagePrep({
       jobId,
       source: unitRenderForm.elements.source.value,
-      sourceValue: unitRenderForm.elements.sourceValue.value
+      sourceValue: unitRenderForm.elements.sourceValue.value,
+      outputFolder
     });
-    unitRenderStatus.textContent = `Image Prep exported ${result.exported} image${Number(result.exported) === 1 ? '' : 's'} across ${result.prepTypes || 0} prep item${Number(result.prepTypes || 0) === 1 ? '' : 's'}${result.missingPhotos.length ? `; ${result.missingPhotos.length} missing photo(s)` : ''}.`;
+    unitRenderStatus.textContent = `Image Prep exported ${result.exported} image${Number(result.exported) === 1 ? '' : 's'} across ${result.prepTypes || 0} prep item${Number(result.prepTypes || 0) === 1 ? '' : 's'}${result.missingPhotos.length ? `; ${result.missingPhotos.length} missing photo(s)` : ''}. ${result.outputFolder || ''}`;
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'ImagePrep export failed.';
     console.error(error);
@@ -8582,6 +8620,7 @@ async function exportUnitImagePrep() {
     jobsState.unitRenderRunning = false;
     exportImagePrepButton.disabled = false;
     startUnitRenderButton.disabled = false;
+    browseUnitRenderOutputButton.disabled = false;
   }
 }
 
@@ -8611,7 +8650,7 @@ async function submitUnitRender(event) {
       includeLabels: unitRenderForm.elements.includeLabels.checked,
       outputFolder
     });
-    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}.`;
+    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}.`;
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'Render failed.';
     console.error(error);

@@ -2716,6 +2716,7 @@ async function seedDefaultProducts() {
 function productRenderSupport(product) {
   const category = String(product.category || '');
   if (category === 'image_prep') return 'image_prep';
+  if (category === 'digital') return 'digital_download';
   if (category === 'specialty' || isPhotoshopHandoffProduct(product)) return 'photoshop_handoff';
   if (['envelope_text', 'render_modifier', 'service', 'fulfillment', 'workflow', 'package_builder', 'package_marker', 'specialty_bundle'].includes(category)) return 'non_rendering';
   if (['print', 'print_bundle', 'id_card'].includes(category)) return 'renderable';
@@ -2742,6 +2743,11 @@ function isTenByThirteenProduct(product) {
 
 function isImagePrepItem(item) {
   return String(item.category || '').toLowerCase() === 'image_prep';
+}
+
+function isDigitalDownloadItem(item) {
+  return String(item.category || '').toLowerCase() === 'digital'
+    || /digital\s*download/i.test(String(item.productName || item.name || item.rawValue || ''));
 }
 
 function imagePrepFolderName(item) {
@@ -2772,6 +2778,7 @@ async function rasterizeProductRenderTest(webContents, product, outputFolder) {
   const support = productRenderSupport(product);
   if (support === 'image_prep') return writeImagePrepTest(product, outputFolder, { itemNumber: 1, itemTotal: 1 });
   if (support === 'photoshop_handoff') return writePhotoshopHandoffTest(product, outputFolder, { itemNumber: 1, itemTotal: 1 });
+  if (support === 'digital_download') return writeDigitalDownloadTest(webContents, product, outputFolder, { itemNumber: 1, itemTotal: 1 });
   if (support !== 'renderable') return { productId: product.id, name: product.name, status: support };
   const samplePath = await sampleCroppedLargeImagePath();
   if (!samplePath) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'SampleCroppedLarge.jpg was not found in the TRECS data root.' };
@@ -2848,6 +2855,41 @@ async function writeImagePrepTest(product, outputFolder, options = {}) {
   return { productId: product.id, name: product.name, status: 'image_prep', outputFolder: imagePrepRoot, outputPath: imagePath, files: [imagePath, manifestPath], sampleImagePath: samplePath, sheets: 0 };
 }
 
+async function writeDigitalDownloadTest(webContents, product, outputFolder, options = {}) {
+  const samplePath = await sampleCroppedLargeImagePath();
+  if (!samplePath) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'SampleCroppedLarge.jpg was not found in the TRECS data root.' };
+  const imageSource = imageDataUrlFromPath(samplePath);
+  if (!imageSource) return { productId: product.id, name: product.name, status: 'missing_sample', message: 'The SampleCroppedLarge.jpg file could not be read.' };
+  const downloadRoot = path.join(outputFolder, 'DigitalDownload');
+  const encryptedFolder = path.join(downloadRoot, 'ENC');
+  fs.mkdirSync(encryptedFolder, { recursive: true });
+  const order = {
+    ref: options.ref || '10000',
+    jobName: options.jobName || 'FALL_2026',
+    packagePlan: options.packagePlan || 'Standard'
+  };
+  const encryptedName = `${oldTrecsDigitalDownloadCode(order.ref)}.jpg`;
+  const encryptedPath = path.join(encryptedFolder, encryptedName);
+  fs.copyFileSync(samplePath, encryptedPath);
+  const link = digitalDownloadUrl(order);
+  const qrPath = path.join(downloadRoot, `${safeFileToken(product.name || 'DigitalDownload')}_qr.png`);
+  await createQrCodePng(link, qrPath, 300);
+  const cardPath = path.join(downloadRoot, `${safeFileToken(product.name || 'DigitalDownload')}_card.jpg`);
+  const dataUrl = await rasterizeDigitalDownloadCard(webContents, imageSource, imageDataUrlFromPath(qrCodeTemplatePath(order)), imageDataUrlFromPath(qrPath), link);
+  fs.writeFileSync(cardPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+  return {
+    productId: product.id,
+    name: product.name,
+    status: 'digital_download',
+    outputFolder: downloadRoot,
+    outputPath: cardPath,
+    files: [cardPath, qrPath, encryptedPath],
+    sampleImagePath: samplePath,
+    link,
+    sheets: 1
+  };
+}
+
 async function testProductRender(event, productIdValue) {
   const productId = numericId(productIdValue);
   const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
@@ -2888,6 +2930,21 @@ async function testPackageItemRender(event, input = {}) {
         result.files.push(...handoff.files);
       } else {
         result.skipped.push(handoff);
+      }
+    }
+    fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+    return result;
+  }
+  if (support === 'digital_download') {
+    const result = { productId, name: product.name, outputFolder, rendered: 0, digitalDownloads: 0, files: [], skipped: [] };
+    for (let index = 0; index < quantity; index += 1) {
+      const proof = await writeDigitalDownloadTest(event.sender, product, outputFolder, { ref: String(10000 + index), itemNumber: index + 1, itemTotal: quantity });
+      if (proof.status === 'digital_download') {
+        result.rendered += 1;
+        result.digitalDownloads += 1;
+        result.files.push(...proof.files);
+      } else {
+        result.skipped.push(proof);
       }
     }
     fs.writeFileSync(path.join(outputFolder, 'package-item-render-test-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
@@ -2981,6 +3038,13 @@ async function testPackageCodeRender(event, packageCodeIdValue) {
       handoffSheetTotals.set(key, (handoffSheetTotals.get(key) || 0) + quantity);
       return;
     }
+    if (support === 'digital_download') {
+      const quantity = Math.max(1, Number(item.quantity || 1));
+      const key = String(item.name || item.productId).toLowerCase();
+      if (!handoffSortOrders.has(key)) handoffSortOrders.set(key, recipeSortOrders.size + handoffSortOrders.size + 1);
+      handoffSheetTotals.set(key, (handoffSheetTotals.get(key) || 0) + quantity);
+      return;
+    }
     if (support !== 'renderable') return;
     if (isTenByThirteenProduct(item)) {
       const quantity = Math.max(1, Number(item.quantity || 1));
@@ -3024,6 +3088,22 @@ async function testPackageCodeRender(event, packageCodeIdValue) {
         recipeSheetCounters.set(handoffKey, handoffNumber);
         const proof = await writePhotoshopHandoffTest(item, outputFolder, { itemNumber: handoffNumber, itemTotal: handoffTotal });
         if (proof.status === 'photoshop_handoff') {
+          result.rendered += 1;
+          result.files.push(...proof.files);
+        } else {
+          result.skipped.push({ productId: item.productId, name: item.name, status: proof.status, message: proof.message || '' });
+        }
+      }
+      continue;
+    }
+    if (support === 'digital_download') {
+      const handoffKey = String(item.name || item.productId).toLowerCase();
+      const handoffTotal = handoffSheetTotals.get(handoffKey) || quantity;
+      for (let index = 0; index < quantity; index += 1) {
+        const handoffNumber = (recipeSheetCounters.get(handoffKey) || 0) + 1;
+        recipeSheetCounters.set(handoffKey, handoffNumber);
+        const proof = await writeDigitalDownloadTest(event.sender, item, outputFolder, { ref: String(10000 + handoffNumber - 1), itemNumber: handoffNumber, itemTotal: handoffTotal });
+        if (proof.status === 'digital_download') {
           result.rendered += 1;
           result.files.push(...proof.files);
         } else {
@@ -3181,6 +3261,7 @@ function pictureUnitRecipes() {
     { name: '8x10 Group', aliases: ['Group8x10'], sheets: [UNIT_LAYOUTS.eightByTen], expectedPrints: 1 },
     { name: '2-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 2), expectedPrints: 2 },
     { name: '3-8x10', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightByTen, 3), expectedPrints: 3 },
+    { name: '5x7', sheets: [[UNIT_LAYOUTS.twoFiveBySeven[0]]], expectedPrints: 1 },
     { name: '2-5x7', sheets: [UNIT_LAYOUTS.twoFiveBySeven], expectedPrints: 2 },
     { name: '4-5x7', sheets: repeatedUnitSheets(UNIT_LAYOUTS.twoFiveBySeven, 2), expectedPrints: 4 },
     { name: '6-5x7', sheets: repeatedUnitSheets(UNIT_LAYOUTS.twoFiveBySeven, 3), expectedPrints: 6 },
@@ -3188,12 +3269,15 @@ function pictureUnitRecipes() {
     { name: '8-4x5', sheets: repeatedUnitSheets(UNIT_LAYOUTS.fourFourByFive, 2), expectedPrints: 8 },
     { name: '2-3x5', sheets: [UNIT_LAYOUTS.twoThreeByFive], expectedPrints: 2 },
     { name: '4-3x5', sheets: [UNIT_LAYOUTS.fourThreeByFive], expectedPrints: 4 },
+    { name: '6-3x5', sheets: [UNIT_LAYOUTS.fourThreeByFive, UNIT_LAYOUTS.twoThreeByFive], expectedPrints: 6 },
     { name: '8-3x5', sheets: repeatedUnitSheets(UNIT_LAYOUTS.fourThreeByFive, 2), expectedPrints: 8 },
     { name: '4 Wallets', sheets: [UNIT_LAYOUTS.fourWallets], expectedPrints: 4 },
     { name: '8 Wallets', sheets: [UNIT_LAYOUTS.eightWallets], expectedPrints: 8 },
+    { name: '12 Wallets', sheets: [UNIT_LAYOUTS.eightWallets, UNIT_LAYOUTS.fourWallets], expectedPrints: 12 },
     { name: '16 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 2), expectedPrints: 16 },
     { name: '24 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 3), expectedPrints: 24 },
     { name: '32 Wallets', sheets: repeatedUnitSheets(UNIT_LAYOUTS.eightWallets, 4), expectedPrints: 32 },
+    { name: '8 Mini Wallets', sheets: [UNIT_LAYOUTS.sixteenMini.slice(0, 8)], expectedPrints: 8 },
     { name: '16 Mini', sheets: [UNIT_LAYOUTS.sixteenMini], expectedPrints: 16 },
     { name: '2-3x5 & 5x7', sheets: [[...UNIT_LAYOUTS.twoThreeByFive, unitPlacement(0, 1502, 2100, 1500, LEGACY_CROPS.fiveBySeven, true)]], expectedPrints: 3 },
     { name: '4 Wall & 5x7', sheets: [walletFourFiveSeven], expectedPrints: 5 },
@@ -3362,6 +3446,56 @@ function envelopeTemplateDataUrl(order, large = false) {
   return imageDataUrlFromPath(envelopeTemplatePath(order, large));
 }
 
+function qrCodeTemplatePath(order) {
+  const planName = safeFolderName(order.packagePlan || order.packagePlanName || 'Standard');
+  const candidates = [
+    path.join(projectRoot, 'Templates', 'PACKAGE_PLANS', planName, 'QRcode.png'),
+    path.join(projectRoot, 'Templates', 'PACKAGE_PLANS', 'QRcode.png'),
+    path.join(projectRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', 'QRcode.png'),
+    path.join(defaultProjectRoot, 'Templates', 'PACKAGE_PLANS', planName, 'QRcode.png'),
+    path.join(defaultProjectRoot, 'Templates', 'PACKAGE_PLANS', 'QRcode.png'),
+    path.join(defaultProjectRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', 'QRcode.png'),
+    path.join(bundledResourceRoot, 'Templates', 'PACKAGE_PLANS', planName, 'QRcode.png'),
+    path.join(bundledResourceRoot, 'Templates', 'PACKAGE_PLANS', 'QRcode.png'),
+    path.join(bundledResourceRoot, 'Templates', 'PACKAGE_PLANS', 'Standard', 'QRcode.png')
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile()) || null;
+}
+
+function oldTrecsDigitalDownloadCode(ref) {
+  const encoding = { 0: 'X', 1: 'G', 2: 'P', 3: 'B', 4: 'A', 5: 'L', 6: 'R', 7: 'C', 8: 'F', 9: 'H' };
+  return String(ref || '').replace(/\d/g, (digit) => encoding[digit] || digit);
+}
+
+function digitalDownloadUrl(order) {
+  return `http://download.islandphotography.net/${encodeURIComponent(order.jobName || '')}/${oldTrecsDigitalDownloadCode(order.ref)}.jpg`;
+}
+
+function qrToolClasspath() {
+  return [
+    path.join('tools'),
+    path.join('JARS', 'zxing-core-1.7.jar'),
+    path.join('JARS', 'zxing-j2se-1.7.jar')
+  ].join(path.delimiter);
+}
+
+async function ensureQrCodePngTool() {
+  await ensureBundledJavaTool('QrCodePngTool', qrToolClasspath());
+}
+
+async function createQrCodePng(text, outputPath, size = 300) {
+  await ensureQrCodePngTool();
+  await processOutput('java', [
+    '-cp',
+    qrToolClasspath(),
+    'QrCodePngTool',
+    text,
+    String(size),
+    outputPath
+  ], { cwd: bundledResourceRoot });
+  return outputPath;
+}
+
 function preparedImagePathForOrder(order, imagePrepItem) {
   if (!order.rootPath || !imagePrepItem || !order.imagePath) return null;
   const jobRoot = resolveProjectPath(order.rootPath);
@@ -3391,6 +3525,11 @@ async function imagePrepExport(event, input = {}) {
   const jobId = numericId(input.jobId);
   const source = String(input.source || 'all');
   const sourceValue = optionalText(input.sourceValue, 255);
+  const outputFolderValue = normalizeText(input.outputFolder, 'Output folder', 1000);
+  const selectedOutputFolder = path.resolve(outputFolderValue);
+  if (!fs.existsSync(selectedOutputFolder) || !fs.statSync(selectedOutputFolder).isDirectory()) {
+    throw new Error('Choose a valid output folder.');
+  }
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']);
   if (!allowedSources.has(source)) throw new Error('Invalid ImagePrep source.');
   const orders = await querySql(`
@@ -3424,7 +3563,7 @@ async function imagePrepExport(event, input = {}) {
   itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
   const jobRoot = resolveProjectPath(orders[0].rootPath);
   if (!jobRoot || !fs.existsSync(jobRoot) || !fs.statSync(jobRoot).isDirectory()) throw new Error('The job folder could not be found.');
-  const imagePrepRoot = path.join(jobRoot, 'ImagePrep');
+  const imagePrepRoot = path.join(selectedOutputFolder, 'ImagePrep');
   fs.mkdirSync(imagePrepRoot, { recursive: true });
   const result = { jobId, outputFolder: imagePrepRoot, prepTypes: 0, exported: 0, missingPhotos: [], skippedOrders: 0, files: [], folders: [] };
   const folderSet = new Set();
@@ -3599,6 +3738,45 @@ function orderLabelSvg(order, contents, imageSource) {
     <text x="580" y="505" font-family="Arial" font-size="34">Ref Num: ${escapeXml(order.ref || '')}</text><text x="580" y="555" font-family="monospace" font-size="42">*${escapeXml(order.ref || '')}*</text></svg>`;
 }
 
+async function rasterizeDigitalDownloadCard(webContents, imageSource, templateSource, qrSource, link) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode a digital download card image.'));
+      image.src = source;
+    });
+    Promise.all([load(${JSON.stringify(imageSource)}), load(${JSON.stringify(templateSource)}), load(${JSON.stringify(qrSource)})]).then(([studentImage, templateImage, qrImage]) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1200;
+        canvas.height = 1800;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (studentImage) {
+          const imageWidth = 780;
+          const imageHeight = Math.round(studentImage.naturalHeight * (imageWidth / studentImage.naturalWidth));
+          context.drawImage(studentImage, 200, 160, imageWidth, imageHeight);
+        }
+        if (templateImage) {
+          context.drawImage(templateImage, 0, 0, 1200, 1800);
+        }
+        context.fillStyle = '#111';
+        context.font = '30px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'alphabetic';
+        context.fillText(${JSON.stringify(link)}, 600, 1300);
+        if (qrImage) {
+          context.drawImage(qrImage, 225, 1400, 300, 300);
+        }
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
 async function runUnitRender(event, input = {}) {
   const jobId = numericId(input.jobId); const outputFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
   if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
@@ -3625,10 +3803,10 @@ async function runUnitRender(event, input = {}) {
   `) : [];
   const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []])); itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
   selectedOrders.sort((a, b) => unitRenderSortValue(a, sortBy).localeCompare(unitRenderSortValue(b, sortBy)));
-  const folders = { units: path.join(outputFolder, 'Units'), tenByThirteens: path.join(outputFolder, '10x13s'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
+  const folders = { units: path.join(outputFolder, 'Units'), tenByThirteens: path.join(outputFolder, '10x13s'), digitalDownloads: path.join(outputFolder, 'DigitalDownload'), encryptedDownloads: path.join(outputFolder, 'DigitalDownload', 'ENC'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
   Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
   const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
-  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
     const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
@@ -3640,13 +3818,46 @@ async function runUnitRender(event, input = {}) {
     const contents = items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
     const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
     if (input.includeUnits !== false) {
-      if (imagePrepItem && !preparedPath) result.missingImagePrep.push({ orderId: order.id, ref: order.ref, prepType: imagePrepFolderName(imagePrepItem) });
-      else if (!imageSource) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
-      else for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      let notedMissingImagePrep = false;
+      let notedMissingPhoto = false;
+      for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
         const item = items[itemIndex];
         if (isImagePrepItem(item)) continue;
+        if (isDigitalDownloadItem(item)) {
+          if (!envelopeImageSource) {
+            if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+            notedMissingPhoto = true;
+            continue;
+          }
+          const sourcePath = resolveProjectPath(order.imagePath);
+          if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+            if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+            notedMissingPhoto = true;
+            continue;
+          }
+          const encryptedName = `${oldTrecsDigitalDownloadCode(order.ref)}.jpg`;
+          const encryptedPath = path.join(folders.encryptedDownloads, encryptedName);
+          fs.copyFileSync(sourcePath, encryptedPath);
+          const link = digitalDownloadUrl(order);
+          const qrPath = path.join(folders.digitalDownloads, `${prefix}_qr.png`);
+          await createQrCodePng(link, qrPath, 300);
+          const dataUrl = await rasterizeDigitalDownloadCard(event.sender, envelopeImageSource, imageDataUrlFromPath(qrCodeTemplatePath(order)), imageDataUrlFromPath(qrPath), link);
+          fs.writeFileSync(path.join(folders.digitalDownloads, `${prefix}_DigitalDownload_${itemIndex + 1}.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+          result.digitalDownloads += 1;
+          continue;
+        }
         const support = productRenderSupport({ ...item, name: item.productName || item.rawValue });
         if (support === 'non_rendering') continue;
+        if (imagePrepItem && !preparedPath) {
+          if (!notedMissingImagePrep) result.missingImagePrep.push({ orderId: order.id, ref: order.ref, prepType: imagePrepFolderName(imagePrepItem) });
+          notedMissingImagePrep = true;
+          continue;
+        }
+        if (!imageSource) {
+          if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+          notedMissingPhoto = true;
+          continue;
+        }
         if (isTenByThirteenProduct(item)) {
           for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) {
             const dataUrl = await rasterizeTenByThirteen(event.sender, imageSource, {
