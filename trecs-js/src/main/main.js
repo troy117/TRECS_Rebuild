@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage } = require('elec
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
@@ -1596,6 +1597,407 @@ async function saveStudentFieldSettings(_event, input = {}) {
   return settings;
 }
 
+const PRODUCTION_SYNC_SETTINGS_KEY = 'production_status_sync';
+const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
+
+function base64Url(input) {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function httpsJsonRequest(urlValue, options = {}, body = null) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlValue);
+    const request = https.request({
+      method: options.method || 'GET',
+      hostname: url.hostname,
+      path: `${url.pathname}${url.search}`,
+      headers: options.headers || {}
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let payload = {};
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (_error) {
+            payload = { raw: text };
+          }
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(payload.error_description || payload.error?.message || payload.error || `Google request failed with status ${response.statusCode}`));
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+function readServiceAccountCredentials(credentialsPath) {
+  const filePath = normalizeText(credentialsPath, 'Service account JSON', 1000);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error('Service account JSON file was not found');
+  }
+  const credentials = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  if (!credentials.client_email || !credentials.private_key) {
+    throw new Error('Service account JSON must include client_email and private_key');
+  }
+  return credentials;
+}
+
+async function googleSheetsAccessToken(credentialsPath) {
+  const credentials = readServiceAccountCredentials(credentialsPath);
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claim = {
+    iss: credentials.client_email,
+    scope: GOOGLE_SHEETS_SCOPE,
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now
+  };
+  const unsignedToken = `${base64Url(JSON.stringify(header))}.${base64Url(JSON.stringify(claim))}`;
+  const signature = crypto.createSign('RSA-SHA256').update(unsignedToken).sign(credentials.private_key);
+  const assertion = `${unsignedToken}.${base64Url(signature)}`;
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion
+  }).toString();
+  const response = await httpsJsonRequest('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': Buffer.byteLength(body)
+    }
+  }, body);
+  if (!response.access_token) throw new Error('Google did not return an access token');
+  return { accessToken: response.access_token, serviceAccountEmail: credentials.client_email };
+}
+
+function googleAuthHeaders(accessToken) {
+  return { Authorization: `Bearer ${accessToken}` };
+}
+
+function quoteSheetName(name) {
+  return `'${String(name || '').replace(/'/g, "''")}'`;
+}
+
+async function googleSheetValues(settings, range) {
+  const { accessToken, serviceAccountEmail } = await googleSheetsAccessToken(settings.credentialsPath);
+  const encodedRange = encodeURIComponent(`${quoteSheetName(settings.sheetName)}!${range}`);
+  const response = await httpsJsonRequest(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}/values/${encodedRange}?valueRenderOption=FORMATTED_VALUE`, {
+    headers: googleAuthHeaders(accessToken)
+  });
+  return { values: response.values || [], serviceAccountEmail };
+}
+
+async function googleSheetBatchUpdate(settings, updates) {
+  const { accessToken, serviceAccountEmail } = await googleSheetsAccessToken(settings.credentialsPath);
+  const body = JSON.stringify({
+    valueInputOption: 'USER_ENTERED',
+    data: updates.map((update) => ({
+      range: `${quoteSheetName(settings.sheetName)}!${update.range}`,
+      values: [[update.value]]
+    }))
+  });
+  const response = await httpsJsonRequest(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}/values:batchUpdate`, {
+    method: 'POST',
+    headers: {
+      ...googleAuthHeaders(accessToken),
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body)
+    }
+  }, body);
+  return { ...response, serviceAccountEmail };
+}
+
+function defaultProductionSyncSettings() {
+  return {
+    credentialsPath: '',
+    spreadsheetId: '',
+    sheetName: '2025 FALL',
+    headerRow: 2,
+    firstDataRow: 3,
+    lastColumn: 'AD'
+  };
+}
+
+function normalizeProductionSyncSettings(input = {}) {
+  return {
+    ...defaultProductionSyncSettings(),
+    credentialsPath: optionalText(input.credentialsPath, 1000),
+    spreadsheetId: optionalText(input.spreadsheetId, 255),
+    sheetName: optionalText(input.sheetName, 120) || '2025 FALL',
+    headerRow: Math.max(1, Number.parseInt(input.headerRow, 10) || 2),
+    firstDataRow: Math.max(1, Number.parseInt(input.firstDataRow, 10) || 3),
+    lastColumn: optionalText(input.lastColumn, 5) || 'AD'
+  };
+}
+
+async function getProductionSyncSettings() {
+  const rows = await querySql(`SELECT value_json AS valueJson FROM app_settings WHERE key = '${PRODUCTION_SYNC_SETTINGS_KEY}';`);
+  if (!rows.length) return defaultProductionSyncSettings();
+  try {
+    return normalizeProductionSyncSettings(JSON.parse(rows[0].valueJson));
+  } catch (_error) {
+    return defaultProductionSyncSettings();
+  }
+}
+
+async function saveProductionSyncSettings(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  await writeSql((database) => {
+    database.run(`
+      INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP);
+    `, [PRODUCTION_SYNC_SETTINGS_KEY, JSON.stringify(settings)]);
+    return settings;
+  });
+  return settings;
+}
+
+async function chooseProductionSyncCredentials(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
+    title: 'Choose Google Service Account JSON',
+    properties: ['openFile'],
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  const credentials = readServiceAccountCredentials(result.filePaths[0]);
+  return { canceled: false, filePath: result.filePaths[0], serviceAccountEmail: credentials.client_email };
+}
+
+function normalizeProductionHeader(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function spreadsheetColumnName(index) {
+  let value = index + 1;
+  let name = '';
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+function shortSheetDate(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function productionStatusValue(dateValue) {
+  return dateValue ? shortSheetDate(dateValue) : '';
+}
+
+function productionHeaderIndex(headers, candidates) {
+  const normalized = headers.map(normalizeProductionHeader);
+  for (const candidate of candidates.map(normalizeProductionHeader)) {
+    const exactIndex = normalized.findIndex((header) => header === candidate);
+    if (exactIndex !== -1) return exactIndex;
+  }
+  for (const candidate of candidates.map(normalizeProductionHeader)) {
+    const containsIndex = normalized.findIndex((header) => header.includes(candidate) || candidate.includes(header));
+    if (containsIndex !== -1) return containsIndex;
+  }
+  return -1;
+}
+
+function productionJobNameKey(value) {
+  return normalizeProductionHeader(value).replace(/\b(elem|elementary|school|academy|campus|site)\b/g, '').replace(/\s+/g, ' ').trim();
+}
+
+async function productionSyncJobRows() {
+  return querySql(`
+    WITH subject_counts AS (
+      SELECT job_id, COUNT(*) AS subjects, SUM(CASE WHEN primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END) AS photographed
+      FROM subjects
+      GROUP BY job_id
+    ),
+    order_counts AS (
+      SELECT job_id,
+             COUNT(*) AS orders,
+             SUM(CASE WHEN source = 'paper' THEN 1 ELSE 0 END) AS paperOrders,
+             SUM(CASE WHEN source = 'online' THEN 1 ELSE 0 END) AS onlineOrders,
+             SUM(CASE WHEN render_status = 'rendered' THEN 1 ELSE 0 END) AS renderedOrders,
+             MAX(CASE WHEN source = 'paper' THEN COALESCE(updated_at, created_at) ELSE NULL END) AS latestPaperOrderAt,
+             MAX(CASE WHEN source = 'online' THEN COALESCE(updated_at, created_at) ELSE NULL END) AS latestOnlineOrderAt
+      FROM orders
+      GROUP BY job_id
+    ),
+    admin_counts AS (
+      SELECT job_id,
+             MAX(CASE WHEN admin_item_type = 'onsite_setup' AND status = 'complete' THEN completed_at ELSE NULL END) AS onsiteSetupAt,
+             MAX(CASE WHEN admin_item_type != 'onsite_setup' AND status = 'complete' THEN completed_at ELSE NULL END) AS adminDoneAt
+      FROM admin_item_batches
+      GROUP BY job_id
+    ),
+    eod_counts AS (
+      SELECT job_id, COUNT(*) AS endOfDays, MAX(imported_at) AS latestEndOfDayAt
+      FROM end_of_day_imports
+      GROUP BY job_id
+    ),
+    render_counts AS (
+      SELECT job_id, MAX(finished_at) AS latestRenderAt
+      FROM render_batches
+      WHERE status = 'complete'
+      GROUP BY job_id
+    )
+    SELECT
+      j.id,
+      c.display_name AS clientName,
+      c.trecs_name AS trecsName,
+      j.name AS jobName,
+      j.type AS jobType,
+      COALESCE(sc.subjects, 0) AS subjects,
+      COALESCE(sc.photographed, 0) AS photographed,
+      COALESCE(oc.orders, 0) AS orders,
+      COALESCE(oc.paperOrders, 0) AS paperOrders,
+      COALESCE(oc.onlineOrders, 0) AS onlineOrders,
+      COALESCE(oc.renderedOrders, 0) AS renderedOrders,
+      oc.latestPaperOrderAt,
+      oc.latestOnlineOrderAt,
+      ac.onsiteSetupAt,
+      ac.adminDoneAt,
+      COALESCE(eod.endOfDays, 0) AS endOfDays,
+      eod.latestEndOfDayAt,
+      rc.latestRenderAt
+    FROM jobs j
+    JOIN clients c ON c.id = j.client_id
+    LEFT JOIN subject_counts sc ON sc.job_id = j.id
+    LEFT JOIN order_counts oc ON oc.job_id = j.id
+    LEFT JOIN admin_counts ac ON ac.job_id = j.id
+    LEFT JOIN eod_counts eod ON eod.job_id = j.id
+    LEFT JOIN render_counts rc ON rc.job_id = j.id
+    WHERE j.status != 'archived'
+    ORDER BY c.display_name, j.name;
+  `);
+}
+
+function productionComputedValues(job) {
+  const values = {};
+  if (job.onsiteSetupAt) values.onsiteSetup = 'done';
+  if (Number(job.endOfDays || 0) > 0) values.mergeData = productionStatusValue(job.latestEndOfDayAt);
+  if (job.adminDoneAt) values.adminDone = productionStatusValue(job.adminDoneAt);
+  if (Number(job.paperOrders || 0) > 0) values.paperOrders = productionStatusValue(job.latestPaperOrderAt);
+  if (Number(job.onlineOrders || 0) > 0) values.onlineOrders = productionStatusValue(job.latestOnlineOrderAt);
+  if (Number(job.orders || 0) > 0 && Number(job.renderedOrders || 0) >= Number(job.orders || 0)) {
+    values.render = productionStatusValue(job.latestRenderAt) || 'done';
+  }
+  return values;
+}
+
+const PRODUCTION_SYNC_COLUMNS = [
+  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
+  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
+  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
+  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
+  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
+  { key: 'render', label: 'RENDER', headers: ['RENDER'] }
+];
+
+async function previewProductionStatusSync(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  if (!settings.credentialsPath || !settings.spreadsheetId || !settings.sheetName) {
+    throw new Error('Production sync needs credentials, spreadsheet ID, and sheet tab');
+  }
+  const { values, serviceAccountEmail } = await googleSheetValues(settings, `A1:${settings.lastColumn}500`);
+  const headers = values[settings.headerRow - 1] || [];
+  const schoolColumnIndex = productionHeaderIndex(headers, ['School / Site', 'School Site', 'School']);
+  const jobTypeColumnIndex = productionHeaderIndex(headers, ['Job TYPE', 'Job Type']);
+  if (schoolColumnIndex === -1) throw new Error('Could not find the School / Site column in the tracker header row');
+  const columnIndexes = {};
+  PRODUCTION_SYNC_COLUMNS.forEach((column) => {
+    columnIndexes[column.key] = productionHeaderIndex(headers, column.headers);
+  });
+  const jobs = await productionSyncJobRows();
+  const jobsByName = new Map();
+  jobs.forEach((job) => {
+    const keys = [job.clientName, job.trecsName].map(productionJobNameKey).filter(Boolean);
+    keys.forEach((key) => {
+      if (!jobsByName.has(key)) jobsByName.set(key, []);
+      jobsByName.get(key).push(job);
+    });
+  });
+  const matched = [];
+  const unmatchedRows = [];
+  const updates = [];
+  for (let rowIndex = settings.firstDataRow - 1; rowIndex < values.length; rowIndex += 1) {
+    const row = values[rowIndex] || [];
+    const schoolName = row[schoolColumnIndex] || '';
+    if (!String(schoolName).trim()) continue;
+    const candidates = jobsByName.get(productionJobNameKey(schoolName)) || [];
+    if (!candidates.length) {
+      unmatchedRows.push({ rowNumber: rowIndex + 1, schoolName });
+      continue;
+    }
+    const sheetJobType = jobTypeColumnIndex === -1 ? '' : String(row[jobTypeColumnIndex] || '').toLowerCase();
+    const job = candidates.find((candidate) => sheetJobType && sheetJobType.includes(String(candidate.jobType || '').toLowerCase()))
+      || candidates.find((candidate) => /fall/i.test(candidate.jobName || ''))
+      || candidates[0];
+    const computed = productionComputedValues(job);
+    const rowUpdates = [];
+    PRODUCTION_SYNC_COLUMNS.forEach((column) => {
+      const columnIndex = columnIndexes[column.key];
+      const nextValue = computed[column.key];
+      if (columnIndex === -1 || !nextValue) return;
+      const currentValue = row[columnIndex] || '';
+      if (String(currentValue).trim() === String(nextValue).trim()) return;
+      const range = `${spreadsheetColumnName(columnIndex)}${rowIndex + 1}`;
+      const update = {
+        jobId: job.id,
+        schoolName,
+        jobName: job.jobName,
+        rowNumber: rowIndex + 1,
+        key: column.key,
+        label: column.label,
+        range,
+        currentValue,
+        value: nextValue
+      };
+      rowUpdates.push(update);
+      updates.push(update);
+    });
+    matched.push({ rowNumber: rowIndex + 1, schoolName, jobId: job.id, jobName: job.jobName, jobType: job.jobType, updates: rowUpdates });
+  }
+  return {
+    settings,
+    serviceAccountEmail,
+    headersFound: PRODUCTION_SYNC_COLUMNS.filter((column) => columnIndexes[column.key] !== -1).map((column) => column.label),
+    matched,
+    unmatchedRows,
+    updates,
+    totals: {
+      matchedRows: matched.length,
+      unmatchedRows: unmatchedRows.length,
+      updates: updates.length
+    }
+  };
+}
+
+async function pushProductionStatusSync(_event, input = {}) {
+  const preview = await previewProductionStatusSync(_event, input);
+  if (!preview.updates.length) return { ...preview, pushed: 0 };
+  const response = await googleSheetBatchUpdate(preview.settings, preview.updates);
+  const refreshed = await previewProductionStatusSync(_event, preview.settings);
+  return {
+    ...refreshed,
+    pushed: Number(response.totalUpdatedCells || preview.updates.length),
+    serviceAccountEmail: response.serviceAccountEmail || refreshed.serviceAccountEmail
+  };
+}
+
 function displayNameForSubject(firstName, lastName, displayName) {
   const explicitName = optionalText(displayName, 255);
   if (explicitName) {
@@ -2895,6 +3297,21 @@ function isImagePrepItem(item) {
   return String(item.category || '').toLowerCase() === 'image_prep';
 }
 
+function isPhotoshopHandoffItem(item) {
+  return productRenderSupport({ ...item, name: item.productName || item.name || item.rawValue }) === 'photoshop_handoff';
+}
+
+function isIdCardItem(item) {
+  const category = String(item.category || '').toLowerCase();
+  const text = String(item.productName || item.name || item.rawValue || '').toLowerCase();
+  return category === 'id_card' || /\bbonus\s*id\b|\bstudent\s*id\b/.test(text);
+}
+
+function isDeferredCompositeItem(item) {
+  const text = String(item.productName || item.name || item.rawValue || '').toLowerCase();
+  return /\bstar\s*photo\b|\bstar\s*class\b|\bclass\s*photo\b|\btraditional\s*class\b/.test(text);
+}
+
 function isDigitalDownloadItem(item) {
   return String(item.category || '').toLowerCase() === 'digital'
     || /digital\s*download/i.test(String(item.productName || item.name || item.rawValue || ''));
@@ -2903,6 +3320,115 @@ function isDigitalDownloadItem(item) {
 function imagePrepFolderName(item) {
   const metadata = parseProductMetadata(item.metadataJson);
   return safeFolderName(metadata.image_prep_folder || item.productName || item.rawValue || item.name || 'ImagePrep');
+}
+
+const CRC32_TABLE = (() => {
+  const table = [];
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) ? (0xEDB88320 ^ (value >>> 1)) : (value >>> 1);
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buffer) {
+  let crc = 0xFFFFFFFF;
+  for (let index = 0; index < buffer.length; index += 1) {
+    crc = CRC32_TABLE[(crc ^ buffer[index]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function zipDosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+
+function writeStoredZip(zipPath, entries) {
+  const fileParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const { dosTime, dosDate } = zipDosDateTime();
+  entries.forEach((entry) => {
+    const data = fs.readFileSync(entry.path);
+    const name = Buffer.from(String(entry.name || path.basename(entry.path)).replace(/\\/g, '/'), 'utf8');
+    const checksum = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034B50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    fileParts.push(local, name, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014B50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(dosTime, 12);
+    central.writeUInt16LE(dosDate, 14);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + data.length;
+  });
+
+  const centralSize = centralParts.reduce((total, part) => total + part.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054B50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+  fs.writeFileSync(zipPath, Buffer.concat([...fileParts, ...centralParts, end]));
+  return zipPath;
+}
+
+function zipSourceEntriesForOrder(order, imagePrepItems) {
+  const entries = [];
+  const seen = new Set();
+  const originalPath = resolveProjectPath(order.imagePath);
+  if (originalPath && fs.existsSync(originalPath) && fs.statSync(originalPath).isFile()) {
+    const originalName = path.basename(originalPath);
+    entries.push({ path: originalPath, name: `CroppedLarge/${originalName}` });
+    seen.add(originalPath.toLowerCase());
+  }
+  imagePrepItems.forEach((item) => {
+    const preparedPath = preparedImagePathForOrder(order, item);
+    if (!preparedPath || !fs.existsSync(preparedPath) || !fs.statSync(preparedPath).isFile()) return;
+    const key = preparedPath.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({
+      path: preparedPath,
+      name: `ImagePrep/${imagePrepFolderName(item)}/${path.basename(preparedPath)}`
+    });
+  });
+  return entries;
 }
 
 function findFirstImageFile(folder) {
@@ -3022,18 +3548,19 @@ async function writeDigitalDownloadTest(webContents, product, outputFolder, opti
   const encryptedPath = path.join(encryptedFolder, encryptedName);
   fs.copyFileSync(samplePath, encryptedPath);
   const link = digitalDownloadUrl(order);
-  const qrPath = path.join(downloadRoot, `${safeFileToken(product.name || 'DigitalDownload')}_qr.png`);
+  const qrPath = path.join(os.tmpdir(), `trecs-digital-download-${APP_SESSION_ID}-${Date.now()}-${safeFileToken(product.name || 'DigitalDownload')}.png`);
   await createQrCodePng(link, qrPath, 300);
   const cardPath = path.join(downloadRoot, `${safeFileToken(product.name || 'DigitalDownload')}_card.jpg`);
   const dataUrl = await rasterizeDigitalDownloadCard(webContents, imageSource, imageDataUrlFromPath(qrCodeTemplatePath(order)), imageDataUrlFromPath(qrPath), link);
   fs.writeFileSync(cardPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+  fs.rmSync(qrPath, { force: true });
   return {
     productId: product.id,
     name: product.name,
     status: 'digital_download',
     outputFolder: downloadRoot,
     outputPath: cardPath,
-    files: [cardPath, qrPath, encryptedPath],
+    files: [cardPath, encryptedPath],
     sampleImagePath: samplePath,
     link,
     sheets: 1
@@ -3570,6 +4097,116 @@ function unitRenderSortValue(order, sortBy) {
   return `${order.lastName || 'No Last'}_${order.firstName || ''}`;
 }
 
+function unitRenderGroupValue(order, sortBy) {
+  if (sortBy === 'grade') return order.grade || 'No Grade';
+  if (sortBy === 'homeroom') return order.homeroom || 'No Homeroom';
+  return 'Alpha';
+}
+
+function excelSheetName(value) {
+  return String(value || 'Sheet1').replace(/[\\/?*:[\]]/g, ' ').slice(0, 31) || 'Sheet1';
+}
+
+function applyExcelColumnWidths(worksheet, widths) {
+  worksheet['!cols'] = widths.map((width) => ({ wch: width }));
+}
+
+function writeUnitRenderDeliveryReport(outputFolder, jobSummary, orders, itemsByOrder, sortBy) {
+  const workbook = XLSX.utils.book_new();
+  const rows = [
+    [jobSummary.clientName || 'School'],
+    [`${jobSummary.jobName || ''} Picture Packages`.trim()],
+    [`Created ${new Date().toLocaleString()}`],
+    [],
+    ['Ref', 'First', 'Last', 'Grade', 'Homeroom', 'Package Codes', 'Order Contents']
+  ];
+  const rowBreaks = [];
+  let currentGroup = '';
+  orders.forEach((order) => {
+    const group = unitRenderGroupValue(order, sortBy);
+    if (currentGroup && group !== currentGroup && sortBy !== 'last') {
+      rowBreaks.push({ id: rows.length });
+    }
+    currentGroup = group;
+    const items = itemsByOrder.get(Number(order.id)) || [];
+    rows.push([
+      order.ref || '',
+      order.firstName || '',
+      order.lastName || '',
+      order.grade || '',
+      order.homeroom || '',
+      order.packageCodes || '',
+      items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`).filter(Boolean).join(', ')
+    ]);
+  });
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 6 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 6 } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 6 } }
+  ];
+  worksheet['!freeze'] = { xSplit: 0, ySplit: 5 };
+  worksheet['!autofilter'] = { ref: `A5:G${Math.max(5, rows.length)}` };
+  worksheet['!rowBreaks'] = rowBreaks;
+  worksheet['!margins'] = { left: 0.25, right: 0.25, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 };
+  worksheet['!pageSetup'] = { orientation: 'landscape', fitToWidth: 1, fitToHeight: 0 };
+  applyExcelColumnWidths(worksheet, [12, 18, 22, 10, 18, 18, 70]);
+  XLSX.utils.book_append_sheet(workbook, worksheet, excelSheetName('Classroom Delivery'));
+  const outputPath = path.join(outputFolder, `${safeFolderName(jobSummary.clientName || 'School')}_delivery_orders.xlsx`);
+  XLSX.writeFile(workbook, outputPath);
+  return outputPath;
+}
+
+function writeUnitRenderJobSummaryReport(outputFolder, jobSummary, result, itemTally) {
+  const workbook = XLSX.utils.book_new();
+  const summaryRows = [
+    ['School', jobSummary.clientName || 'School'],
+    ['Job', jobSummary.jobName || ''],
+    ['Created', new Date().toLocaleString()],
+    ['Output Folder', outputFolder],
+    [],
+    ['Output', 'Count'],
+    ['Orders', result.orders || 0],
+    ['Unit Sheets', result.units || 0],
+    ['10x13s', result.tenByThirteens || 0],
+    ['Digital Downloads', result.digitalDownloads || 0],
+    ['Zip Files', result.zipFiles || 0],
+    ['ID Cards', result.idCards || 0],
+    ['Deferred Class/Star Composite Items', result.deferredComposites || 0],
+    ['AddOns', result.addons || 0],
+    ['Envelopes', result.envelopes || 0],
+    ['Big Envelopes', result.largeEnvelopes || 0],
+    ['Labels', result.labels || 0],
+    ['Missing Photos', result.missingPhotos?.length || 0],
+    ['Missing ImagePrep Images', result.missingImagePrep?.length || 0],
+    ['Unsupported Items', result.unsupportedItems?.length || 0]
+  ];
+  const summarySheet = XLSX.utils.aoa_to_sheet(summaryRows);
+  applyExcelColumnWidths(summarySheet, [28, 80]);
+  XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
+
+  const itemRows = [['Item', 'Count'], ...Array.from(itemTally.entries()).sort((a, b) => a[0].localeCompare(b[0]))];
+  const itemSheet = XLSX.utils.aoa_to_sheet(itemRows);
+  itemSheet['!autofilter'] = { ref: `A1:B${Math.max(1, itemRows.length)}` };
+  applyExcelColumnWidths(itemSheet, [55, 12]);
+  XLSX.utils.book_append_sheet(workbook, itemSheet, 'Item Counts');
+
+  const issueRows = [
+    ['Type', 'Ref', 'Details'],
+    ...(result.missingPhotos || []).map((item) => ['Missing Photo', item.ref || '', `Order ${item.orderId || ''}`]),
+    ...(result.missingImagePrep || []).map((item) => ['Missing ImagePrep', item.ref || '', item.prepType || '']),
+    ...(result.unsupportedItems || []).map((item) => ['Unsupported Item', item.ref || '', item.item || ''])
+  ];
+  const issueSheet = XLSX.utils.aoa_to_sheet(issueRows);
+  issueSheet['!autofilter'] = { ref: `A1:C${Math.max(1, issueRows.length)}` };
+  applyExcelColumnWidths(issueSheet, [22, 14, 60]);
+  XLSX.utils.book_append_sheet(workbook, issueSheet, 'Issues');
+
+  const outputPath = path.join(outputFolder, `${safeFolderName(jobSummary.clientName || 'School')}_render_summary.xlsx`);
+  XLSX.writeFile(workbook, outputPath);
+  return outputPath;
+}
+
 function imageDataUrlFromPath(imagePathValue) {
   const filePath = resolveProjectPath(imagePathValue);
   if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return null;
@@ -3715,8 +4352,17 @@ async function imagePrepExport(event, input = {}) {
   if (!jobRoot || !fs.existsSync(jobRoot) || !fs.statSync(jobRoot).isDirectory()) throw new Error('The job folder could not be found.');
   const imagePrepRoot = path.join(selectedOutputFolder, 'ImagePrep');
   fs.mkdirSync(imagePrepRoot, { recursive: true });
-  const result = { jobId, outputFolder: imagePrepRoot, prepTypes: 0, exported: 0, missingPhotos: [], skippedOrders: 0, files: [], folders: [] };
-  const folderSet = new Set();
+  const instructionsPath = path.join(imagePrepRoot, 'instructions.txt');
+  const instructionRows = [[
+    'Image Prep Item',
+    'Image',
+    'Student First',
+    'Student Last',
+    'Grade'
+  ]];
+  const result = { jobId, outputFolder: imagePrepRoot, prepTypes: 0, exported: 0, missingPhotos: [], skippedOrders: 0, files: [], folders: [imagePrepRoot] };
+  const prepTypeSet = new Set();
+  const copiedImages = new Set();
   for (let index = 0; index < orders.length; index += 1) {
     const order = orders[index];
     event.sender.send('unit-render:progress', { current: index, total: orders.length, message: `ImagePrep ${order.firstName || ''} ${order.lastName || ''}`.trim() });
@@ -3731,35 +4377,31 @@ async function imagePrepExport(event, input = {}) {
       continue;
     }
     const outputName = path.basename(sourcePath);
+    const outputPath = path.join(imagePrepRoot, outputName);
+    if (!copiedImages.has(outputPath) && !fs.existsSync(outputPath)) {
+      fs.copyFileSync(sourcePath, outputPath);
+    }
+    copiedImages.add(outputPath);
+    if (!result.files.includes(outputPath)) {
+      result.files.push(outputPath);
+    }
     for (const item of prepItems) {
-      const prepType = imagePrepFolderName(item);
-      const outputFolder = path.join(imagePrepRoot, prepType);
-      fs.mkdirSync(outputFolder, { recursive: true });
-      folderSet.add(outputFolder);
-      const outputPath = path.join(outputFolder, outputName);
-      if (!fs.existsSync(outputPath)) fs.copyFileSync(sourcePath, outputPath);
-      const infoPath = path.join(outputFolder, `${path.basename(outputName, path.extname(outputName))}.txt`);
-      const lines = [
-        `Prep Type: ${prepType}`,
-        `Product: ${item.productName || item.rawValue || ''}`,
-        `School: ${order.clientName || ''}`,
-        `Job: ${order.jobName || ''}`,
-        `Reference: ${order.ref || ''}`,
-        `Student First: ${order.firstName || ''}`,
-        `Student Last: ${order.lastName || ''}`,
-        `Student Name: ${order.lastName || ''}, ${order.firstName || ''}`,
-        `Grade: ${order.grade || ''}`,
-        `Homeroom: ${order.homeroom || ''}`,
-        `Source Image: ${outputName}`
-      ];
-      fs.writeFileSync(infoPath, `${lines.join('\r\n')}\r\n`, 'utf8');
+      const prepTitle = imagePrepFolderName(item);
+      prepTypeSet.add(prepTitle);
+      instructionRows.push([
+        prepTitle,
+        outputName,
+        order.firstName || '',
+        order.lastName || '',
+        order.grade || ''
+      ]);
       result.exported += 1;
-      result.files.push(outputPath, infoPath);
     }
   }
-  result.folders = Array.from(folderSet);
-  result.prepTypes = result.folders.length;
-  fs.writeFileSync(path.join(imagePrepRoot, 'image-prep-export-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(instructionsPath, `${instructionRows.map((row) => row.map(csvValue).join(',')).join('\r\n')}\r\n`, 'utf8');
+  result.files.push(instructionsPath);
+  result.prepTypes = prepTypeSet.size;
+  result.copiedImages = copiedImages.size;
   event.sender.send('unit-render:progress', { current: orders.length, total: orders.length, message: 'ImagePrep export complete' });
   return result;
 }
@@ -3865,27 +4507,38 @@ function envelopeSvg(order, contents, imageSource, large = false, templateSource
   const contentFontSize = large ? 50 : 44; const contentLineHeight = large ? 65 : 62;
   const safeContents = contents.slice(0, 18);
   const mailHome = safeContents.some((content) => /mail home/i.test(content));
+  const studentName = `${order.firstName || ''} ${order.lastName || ''}`.trim();
+  const nameFontSize = fitSvgFontSize(studentName, large ? 2050 : 1450, large ? 126 : 120, large ? 72 : 58, 'bold');
+  const sideText = `${order.grade || ''}: ${order.homeroom || ''}`;
+  const sideFontSize = fitSvgFontSize(sideText, large ? 1100 : 760, large ? 72 : 68, 42);
+  const barcodeX = photoX;
+  const barcodeY = photoY + photoHeight + 165;
+  const barcodeWidth = large ? 660 : 620;
+  const barcodeHeight = large ? 128 : 110;
   const fallbackBackground = `<rect width="${width}" height="${height}" fill="white"/><rect x="20" y="20" width="${width - 40}" height="${height - 40}" fill="none" stroke="#9aa8b2" stroke-width="8" stroke-dasharray="28 18"/><rect x="20" y="20" width="${width - 40}" height="220" fill="#e9eef2"/><text x="70" y="115" font-family="Arial" font-size="62" font-weight="bold">${large ? 'LARGE ' : ''}ORDER ENVELOPE</text><text x="70" y="185" font-family="Arial" font-size="42" fill="#596a76">TEMPLATE NOT FOUND</text>`;
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${templateSource ? `<rect width="${width}" height="${height}" fill="white"/><image href="${templateSource}" x="0" y="0" width="${width}" height="${height}" preserveAspectRatio="none"/>` : fallbackBackground}
     ${imageSource ? `<image href="${imageSource}" x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${photoX}" y="${photoY}" width="${photoWidth}" height="${photoHeight}" fill="#eef2f5"/><text x="${photoX + 80}" y="${photoY + 380}" font-family="Arial" font-size="48">NO PHOTO</text>`}
-    <text x="${textX}" y="${nameY}" font-family="Arial" font-size="120" font-weight="bold">${escapeXml(`${order.firstName || ''} ${order.lastName || ''}`.trim())}</text>
+    <text x="${textX}" y="${nameY}" font-family="Arial" font-size="${nameFontSize}" font-weight="bold">${escapeXml(studentName)}</text>
     <text x="${textX}" y="${nameY + 100}" font-family="Arial" font-size="72">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text>
     <text x="${textX}" y="${nameY + 190}" font-family="Arial" font-size="66">${escapeXml(order.clientName || '')}</text>
     <text x="${textX}" y="${orderY}" font-family="Arial" font-size="68">------Order ${escapeXml(order.packageCodes || '')}------</text>
     ${safeContents.map((content, index) => `<text x="${textX}" y="${contentY + index * contentLineHeight}" font-family="Arial" font-size="${contentFontSize}">${escapeXml(content)}</text>`).join('')}
     ${mailHome ? `<rect x="${large ? 830 : 780}" y="${large ? 1890 : 1500}" width="320" height="78" fill="#ffeb3b"/><text x="${large ? 850 : 800}" y="${large ? 1950 : 1560}" font-family="Arial" font-size="50" font-weight="bold">Mail Home</text>` : ''}
     <text x="${photoX}" y="${photoY + photoHeight + 120}" font-family="Arial" font-size="50">Ref Num: ${escapeXml(order.ref || '')}</text>
-    <rect x="${photoX}" y="${photoY + photoHeight + 165}" width="620" height="150" fill="none" stroke="#111" stroke-width="5"/><text x="${photoX + 40}" y="${photoY + photoHeight + 265}" font-family="monospace" font-size="70">*${escapeXml(order.ref || '')}*</text>
-    <g transform="translate(${width - 100} 500) rotate(90)"><text font-family="Arial" font-size="68">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text></g>
+    <rect x="${barcodeX}" y="${barcodeY}" width="${barcodeWidth}" height="${barcodeHeight + 42}" fill="white" opacity="0.88"/>
+    ${code128BarcodeSvg(order.ref || '', barcodeX + 18, barcodeY + 12, barcodeWidth - 36, barcodeHeight)}
+    <text x="${barcodeX + barcodeWidth / 2}" y="${barcodeY + barcodeHeight + 35}" font-family="Arial" font-size="34" text-anchor="middle">${escapeXml(order.ref || '')}</text>
+    <g transform="translate(${width - 100} 500) rotate(90)"><text font-family="Arial" font-size="${sideFontSize}">${escapeXml(sideText)}</text></g>
   </svg>`;
 }
 function orderLabelSvg(order, contents, imageSource) {
+  const ref = order.ref || '';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600"><rect width="1200" height="600" fill="white"/><rect x="5" y="5" width="1190" height="590" fill="none" stroke="#9aa8b2" stroke-width="5"/>
     ${imageSource ? `<image href="${imageSource}" x="25" y="25" width="520" height="550" preserveAspectRatio="xMidYMid slice"/>` : ''}
     <text x="580" y="90" font-family="Arial" font-size="54" font-weight="bold">${escapeXml(`${order.firstName || ''} ${order.lastName || ''}`.trim())}</text><text x="580" y="160" font-family="Arial" font-size="44">${escapeXml(`${order.grade || ''}: ${order.homeroom || ''}`)}</text><text x="580" y="220" font-family="Arial" font-size="38">${escapeXml(order.clientName || '')}</text>
     <text x="580" y="280" font-family="Arial" font-size="34" font-weight="bold">Order ${escapeXml(order.packageCodes || '')}</text>${contents.slice(0, 5).map((content, index) => `<text x="580" y="325" font-family="Arial" font-size="26" transform="translate(0 ${index * 32})">${escapeXml(content)}</text>`).join('')}
-    <text x="580" y="505" font-family="Arial" font-size="34">Ref Num: ${escapeXml(order.ref || '')}</text><text x="580" y="555" font-family="monospace" font-size="42">*${escapeXml(order.ref || '')}*</text></svg>`;
+    <text x="580" y="505" font-family="Arial" font-size="34">Ref Num: ${escapeXml(ref)}</text>${code128BarcodeSvg(ref, 770, 490, 380, 70)}</svg>`;
 }
 
 async function rasterizeDigitalDownloadCard(webContents, imageSource, templateSource, qrSource, link) {
@@ -3928,12 +4581,12 @@ async function rasterizeDigitalDownloadCard(webContents, imageSource, templateSo
 }
 
 async function runUnitRender(event, input = {}) {
-  const jobId = numericId(input.jobId); const outputFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
-  if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
+  const jobId = numericId(input.jobId); const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
+  if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
   const orders = await querySql(`
-    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
            GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
@@ -3943,8 +4596,20 @@ async function runUnitRender(event, input = {}) {
     GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
   `);
   const selectedOrders = orders;
+  const jobSummaryRows = await querySql(`
+    SELECT c.display_name AS clientName, j.name AS jobName
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    WHERE j.id = ${jobId}
+    LIMIT 1;
+  `);
+  const jobSummary = jobSummaryRows[0] || {};
+  const job = await adminJobSummary(jobId);
+  const schoolName = selectedOrders[0]?.clientName || jobSummary.clientName || 'School';
+  const runDate = new Date().toISOString().slice(0, 10);
+  const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`));
+  fs.mkdirSync(outputFolder, { recursive: true });
   const itemRows = selectedOrders.length ? await querySql(`
-    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue, p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue, p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN jobs j ON j.id = o.job_id
     LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
     LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id LEFT JOIN products p ON p.id = pci.product_id
@@ -3953,10 +4618,27 @@ async function runUnitRender(event, input = {}) {
   `) : [];
   const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []])); itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
   selectedOrders.sort((a, b) => unitRenderSortValue(a, sortBy).localeCompare(unitRenderSortValue(b, sortBy)));
-  const folders = { units: path.join(outputFolder, 'Units'), tenByThirteens: path.join(outputFolder, '10x13s'), digitalDownloads: path.join(outputFolder, 'DigitalDownload'), encryptedDownloads: path.join(outputFolder, 'DigitalDownload', 'ENC'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels') };
-  Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
+  const folders = { units: path.join(outputFolder, 'Units'), tenByThirteens: path.join(outputFolder, '10x13s'), digitalDownloads: path.join(outputFolder, 'DigitalDownload'), encryptedDownloads: path.join(outputFolder, 'DigitalDownload', 'ENC'), zip: path.join(outputFolder, 'Zip'), envelopes: path.join(outputFolder, 'Envelopes'), largeEnvelopes: path.join(outputFolder, 'Big Envelopes'), labels: path.join(outputFolder, 'Labels'), addons: path.join(outputFolder, 'Addons'), idCards: path.join(outputFolder, 'ID Cards') };
+  const ensureRenderFolder = (folder) => {
+    fs.mkdirSync(folder, { recursive: true });
+    return folder;
+  };
   const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
-  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, zipFiles: 0, idCards: 0, deferredComposites: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, addons: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
+  const addonInstructions = [[
+    'Action',
+    'Image',
+    'Customer-facing Name',
+    'Reference',
+    'Student ID',
+    'Student First',
+    'Student Last',
+    'Grade',
+    'Homeroom'
+  ]];
+  const addonCopiedImages = new Set();
+  const itemTally = new Map();
+  const idCardSubjects = [];
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
     const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
@@ -3966,13 +4648,75 @@ async function runUnitRender(event, input = {}) {
     const imageSource = imageDataUrlFromPath(unitImagePath);
     const envelopeImageSource = imageDataUrlFromPath(order.imagePath);
     const contents = items.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
+    if (input.includeCompositeNotice && items.some(isDeferredCompositeItem)) {
+      contents.push('Class/Star composite will be delivered after makeup day');
+    }
     const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
     if (input.includeUnits !== false) {
       let notedMissingImagePrep = false;
       let notedMissingPhoto = false;
       for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
         const item = items[itemIndex];
+        const itemLabel = item.productName || item.rawValue || `Code ${item.packageCode}`;
+        if (itemLabel) itemTally.set(itemLabel, (itemTally.get(itemLabel) || 0) + Number(item.quantity || 1));
         if (isImagePrepItem(item)) continue;
+        if (isDeferredCompositeItem(item)) {
+          result.deferredComposites += Number(item.quantity || 1);
+          continue;
+        }
+        if (isIdCardItem(item)) {
+          const copies = Math.max(1, Number(item.quantity || 1));
+          for (let copy = 0; copy < copies; copy += 1) {
+            idCardSubjects.push({
+              id: order.subjectId,
+              ref: order.ref,
+              firstName: order.firstName,
+              lastName: order.lastName,
+              displayName: `${order.firstName || ''} ${order.lastName || ''}`.trim(),
+              externalId: order.externalId,
+              grade: order.grade,
+              homeroom: order.homeroom,
+              track: '',
+              team: '',
+              subjectType: 'student',
+              imageFilename: order.imagePath ? path.basename(order.imagePath) : '',
+              croppedLargePath: order.imagePath,
+              imagePath: order.imagePath
+            });
+          }
+          result.idCards += copies;
+          continue;
+        }
+        if (isPhotoshopHandoffItem(item)) {
+          const addonSourcePath = resolveProjectPath(order.imagePath);
+          if (!addonSourcePath || !fs.existsSync(addonSourcePath) || !fs.statSync(addonSourcePath).isFile()) {
+            if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+            notedMissingPhoto = true;
+            continue;
+          }
+          const imageName = path.basename(addonSourcePath);
+          const addonImagePath = path.join(folders.addons, imageName);
+          if (!addonCopiedImages.has(addonImagePath) && !fs.existsSync(addonImagePath)) {
+            ensureRenderFolder(folders.addons);
+            fs.copyFileSync(addonSourcePath, addonImagePath);
+          }
+          addonCopiedImages.add(addonImagePath);
+          for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) {
+            addonInstructions.push([
+              item.productName || item.rawValue || '',
+              imageName,
+              item.productName || item.rawValue || item.packageCodeName || '',
+              order.ref || '',
+              order.externalId || '',
+              order.firstName || '',
+              order.lastName || '',
+              order.grade || '',
+              order.homeroom || ''
+            ]);
+            result.addons += 1;
+          }
+          continue;
+        }
         if (isDigitalDownloadItem(item)) {
           if (!envelopeImageSource) {
             if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
@@ -3987,12 +4731,21 @@ async function runUnitRender(event, input = {}) {
           }
           const encryptedName = `${oldTrecsDigitalDownloadCode(order.ref)}.jpg`;
           const encryptedPath = path.join(folders.encryptedDownloads, encryptedName);
+          ensureRenderFolder(folders.encryptedDownloads);
           fs.copyFileSync(sourcePath, encryptedPath);
           const link = digitalDownloadUrl(order);
-          const qrPath = path.join(folders.digitalDownloads, `${prefix}_qr.png`);
+          const qrPath = path.join(os.tmpdir(), `trecs-digital-download-${APP_SESSION_ID}-${Date.now()}-${prefix}.png`);
           await createQrCodePng(link, qrPath, 300);
           const dataUrl = await rasterizeDigitalDownloadCard(event.sender, envelopeImageSource, imageDataUrlFromPath(qrCodeTemplatePath(order)), imageDataUrlFromPath(qrPath), link);
+          ensureRenderFolder(folders.digitalDownloads);
           fs.writeFileSync(path.join(folders.digitalDownloads, `${prefix}_DigitalDownload_${itemIndex + 1}.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+          fs.rmSync(qrPath, { force: true });
+          const zipEntries = zipSourceEntriesForOrder(order, items.filter(isImagePrepItem));
+          if (zipEntries.length) {
+            ensureRenderFolder(folders.zip);
+            writeStoredZip(path.join(folders.zip, `${prefix}_DigitalDownload.zip`), zipEntries);
+            result.zipFiles += 1;
+          }
           result.digitalDownloads += 1;
           continue;
         }
@@ -4016,6 +4769,7 @@ async function runUnitRender(event, input = {}) {
               printInfo: `${item.productName || item.rawValue || '10x13'}`
             });
             const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+            ensureRenderFolder(folders.tenByThirteens);
             fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
             result.tenByThirteens += 1;
           }
@@ -4026,7 +4780,7 @@ async function runUnitRender(event, input = {}) {
         for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
           const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], `${recipe.name} — ${sheetIndex + 1} of ${recipe.sheets.length}`);
           const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
-          fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
+          ensureRenderFolder(folders.units); fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
         }
       }
     }
@@ -4034,11 +4788,28 @@ async function runUnitRender(event, input = {}) {
     const productionContents = productionItems.map((item) => item.rawValue || item.productName || `Code ${item.packageCode}`);
     const hasLarge = productionContents.some((item) => /10x13|art\s*print/i.test(item));
     const hasSmall = productionContents.some((item) => !/10x13|art\s*print|mug|waterbottle|plaque/i.test(item));
-    if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, false, envelopeTemplateDataUrl(order, false)), 2625, 3975); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
-    if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, true, envelopeTemplateDataUrl(order, true)), 3450, 4950); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
-    if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, envelopeImageSource), 1200, 600); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+    if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, false, envelopeTemplateDataUrl(order, false)), 2625, 3975); ensureRenderFolder(folders.envelopes); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
+    if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, true, envelopeTemplateDataUrl(order, true)), 3450, 4950); ensureRenderFolder(folders.largeEnvelopes); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
+    if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, envelopeImageSource), 1200, 600); ensureRenderFolder(folders.labels); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+  }
+  if (result.addons) {
+    ensureRenderFolder(folders.addons);
+    fs.writeFileSync(path.join(folders.addons, 'instructions.txt'), `${addonInstructions.map((row) => row.map(csvValue).join(',')).join('\r\n')}\r\n`, 'utf8');
+  }
+  if (idCardSubjects.length) {
+    ensureRenderFolder(folders.idCards);
+    const idCardOutputPath = path.join(folders.idCards, `${safeFolderName(jobSummary.clientName || 'School')}_ordered_id_cards.jpg`);
+    await renderIdCardSheets(job, idCardSubjects, {
+      idCardSortMethod: sortBy === 'last' ? 'alpha_school' : sortBy === 'grade' ? 'alpha_grade' : 'alpha_homeroom',
+      idCardReason: 'ordered',
+      directorySchoolYear: String(new Date().getFullYear())
+    }, idCardOutputPath, idCardOutputPath);
   }
   result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [item.item, item])).values());
+  result.reports = {
+    delivery: writeUnitRenderDeliveryReport(outputFolder, jobSummary, selectedOrders, itemsByOrder, sortBy),
+    summary: writeUnitRenderJobSummaryReport(outputFolder, jobSummary, result, itemTally)
+  };
   fs.writeFileSync(path.join(outputFolder, 'unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString(), proofMode: true }, null, 2));
   event.sender.send('unit-render:progress', { current: selectedOrders.length, total: selectedOrders.length, message: 'Render complete' });
   return result;
@@ -4826,6 +5597,17 @@ function code128BarcodeSvg(value, x, y, width, height) {
   return `<g aria-label="CODE128 ${escapeXml(value)}">${bars.join('')}</g>`;
 }
 
+function estimatedSvgTextWidth(text, fontSize, weight = 'normal') {
+  const weightFactor = weight === 'bold' ? 0.66 : 0.58;
+  return String(text || '').length * fontSize * weightFactor;
+}
+
+function fitSvgFontSize(text, maxWidth, preferredSize, minimumSize, weight = 'normal') {
+  const width = estimatedSvgTextWidth(text, preferredSize, weight);
+  if (!width || width <= maxWidth) return preferredSize;
+  return Math.max(minimumSize, Math.floor(preferredSize * (maxWidth / width)));
+}
+
 function uniqueCompositeStaff(classStaff = [], additionalStaff = []) {
   const seen = new Set();
   return [...classStaff, ...additionalStaff].filter((subject) => {
@@ -5128,6 +5910,11 @@ ipcMain.handle('composite:render', runCompositeRender);
 ipcMain.handle('composite:test-layouts', testCompositeLayouts);
 ipcMain.handle('settings:student-fields:get', getStudentFieldSettings);
 ipcMain.handle('settings:student-fields:save', saveStudentFieldSettings);
+ipcMain.handle('production-sync:settings:get', getProductionSyncSettings);
+ipcMain.handle('production-sync:settings:save', saveProductionSyncSettings);
+ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredentials);
+ipcMain.handle('production-sync:preview', previewProductionStatusSync);
+ipcMain.handle('production-sync:push', pushProductionStatusSync);
 
 async function getJobsData() {
   const jobs = await querySql(`
@@ -5539,21 +6326,71 @@ function subjectSortValue(subject, key) {
   return String(subject[key] || '').toLowerCase();
 }
 
-function sortDirectorySubjects(subjects, sortMethod) {
+function isDirectoryStaff(subject) {
+  const subjectType = String(subject.subjectType || '').toLowerCase();
+  const grade = String(subject.grade || '').toUpperCase();
+  return ['faculty', 'staff', 'teacher'].includes(subjectType) || grade === 'FAC';
+}
+
+function directoryGroupLabel(subject, sortMethod, options = {}) {
+  const isStaff = isDirectoryStaff(subject);
+  if (sortMethod === 'alpha_school') {
+    return 'Alpha by School';
+  }
+  if (sortMethod === 'alpha_homeroom') {
+    if (isStaff && (!options.directoryIncludeTeachersInHomeroom || !String(subject.homeroom || '').trim())) {
+      return 'Faculty';
+    }
+    return `Homeroom: ${subject.homeroom || ''}`;
+  }
+  if (isStaff) {
+    return 'Faculty';
+  }
+  return `Grade: ${subject.grade || ''}`;
+}
+
+function directoryShortGroupLabel(subject, sortMethod, options = {}) {
+  const label = directoryGroupLabel(subject, sortMethod, options);
+  return label.replace(/^Homeroom:\s*/i, '').replace(/^Grade:\s*/i, '') || label;
+}
+
+function directorySubjectRank(subject, sortMethod, options = {}) {
+  if (
+    sortMethod === 'alpha_homeroom'
+    && options.directoryIncludeTeachersInHomeroom
+    && isDirectoryStaff(subject)
+    && String(subject.homeroom || '').trim()
+  ) {
+    return '0';
+  }
+  return '1';
+}
+
+function subjectDirectorySortValue(subject, key, sortMethod, options) {
+  if (key === 'directoryGroup') {
+    return directoryGroupLabel(subject, sortMethod, options).toLowerCase();
+  }
+  if (key === 'directoryRank') {
+    return directorySubjectRank(subject, sortMethod, options);
+  }
+  return subjectSortValue(subject, key);
+}
+
+function sortDirectorySubjects(subjects, sortMethod, options = {}) {
   return [...subjects].sort((first, second) => {
     const sortParts = {
-      alpha_grade: ['grade', 'lastName', 'firstName', 'ref'],
-      alpha_homeroom: ['homeroom', 'lastName', 'firstName', 'ref'],
+      alpha_grade: ['directoryGroup', 'lastName', 'firstName', 'ref'],
+      alpha_homeroom: ['directoryGroup', 'directoryRank', 'lastName', 'firstName', 'ref'],
       alpha_school: ['lastName', 'firstName', 'grade', 'homeroom', 'ref']
     }[sortMethod] || ['grade', 'lastName', 'firstName', 'ref'];
 
     for (const key of sortParts) {
       const firstValue = key === 'lastName' || key === 'firstName'
         ? String(first[key] || '').toLowerCase()
-        : subjectSortValue(first, key);
+        : subjectDirectorySortValue(first, key, sortMethod, options);
       const secondValue = key === 'lastName' || key === 'firstName'
         ? String(second[key] || '').toLowerCase()
-        : subjectSortValue(second, key);
+        : subjectDirectorySortValue(second, key, sortMethod, options);
       const comparison = firstValue.localeCompare(secondValue, undefined, {
         numeric: true,
         sensitivity: 'base'
@@ -5627,18 +6464,14 @@ function directorySubjectRow(subject, page, position, groupLabel, directoryType)
 }
 
 function buildMugbookDirectoryRows(subjects, options) {
-  const sorted = sortDirectorySubjects(subjects, options.directorySortMethod);
+  const sorted = sortDirectorySubjects(subjects, options.directorySortMethod, options);
   const rows = [];
   let page = 2;
   let position = 0;
   let currentGroup = '';
 
   sorted.forEach((subject) => {
-    const groupValue = options.directorySortMethod === 'alpha_homeroom'
-      ? `Homeroom: ${subject.homeroom || ''}`
-      : options.directorySortMethod === 'alpha_grade'
-        ? `Grade: ${subject.grade || ''}`
-        : 'Alpha by School';
+    const groupValue = directoryGroupLabel(subject, options.directorySortMethod, options);
 
     if (position > 0 && currentGroup && groupValue !== currentGroup && options.directorySortMethod !== 'alpha_school') {
       page += 1;
@@ -5656,28 +6489,30 @@ function buildMugbookDirectoryRows(subjects, options) {
   return rows;
 }
 
-function buildLibraryDirectoryRows(subjects) {
-  const sorted = sortDirectorySubjects(subjects, 'alpha_homeroom');
+function buildLibraryDirectoryRows(subjects, options) {
+  const directoryOptions = { ...options, directorySortMethod: 'alpha_homeroom' };
+  const sorted = sortDirectorySubjects(subjects, 'alpha_homeroom', directoryOptions);
   const groups = new Map();
   sorted.forEach((subject) => {
-    if (!subject.homeroom) {
+    const groupLabel = directoryShortGroupLabel(subject, 'alpha_homeroom', directoryOptions);
+    if (!groupLabel || (groupLabel === 'Faculty' && !isDirectoryStaff(subject))) {
       return;
     }
-    if (!groups.has(subject.homeroom)) {
-      groups.set(subject.homeroom, []);
+    if (!groups.has(groupLabel)) {
+      groups.set(groupLabel, []);
     }
-    groups.get(subject.homeroom).push(subject);
+    groups.get(groupLabel).push(subject);
   });
 
   const rows = [];
   let page = 1;
-  groups.forEach((groupSubjects, homeroom) => {
+  groups.forEach((groupSubjects, groupLabel) => {
     const cellsPerPage = groupSubjects.length < 37 ? 18 : 21;
     groupSubjects.forEach((subject, index) => {
       if (index > 0 && index % cellsPerPage === 0) {
         page += 1;
       }
-      rows.push(directorySubjectRow(subject, page, (index % cellsPerPage) + 1, homeroom, 'library_book'));
+      rows.push(directorySubjectRow(subject, page, (index % cellsPerPage) + 1, groupLabel, 'library_book'));
     });
     page += 1;
   });
@@ -6187,16 +7022,6 @@ function writeMissingPhotoWorkbook(outputPath, subjects) {
   return rows.length;
 }
 
-function schoolDirectoryGroupLabel(subject, sortMethod) {
-  if (sortMethod === 'alpha_homeroom') {
-    return `Homeroom: ${subject.homeroom || ''}`;
-  }
-  if (sortMethod === 'alpha_school') {
-    return 'Alpha by School';
-  }
-  return `Grade: ${subject.grade || ''}`;
-}
-
 async function renderSchoolDirectory(job, subjects, options, listSubjectIds, outputPath, absoluteOutputPath) {
   await ensureBundledJavaTool('SchoolDirectoryRenderer');
   const outputFolder = path.dirname(absoluteOutputPath);
@@ -6204,7 +7029,8 @@ async function renderSchoolDirectory(job, subjects, options, listSubjectIds, out
 
   const directorySubjects = sortDirectorySubjects(
     selectedDirectorySubjects(subjects, options, listSubjectIds),
-    options.directorySortMethod
+    options.directorySortMethod,
+    options
   );
   const rows = directorySubjects.map((subject) => {
     const image = subjectImageChoice(subject, 'medium');
@@ -6215,7 +7041,7 @@ async function renderSchoolDirectory(job, subjects, options, listSubjectIds, out
       subject.grade,
       subject.homeroom,
       subject.externalId,
-      schoolDirectoryGroupLabel(subject, options.directorySortMethod),
+      directoryGroupLabel(subject, options.directorySortMethod, options),
       absoluteWorkspacePath(image.path),
       image.path ? 'true' : 'false'
     ].map(tsvValue).join('\t');
@@ -7088,7 +7914,7 @@ function buildSisExportOutput(job, subjects, options, outputStem) {
 function buildSchoolDirectoryOutput(job, subjects, options, listSubjectIds) {
   const directorySubjects = selectedDirectorySubjects(subjects, options, listSubjectIds);
   const planRows = options.directoryType === 'library_book'
-    ? buildLibraryDirectoryRows(directorySubjects)
+    ? buildLibraryDirectoryRows(directorySubjects, options)
     : buildMugbookDirectoryRows(directorySubjects, options);
   const csv = csvRows([
     'Page',
@@ -7120,14 +7946,15 @@ function buildSchoolDirectoryOutput(job, subjects, options, listSubjectIds) {
     directoryListName: options.directorySource === 'list' ? options.directoryListName : '',
     directorySortMethod: options.directorySortMethod,
     photographedOnly: options.directoryPhotographedOnly,
+    includeTeachersInHomeroom: options.directoryIncludeTeachersInHomeroom,
     schoolYear: options.directorySchoolYear,
     contactLine: options.directoryContactLine,
     selectedSubjects: directorySubjects.length,
     pages: planRows.length ? Math.max(...planRows.map((row) => row.Page)) : 0,
     legacyBehavior: {
       mugbookCellsPerPage: 30,
-      mugbookBreaks: ['grade', 'homeroom'],
-      libraryBookGrouping: 'homeroom',
+      mugbookBreaks: ['grade', 'homeroom', 'faculty'],
+      libraryBookGrouping: 'homeroom or faculty',
       libraryBookCellsPerPage: '18 for small homerooms, 21 for larger homerooms',
       excludes: ['EXMPT grade', 'blank names'],
       imageFolder: 'CroppedMed'
@@ -7341,6 +8168,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     directorySchoolYear: normalizeDirectorySchoolYear(input.directorySchoolYear),
     directoryContactLine: optionalText(input.directoryContactLine, 255) || 'Island Photography: 559-456-1400',
     directoryPhotographedOnly: Boolean(input.directoryPhotographedOnly),
+    directoryIncludeTeachersInHomeroom: Boolean(input.directoryIncludeTeachersInHomeroom),
     stickerSource: normalizeStickerSource(input.stickerSource),
     stickerListName: optionalText(input.stickerListName, 255) || '',
     stickerCopies: normalizeStickerCopies(input.stickerCopies),
@@ -13587,6 +14415,7 @@ function menuActionMap(window) {
     eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
     studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
     onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
+    productionSync: menuAction(window, 'Production Status Sync', 'production-sync'),
     dataVerification: menuAction(window, 'After Makeup Data Verification', 'data-verification'),
     staffVerification: menuAction(window, 'Staff Verification', 'staff-verification'),
     packagePlanEditor: menuAction(window, 'Package Plan Editor', 'package-plan-editor'),
@@ -13645,6 +14474,7 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.productionSync,
           actions.dataVerification,
           actions.staffVerification,
           actions.packagePlanEditor,
@@ -13688,6 +14518,7 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.productionSync,
           actions.dataVerification,
           actions.staffVerification,
           actions.packagePlanEditor,
@@ -13728,6 +14559,7 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.productionSync,
           actions.dataVerification,
           actions.staffVerification,
           actions.packagePlanEditor,
@@ -13763,6 +14595,7 @@ function createContextMenus(window, context) {
         actions.eventWorkflow,
         actions.studentListBuilder,
         actions.onlineOrderImport,
+        actions.productionSync,
         actions.dataVerification,
         actions.staffVerification,
         actions.packagePlanEditor,

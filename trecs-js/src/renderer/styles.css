@@ -3961,6 +3961,14 @@ dd {
 .production-preview-table { margin: 0 18px; max-height: 410px; }
 .production-preview-table td { vertical-align: top; }
 .production-footer { align-items: center; display: flex; justify-content: space-between; gap: 16px; padding: 14px 18px 18px; }
+.production-sync-toolbar { flex-wrap: wrap; }
+.production-sync-toolbar label { min-width: 150px; }
+.production-sync-toolbar label.grow { min-width: 460px; }
+.production-sync-toolbar input[type="number"] { width: 96px; }
+.production-sync-actions { align-items: center; border-bottom: 1px solid #dce4e9; display: flex; gap: 8px; justify-content: flex-end; padding: 10px 18px; }
+.production-sync-table { max-height: 520px; }
+.production-sync-table td:last-child div { margin-bottom: 6px; }
+.production-sync-table small { color: #607481; margin-left: 6px; }
 .import-status { border-radius: 999px; display: inline-block; font-size: 12px; padding: 3px 8px; }
 .import-status.ready { background: #dff2e5; color: #17652c; }
 .import-status.invalid, .import-status.unmatched, .import-status.ambiguous, .import-status.duplicate { background: #fde8e5; color: #9b2b1f; }

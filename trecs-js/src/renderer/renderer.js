@@ -65,6 +65,19 @@ const onlineOrderSummary = document.getElementById('onlineOrderSummary');
 const onlineOrderPreviewBody = document.getElementById('onlineOrderPreviewBody');
 const onlineOrderStatus = document.getElementById('onlineOrderStatus');
 const importOnlineOrdersButton = document.getElementById('importOnlineOrdersButton');
+const productionSyncView = document.getElementById('productionSyncView');
+const productionSyncCredentialsPath = document.getElementById('productionSyncCredentialsPath');
+const chooseProductionSyncCredentialsButton = document.getElementById('chooseProductionSyncCredentialsButton');
+const productionSyncSpreadsheetId = document.getElementById('productionSyncSpreadsheetId');
+const productionSyncSheetName = document.getElementById('productionSyncSheetName');
+const productionSyncHeaderRow = document.getElementById('productionSyncHeaderRow');
+const productionSyncFirstDataRow = document.getElementById('productionSyncFirstDataRow');
+const saveProductionSyncSettingsButton = document.getElementById('saveProductionSyncSettingsButton');
+const previewProductionSyncButton = document.getElementById('previewProductionSyncButton');
+const pushProductionSyncButton = document.getElementById('pushProductionSyncButton');
+const productionSyncSummary = document.getElementById('productionSyncSummary');
+const productionSyncPreviewBody = document.getElementById('productionSyncPreviewBody');
+const productionSyncStatus = document.getElementById('productionSyncStatus');
 const dataVerificationView = document.getElementById('dataVerificationView');
 const verificationJobSelect = document.getElementById('verificationJobSelect');
 const chooseVerificationFileButton = document.getElementById('chooseVerificationFileButton');
@@ -416,6 +429,7 @@ let jobsState = {
   directorySchoolYear: '2025-2026',
   directoryContactLine: 'Island Photography: 559-456-1400',
   directoryPhotographedOnly: false,
+  directoryIncludeTeachersInHomeroom: false,
   stickerSource: 'all',
   stickerListName: '',
   stickerCopies: 3,
@@ -453,11 +467,13 @@ let jobsState = {
   showImportPreviousJobForm: false,
   unitRenderSetup: null,
   unitRenderRunning: false,
+  unitRenderStartedAt: null,
   studentListSetup: null,
   studentListId: null,
   studentListMemberIds: [],
   studentListCheckedIds: new Set(),
   onlineOrderPreview: null,
+  productionSyncPreview: null,
   batchRenderSetup: null,
   batchRenderRunning: false,
   eventSetup: null,
@@ -518,7 +534,18 @@ if (window.trecs && typeof window.trecs.onUnitRenderProgress === 'function') {
     const current = Number(payload.current || 0);
     unitRenderProgress.max = total || 100;
     unitRenderProgress.value = total ? current : 0;
-    unitRenderStatus.textContent = payload.message || 'Rendering...';
+    if (!jobsState.unitRenderStartedAt || current <= 0) {
+      jobsState.unitRenderStartedAt = Date.now();
+    }
+    let etaText = '';
+    if (total > 0 && current > 0 && current < total) {
+      const elapsed = Date.now() - jobsState.unitRenderStartedAt;
+      const estimatedTotal = (elapsed / current) * total;
+      etaText = ` / ETA ${formatDuration(estimatedTotal - elapsed)}`;
+    } else if (total > 0 && current === 0) {
+      etaText = ' / ETA calculating';
+    }
+    unitRenderStatus.textContent = `${payload.message || 'Rendering...'}${etaText}`;
   });
 }
 
@@ -598,6 +625,20 @@ function formatShortDateTime(value) {
     hour: 'numeric',
     minute: '2-digit'
   });
+}
+
+function formatDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.round(Number(milliseconds || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  }
+  if (minutes) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  return `${seconds}s`;
 }
 
 function formatImageSource(source) {
@@ -739,12 +780,13 @@ function setView(view) {
   eventsView.classList.toggle('active-view', view === 'events');
   studentListsView.classList.toggle('active-view', view === 'studentLists');
   onlineOrdersView.classList.toggle('active-view', view === 'onlineOrders');
+  productionSyncView.classList.toggle('active-view', view === 'productionSync');
   dataVerificationView.classList.toggle('active-view', view === 'dataVerification');
   staffVerificationView.classList.toggle('active-view', view === 'staffVerification');
   unitRenderView.classList.toggle('active-view', view === 'unitRender');
   batchRenderView.classList.toggle('active-view', view === 'batchRender');
   compositesView.classList.toggle('active-view', view === 'composites');
-  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
+  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
@@ -771,6 +813,9 @@ function setView(view) {
   }
   if (view === 'onlineOrders') {
     loadOnlineOrderJobs().catch((error) => { onlineOrderStatus.textContent = error.message || 'Could not load jobs.'; });
+  }
+  if (view === 'productionSync') {
+    loadProductionSyncSettings().catch((error) => { productionSyncStatus.textContent = error.message || 'Could not load production sync settings.'; });
   }
   if (view === 'dataVerification') {
     loadRosterVerificationJobs().catch((error) => { verificationStatus.textContent = error.message || 'Could not load jobs.'; });
@@ -4830,6 +4875,12 @@ function renderDirectoryOptions(listNames) {
         <input data-directory-option="directoryPhotographedOnly" type="checkbox" ${jobsState.directoryPhotographedOnly ? 'checked' : ''}>
         <span>Photographed Only</span>
       </label>
+      ${jobsState.directorySortMethod === 'alpha_homeroom' ? `
+        <label class="checkbox-label">
+          <input data-directory-option="directoryIncludeTeachersInHomeroom" type="checkbox" ${jobsState.directoryIncludeTeachersInHomeroom ? 'checked' : ''}>
+          <span>Include Teachers in Homeroom</span>
+        </label>
+      ` : ''}
     </section>
   `;
 }
@@ -4841,6 +4892,9 @@ function bindDirectoryOptions() {
       jobsState[key] = control.type === 'checkbox' ? control.checked : control.value;
       if (key === 'directorySource' && jobsState.directorySource !== 'list') {
         jobsState.directoryListName = '';
+      }
+      if (key === 'directorySortMethod' && jobsState.directorySortMethod !== 'alpha_homeroom') {
+        jobsState.directoryIncludeTeachersInHomeroom = false;
       }
       renderAdminItemsWorkspace();
     });
@@ -5623,6 +5677,7 @@ function adminRenderRequest(type) {
     directorySchoolYear: directorySchoolYearLabel(jobsState.directorySchoolYear),
     directoryContactLine: jobsState.directoryContactLine,
     directoryPhotographedOnly: jobsState.directoryPhotographedOnly,
+    directoryIncludeTeachersInHomeroom: jobsState.directoryIncludeTeachersInHomeroom,
     stickerSource: jobsState.stickerSource,
     stickerListName: jobsState.stickerListName,
     stickerCopies: jobsState.stickerCopies,
@@ -7091,6 +7146,12 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'production-sync') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('productionSync');
+    return;
+  }
+
   if (action === 'data-verification') {
     if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
     setView('dataVerification');
@@ -8193,6 +8254,115 @@ async function importReadyOnlineOrders() {
   try { const result = await trecsApi('importOnlineOrders').importOnlineOrders({ jobId, filePath: preview.filePath, mapping }); onlineOrderStatus.textContent = `Imported ${result.inserted} new and updated ${result.updated} existing online orders; ${result.skipped} rows skipped.`; await refreshOnlineOrderPreviewFromMapping(); } catch (error) { onlineOrderStatus.textContent = error.message || 'Import failed.'; } finally { importOnlineOrdersButton.disabled = false; await releaseUiJobLocks(jobId); }
 }
 
+function productionSyncInput() {
+  return {
+    credentialsPath: productionSyncCredentialsPath.value,
+    spreadsheetId: productionSyncSpreadsheetId.value,
+    sheetName: productionSyncSheetName.value,
+    headerRow: productionSyncHeaderRow.value,
+    firstDataRow: productionSyncFirstDataRow.value
+  };
+}
+
+function populateProductionSyncSettings(settings = {}) {
+  productionSyncCredentialsPath.value = settings.credentialsPath || '';
+  productionSyncSpreadsheetId.value = settings.spreadsheetId || '';
+  productionSyncSheetName.value = settings.sheetName || '2025 FALL';
+  productionSyncHeaderRow.value = settings.headerRow || 2;
+  productionSyncFirstDataRow.value = settings.firstDataRow || 3;
+}
+
+async function loadProductionSyncSettings() {
+  const settings = await trecsApi('getProductionSyncSettings').getProductionSyncSettings();
+  populateProductionSyncSettings(settings);
+  productionSyncStatus.textContent = 'Preview sheet updates before pushing.';
+}
+
+function renderProductionSyncPreview(preview) {
+  if (!preview) {
+    productionSyncSummary.innerHTML = '<div class="empty-state">Configure the Google Sheet and preview updates before pushing.</div>';
+    productionSyncPreviewBody.innerHTML = '';
+    pushProductionSyncButton.disabled = true;
+    return;
+  }
+  productionSyncSummary.innerHTML = `
+    <article><span>Matched Rows</span><strong>${formatNumber(preview.totals?.matchedRows || 0)}</strong></article>
+    <article><span>Unmatched Rows</span><strong>${formatNumber(preview.totals?.unmatchedRows || 0)}</strong></article>
+    <article><span>Pending Updates</span><strong>${formatNumber(preview.totals?.updates || 0)}</strong></article>
+    <article><span>Mapped Columns</span><strong>${formatNumber(preview.headersFound?.length || 0)}</strong></article>
+  `;
+  productionSyncPreviewBody.innerHTML = (preview.matched || [])
+    .filter((row) => (row.updates || []).length)
+    .map((row) => `<tr>
+      <td>${escapeHtml(row.schoolName || '')}</td>
+      <td>${escapeHtml(row.jobName || '')}</td>
+      <td>${formatNumber(row.rowNumber || 0)}</td>
+      <td>${row.updates.map((update) => `<div><strong>${escapeHtml(update.label)}</strong>: ${escapeHtml(update.currentValue || '(blank)')} -> ${escapeHtml(update.value || '')} <small>${escapeHtml(update.range)}</small></div>`).join('')}</td>
+    </tr>`)
+    .join('') || '<tr><td colspan="4">No sheet changes are needed.</td></tr>';
+  pushProductionSyncButton.disabled = !(preview.updates || []).length;
+}
+
+async function saveProductionSyncSettings() {
+  saveProductionSyncSettingsButton.disabled = true;
+  try {
+    const settings = await trecsApi('saveProductionSyncSettings').saveProductionSyncSettings(productionSyncInput());
+    populateProductionSyncSettings(settings);
+    productionSyncStatus.textContent = 'Production sync settings saved.';
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not save production sync settings.';
+  } finally {
+    saveProductionSyncSettingsButton.disabled = false;
+  }
+}
+
+async function chooseProductionSyncCredentials() {
+  chooseProductionSyncCredentialsButton.disabled = true;
+  try {
+    const result = await trecsApi('chooseProductionSyncCredentials').chooseProductionSyncCredentials();
+    if (result && !result.canceled) {
+      productionSyncCredentialsPath.value = result.filePath || '';
+      productionSyncStatus.textContent = `Service account selected: ${result.serviceAccountEmail || 'unknown email'}.`;
+    }
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not load service account JSON.';
+  } finally {
+    chooseProductionSyncCredentialsButton.disabled = false;
+  }
+}
+
+async function previewProductionSync() {
+  previewProductionSyncButton.disabled = true;
+  pushProductionSyncButton.disabled = true;
+  productionSyncStatus.textContent = 'Reading Google Sheet and comparing TRECS jobs...';
+  try {
+    await saveProductionSyncSettings();
+    const preview = await trecsApi('previewProductionStatusSync').previewProductionStatusSync(productionSyncInput());
+    jobsState.productionSyncPreview = preview;
+    renderProductionSyncPreview(preview);
+    productionSyncStatus.textContent = `Preview ready using ${preview.serviceAccountEmail || 'service account'}; ${formatNumber(preview.totals?.updates || 0)} updates found.`;
+  } catch (error) {
+    jobsState.productionSyncPreview = null;
+    renderProductionSyncPreview(null);
+    productionSyncStatus.textContent = error.message || 'Could not preview production sync.';
+  } finally {
+    previewProductionSyncButton.disabled = false;
+  }
+}
+
+async function pushProductionSync() {
+  pushProductionSyncButton.disabled = true;
+  productionSyncStatus.textContent = 'Pushing production status updates...';
+  try {
+    const result = await trecsApi('pushProductionStatusSync').pushProductionStatusSync(productionSyncInput());
+    jobsState.productionSyncPreview = result;
+    renderProductionSyncPreview(result);
+    productionSyncStatus.textContent = `Pushed ${formatNumber(result.pushed || 0)} cell update${Number(result.pushed || 0) === 1 ? '' : 's'} to ${result.settings?.sheetName || 'Google Sheets'}.`;
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not push production sync.';
+  }
+}
+
 function renderBatchRenderSetup() {
   const setup = jobsState.batchRenderSetup; if (!setup) return;
   batchRenderJobs.innerHTML = setup.jobs.map((job) => `<label><input type="checkbox" name="jobIds" value="${job.id}" ${Number(job.readyOrders) > 0 ? '' : ''}><span><strong>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</strong><small>${escapeHtml(job.packagePlan || 'No package plan')}</small></span><small>${formatNumber(job.readyOrders)} ready / ${formatNumber(job.paidOrders)} paid</small></label>`).join('');
@@ -9226,6 +9396,7 @@ async function exportUnitImagePrep() {
   const jobId = Number(unitRenderForm.elements.jobId.value);
   if (!(await acquireUiJobLock(jobId, 'image_prep'))) return;
   jobsState.unitRenderRunning = true;
+  jobsState.unitRenderStartedAt = Date.now();
   exportImagePrepButton.disabled = true;
   startUnitRenderButton.disabled = true;
   browseUnitRenderOutputButton.disabled = true;
@@ -9238,13 +9409,14 @@ async function exportUnitImagePrep() {
       sourceValue: unitRenderForm.elements.sourceValue.value,
       outputFolder
     });
-    unitRenderStatus.textContent = `Image Prep exported ${result.exported} image${Number(result.exported) === 1 ? '' : 's'} across ${result.prepTypes || 0} prep item${Number(result.prepTypes || 0) === 1 ? '' : 's'}${result.missingPhotos.length ? `; ${result.missingPhotos.length} missing photo(s)` : ''}. ${result.outputFolder || ''}`;
+    unitRenderStatus.textContent = `Image Prep copied ${result.copiedImages || 0} image${Number(result.copiedImages || 0) === 1 ? '' : 's'} and wrote ${result.exported} instruction${Number(result.exported) === 1 ? '' : 's'} across ${result.prepTypes || 0} prep item${Number(result.prepTypes || 0) === 1 ? '' : 's'}${result.missingPhotos.length ? `; ${result.missingPhotos.length} missing photo(s)` : ''}. ${result.outputFolder || ''}`;
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'ImagePrep export failed.';
     console.error(error);
   } finally {
     await releaseUiJobLocks(jobId);
     jobsState.unitRenderRunning = false;
+    jobsState.unitRenderStartedAt = null;
     exportImagePrepButton.disabled = false;
     startUnitRenderButton.disabled = false;
     browseUnitRenderOutputButton.disabled = false;
@@ -9262,6 +9434,7 @@ async function submitUnitRender(event) {
   const jobId = Number(unitRenderForm.elements.jobId.value);
   if (!(await acquireUiJobLock(jobId, 'batch_render'))) return;
   jobsState.unitRenderRunning = true;
+  jobsState.unitRenderStartedAt = Date.now();
   startUnitRenderButton.disabled = true;
   browseUnitRenderOutputButton.disabled = true;
   unitRenderProgress.value = 0;
@@ -9275,15 +9448,17 @@ async function submitUnitRender(event) {
       includeUnits: unitRenderForm.elements.includeUnits.checked,
       includeEnvelopes: unitRenderForm.elements.includeEnvelopes.checked,
       includeLabels: unitRenderForm.elements.includeLabels.checked,
+      includeCompositeNotice: unitRenderForm.elements.includeCompositeNotice.checked,
       outputFolder
     });
-    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}.`;
+    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.zipFiles || 0} zips, ${result.idCards || 0} ID cards, ${result.addons || 0} AddOns, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}. ${result.outputFolder || ''}`;
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'Render failed.';
     console.error(error);
   } finally {
     await releaseUiJobLocks(jobId);
     jobsState.unitRenderRunning = false;
+    jobsState.unitRenderStartedAt = null;
     startUnitRenderButton.disabled = false;
     browseUnitRenderOutputButton.disabled = false;
   }
@@ -9818,7 +9993,7 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'jobs') {
       jobsState.selectedTab = 'subjects';
     }
-    if (['events', 'products', 'studentLists', 'onlineOrders', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
+    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
     }
     setView(button.dataset.viewButton);
@@ -9877,6 +10052,10 @@ onlineOrderJobSelect.addEventListener('change', () => { jobsState.onlineOrderPre
 chooseOnlineOrderFileButton.addEventListener('click', chooseOnlineOrderFile);
 onlineOrderMapping.addEventListener('change', () => refreshOnlineOrderPreviewFromMapping().catch((error) => { onlineOrderStatus.textContent = error.message; }));
 importOnlineOrdersButton.addEventListener('click', importReadyOnlineOrders);
+chooseProductionSyncCredentialsButton.addEventListener('click', chooseProductionSyncCredentials);
+saveProductionSyncSettingsButton.addEventListener('click', saveProductionSyncSettings);
+previewProductionSyncButton.addEventListener('click', previewProductionSync);
+pushProductionSyncButton.addEventListener('click', pushProductionSync);
 browseBatchRenderOutputButton.addEventListener('click', browseBatchRenderOutput);
 refreshBatchRenderButton.addEventListener('click', () => loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message; }));
 batchRenderForm.addEventListener('submit', submitBatchRender);

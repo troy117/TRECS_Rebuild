@@ -25,6 +25,7 @@
           <button data-view-button="products">Products</button>
           <button data-view-button="studentLists">Student Lists</button>
           <button data-view-button="onlineOrders">Online Orders</button>
+          <button data-view-button="productionSync">Production Sync</button>
           <button data-view-button="dataVerification">Data Verification</button>
           <button data-view-button="staffVerification">Staff Verification</button>
           <button data-view-button="unitRender">Unit Render</button>
@@ -169,6 +170,49 @@
           </section>
         </section>
 
+        <section id="productionSyncView" class="view">
+          <section class="panel production-tool-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Production Status Sync</h2>
+                <p>Preview and push TRECS job progress into the shared Google Sheets production tracker.</p>
+              </div>
+              <span class="status review">Manual sync</span>
+            </div>
+            <div class="production-toolbar production-sync-toolbar">
+              <label class="grow"><span>Service Account JSON</span><div class="folder-picker"><input id="productionSyncCredentialsPath" readonly placeholder="Choose Google service account JSON"><button id="chooseProductionSyncCredentialsButton" type="button">Browse</button></div></label>
+              <label><span>Spreadsheet ID</span><input id="productionSyncSpreadsheetId" placeholder="Google Sheet ID"></label>
+              <label><span>Sheet Tab</span><input id="productionSyncSheetName" placeholder="2025 FALL"></label>
+              <label><span>Header Row</span><input id="productionSyncHeaderRow" type="number" min="1" value="2"></label>
+              <label><span>First Data Row</span><input id="productionSyncFirstDataRow" type="number" min="1" value="3"></label>
+            </div>
+            <div class="production-sync-actions">
+              <button id="saveProductionSyncSettingsButton" type="button">Save Settings</button>
+              <button id="previewProductionSyncButton" type="button">Preview Sheet Updates</button>
+              <button id="pushProductionSyncButton" class="primary" type="button" disabled>Push Updates</button>
+            </div>
+            <div id="productionSyncSummary" class="unit-render-metrics">
+              <div class="empty-state">Configure the Google Sheet and preview updates before pushing.</div>
+            </div>
+            <div class="table-scroll production-preview-table production-sync-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>School / Site</th>
+                    <th>Job</th>
+                    <th>Sheet Row</th>
+                    <th>Status Updates</th>
+                  </tr>
+                </thead>
+                <tbody id="productionSyncPreviewBody"></tbody>
+              </table>
+            </div>
+            <div class="production-footer">
+              <p id="productionSyncStatus" class="tool-status">Use a Google service account shared with the production tracker.</p>
+            </div>
+          </section>
+        </section>
+
         <section id="batchRenderView" class="view">
           <section class="panel production-tool-panel">
             <div class="panel-heading"><div><h2>Multi-Job Batch Render</h2><p>Queue paid picture units and packaging across several jobs in one persistent production batch.</p></div><span class="status ready">Network-lock aware</span></div>
@@ -283,7 +327,7 @@
                   <label class="checkbox-line"><input name="includeUnits" type="checkbox" checked><span>Include Picture Units</span></label>
                   <label class="checkbox-line"><input name="includeEnvelopes" type="checkbox" checked><span>Include Envelopes</span></label>
                   <label class="checkbox-line"><input name="includeLabels" type="checkbox"><span>Include Order Labels</span></label>
-                  <label class="checkbox-line disabled-option"><input type="checkbox" disabled><span>Include Template Add-ons (coming next)</span></label>
+                  <label class="checkbox-line"><input name="includeCompositeNotice" type="checkbox"><span>Class/Star delivered after makeup note</span></label>
                 </div>
                 <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose where rendered files will be created"><button id="browseUnitRenderOutputButton" type="button">Browse</button></div></label>
               </section>
