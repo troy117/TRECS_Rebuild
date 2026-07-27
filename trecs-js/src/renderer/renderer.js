@@ -100,6 +100,11 @@ const browseCompositeOutputButton = document.getElementById('browseCompositeOutp
 const compositeProgress = document.getElementById('compositeProgress');
 const compositeStatus = document.getElementById('compositeStatus');
 const renderCompositesButton = document.getElementById('renderCompositesButton');
+const compositeGradeTitleModal = document.getElementById('compositeGradeTitleModal');
+const compositeGradeTitleForm = document.getElementById('compositeGradeTitleForm');
+const cancelCompositeGradeTitleButton = document.getElementById('cancelCompositeGradeTitleButton');
+const compositeGradeTitleMessage = document.getElementById('compositeGradeTitleMessage');
+const compositeGradeTitleStatus = document.getElementById('compositeGradeTitleStatus');
 const jobActionsMenu = document.getElementById('jobActionsMenu');
 const jobTypeFilters = document.getElementById('jobTypeFilters');
 const jobSearchInput = document.getElementById('jobSearchInput');
@@ -8681,8 +8686,76 @@ function compositeInput() {
     classHeading: compositeRenderForm.elements.classHeading.value,
     photographedOnly: compositeRenderForm.elements.photographedOnly.checked,
     includeStaff: compositeRenderForm.elements.includeStaff.checked,
-    includeNames: compositeRenderForm.elements.includeNames.checked
+    includeNames: compositeRenderForm.elements.includeNames.checked,
+    includePackagingLabels: compositeRenderForm.elements.includePackagingLabels.checked
   };
+}
+
+function compositeRenderGroups(scope) {
+  const classes = jobsState.compositeSetup?.classes || [];
+  return scope === 'all'
+    ? classes
+    : classes.filter((group) => group.homeroom === jobsState.compositeHomeroom);
+}
+
+function askCompositeGradeTitle(group) {
+  return new Promise((resolve) => {
+    if (!compositeGradeTitleModal || !compositeGradeTitleForm) {
+      resolve(group.gradeTitleOverride || group.gradeLabel || (group.grades || []).join(' / '));
+      return;
+    }
+    const input = compositeGradeTitleForm.elements.gradeTitle;
+    const grades = (group.grades || []).join(' / ');
+    const current = group.gradeTitleOverride || group.gradeLabel || grades;
+
+    const cleanup = () => {
+      compositeGradeTitleModal.hidden = true;
+      compositeGradeTitleForm.removeEventListener('submit', submit);
+      cancelCompositeGradeTitleButton?.removeEventListener('click', cancel);
+      document.removeEventListener('keydown', keydown);
+    };
+    const cancel = () => {
+      cleanup();
+      resolve(null);
+    };
+    const keydown = (event) => {
+      if (event.key === 'Escape') cancel();
+    };
+    const submit = (event) => {
+      event.preventDefault();
+      const title = input.value.trim();
+      if (!title) {
+        compositeGradeTitleStatus.textContent = 'Grade title is required for mixed-grade composites.';
+        input.focus();
+        return;
+      }
+      cleanup();
+      resolve(title);
+    };
+
+    compositeGradeTitleMessage.textContent = `Grade title for ${group.homeroom}${grades ? ` (${grades})` : ''}`;
+    compositeGradeTitleStatus.textContent = '';
+    input.value = current;
+    compositeGradeTitleModal.hidden = false;
+    compositeGradeTitleForm.addEventListener('submit', submit);
+    cancelCompositeGradeTitleButton?.addEventListener('click', cancel);
+    document.addEventListener('keydown', keydown);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
+async function collectCompositeGradeTitleOverrides(scope) {
+  const mixedGroups = compositeRenderGroups(scope).filter((group) => group.mixedGrades || (group.grades || []).length > 1);
+  const overrides = {};
+  for (const group of mixedGroups) {
+    const title = await askCompositeGradeTitle(group);
+    if (title === null) return null;
+    overrides[group.homeroom] = title;
+  }
+  return overrides;
 }
 
 function renderCompositeClasses() {
@@ -8772,7 +8845,7 @@ async function refreshCompositePreview() {
   const group = selectedCompositeClass();
   if (!group || jobsState.compositeRunning) return;
   refreshCompositePreviewButton.disabled = true;
-  compositePreviewStage.innerHTML = '<div class="empty-state">Building full-resolution preview...</div>';
+  compositePreviewStage.innerHTML = '<div class="empty-state">Building preview...</div>';
   try {
     const result = await trecsApi('previewComposite').previewComposite(compositeInput());
     compositePreviewStage.innerHTML = `<img src="${result.dataUrl}" alt="${escapeHtml(`${group.homeroom} ${jobsState.compositePreviewKind} composite preview`)}">`;
@@ -8801,6 +8874,13 @@ async function submitCompositeRender(event) {
   input.includeTraditional = compositeRenderForm.elements.includeTraditional.checked;
   input.includeStar = compositeRenderForm.elements.includeStar.checked;
   input.includePurchaserCopies = compositeRenderForm.elements.includePurchaserCopies.checked;
+  input.includePackagingLabels = compositeRenderForm.elements.includePackagingLabels.checked;
+  const gradeTitleOverrides = await collectCompositeGradeTitleOverrides(input.scope);
+  if (gradeTitleOverrides === null) {
+    compositeStatus.textContent = 'Composite render canceled.';
+    return;
+  }
+  input.gradeTitleOverrides = gradeTitleOverrides;
   if (input.scope === 'all') input.classHeading = '';
   if (!input.outputFolder) {
     compositeStatus.textContent = 'Choose an output folder first.';
@@ -8809,7 +8889,17 @@ async function submitCompositeRender(event) {
   jobsState.compositeRunning = true; renderCompositesButton.disabled = true; browseCompositeOutputButton.disabled = true; compositeProgress.value = 0;
   try {
     const result = await trecsApi('renderComposites').renderComposites(input);
-    compositeStatus.textContent = `Complete: ${result.traditionalBackgrounds} traditional backgrounds, ${result.starBackgrounds} STAR backgrounds, ${result.traditionalCopies} traditional buyer copies, and ${result.starCopies} personalized STAR copies.`;
+    if (result.gradeTitleOverrides) {
+      Object.entries(result.gradeTitleOverrides).forEach(([homeroom, gradeTitle]) => {
+        const group = jobsState.compositeSetup?.classes?.find((item) => item.homeroom === homeroom);
+        if (group) {
+          group.gradeLabel = gradeTitle;
+          group.gradeTitleOverride = gradeTitle;
+        }
+      });
+      renderCompositeClasses();
+    }
+    compositeStatus.textContent = `Complete: ${result.traditionalBackgrounds} traditional backgrounds, ${result.starBackgrounds} STAR backgrounds, ${result.traditionalCopies} traditional buyer copies, ${result.starCopies} personalized STAR copies, and ${result.packagingLabelSheets || 0} packaging label sheet${Number(result.packagingLabelSheets || 0) === 1 ? '' : 's'}.`;
   } catch (error) {
     compositeStatus.textContent = error.message || 'Composite render failed.';
     console.error(error);

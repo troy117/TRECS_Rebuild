@@ -264,6 +264,7 @@
                   <label class="checkbox-line"><input name="includeTraditional" type="checkbox" checked><span>Traditional Backgrounds</span></label>
                   <label class="checkbox-line"><input name="includeStar" type="checkbox" checked><span>STAR Backgrounds</span></label>
                   <label class="checkbox-line"><input name="includePurchaserCopies" type="checkbox" checked><span>Paid Purchaser Copies</span></label>
+                  <label class="checkbox-line"><input name="includePackagingLabels" type="checkbox"><span>Packaging Labels</span></label>
                   <label class="checkbox-line"><input name="includeNames" type="checkbox" checked><span>Student Names</span></label>
                   <label class="checkbox-line"><input name="includeStaff" type="checkbox" checked><span>Class Staff</span></label>
                   <label class="checkbox-line"><input name="photographedOnly" type="checkbox"><span>Photographed Students Only</span></label>
@@ -1096,6 +1097,25 @@
       </main>
     </div>
     <div id="imageHoverPreview" class="image-hover-preview" hidden></div>
+
+    <div class="modal-backdrop" id="compositeGradeTitleModal" hidden>
+      <form class="modal-card composite-grade-title-card" id="compositeGradeTitleForm">
+        <div class="modal-heading">
+          <h2>Composite Grade Title</h2>
+          <button id="cancelCompositeGradeTitleButton" type="button">Cancel</button>
+        </div>
+        <p id="compositeGradeTitleMessage" class="modal-help-text"></p>
+        <label>
+          <span>Grade Title</span>
+          <input name="gradeTitle" required>
+        </label>
+        <p id="compositeGradeTitleStatus"></p>
+        <div class="form-actions">
+          <span>This will be saved for this class and reused on rerender.</span>
+          <button class="primary" type="submit">Use Title</button>
+        </div>
+      </form>
+    </div>
 
     <div class="modal-backdrop" id="captureLoginModal" hidden>
       <form class="modal-card capture-login-card" id="captureLoginForm">

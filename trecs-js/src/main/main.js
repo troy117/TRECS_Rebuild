@@ -1275,6 +1275,18 @@ async function querySql(sql) {
   }
 }
 
+async function mutateSql(callback) {
+  const SQL = await getSqlModule();
+  const databaseBytes = fs.existsSync(prototypeDatabasePath) ? fs.readFileSync(prototypeDatabasePath) : null;
+  const database = databaseBytes ? new SQL.Database(databaseBytes) : new SQL.Database();
+  try {
+    callback(database);
+    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+  } finally {
+    database.close();
+  }
+}
+
 function safeFolderName(value) {
   const name = String(value || 'job')
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
@@ -4415,6 +4427,49 @@ function compositeGradeLabel(grades) {
   return values.join(' / ');
 }
 
+function normalizedCompositeGrades(grades) {
+  return [...new Set(grades.filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function ensureCompositeGradeTitleTable(database) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS composite_grade_titles (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      homeroom TEXT NOT NULL,
+      grade_title TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, homeroom)
+    );
+  `);
+}
+
+async function compositeGradeTitleRows(jobId) {
+  await mutateSql((database) => {
+    ensureCompositeGradeTitleTable(database);
+  });
+  return querySql(`SELECT homeroom, grade_title AS gradeTitle FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
+}
+
+async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
+  const entries = Object.entries(overrides || {})
+    .map(([homeroom, title]) => [String(homeroom || '').trim(), String(title || '').trim()])
+    .filter(([homeroom, title]) => homeroom && title);
+  if (!entries.length) return;
+  await mutateSql((database) => {
+    ensureCompositeGradeTitleTable(database);
+    entries.forEach(([homeroom, title]) => {
+      database.run(`
+        INSERT INTO composite_grade_titles (job_id, homeroom, grade_title, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(job_id, homeroom) DO UPDATE SET
+          grade_title = excluded.grade_title,
+          updated_at = CURRENT_TIMESTAMP;
+      `, [Number(jobId), homeroom, title]);
+    });
+  });
+}
+
 function compositeSchoolYear(jobName) {
   const match = String(jobName || '').match(/(20\d{2})/);
   return match ? `${match[1]}-${Number(match[1]) + 1}` : '';
@@ -4431,7 +4486,7 @@ async function compositeJobData(jobIdValue) {
   const subjects = await querySql(`
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
-           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_medium' ORDER BY iv.id DESC LIMIT 1),
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
                     (SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
     FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
     WHERE s.job_id = ${jobId} AND TRIM(COALESCE(s.homeroom, '')) != ''
@@ -4463,10 +4518,11 @@ async function compositeJobData(jobIdValue) {
     purchase[kind] += Math.max(1, Number(row.quantity || 1)); purchases.set(key, purchase);
   });
   subjects.forEach((subject) => { subject.purchases = purchases.get(Number(subject.id)) || { traditional: 0, star: 0 }; });
+  const gradeTitles = new Map((await compositeGradeTitleRows(jobId)).map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
   const allStaff = await querySql(`
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
-           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_medium' ORDER BY iv.id DESC LIMIT 1),
+           COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
                     (SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
     FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
     WHERE s.job_id = ${jobId}
@@ -4489,7 +4545,9 @@ async function compositeJobData(jobIdValue) {
   });
   const classes = [...classMap.values()].map((group) => ({
     ...group,
-    gradeLabel: compositeGradeLabel(group.students.map((subject) => subject.grade)),
+    grades: normalizedCompositeGrades(group.students.map((subject) => subject.grade)),
+    gradeLabel: gradeTitles.get(String(group.homeroom)) || compositeGradeLabel(group.students.map((subject) => subject.grade)),
+    gradeTitleOverride: gradeTitles.get(String(group.homeroom)) || '',
     photographed: group.students.filter((subject) => subject.hasPhoto).length,
     traditionalOrders: group.students.reduce((total, subject) => total + subject.purchases.traditional, 0),
     starOrders: group.students.reduce((total, subject) => total + subject.purchases.star, 0)
@@ -4530,6 +4588,7 @@ async function getCompositeSetup(_event, jobIdValue = null) {
     })),
     classes: data.classes.map((group) => ({
       homeroom: group.homeroom, gradeLabel: group.gradeLabel, students: group.students.length,
+      grades: group.grades, mixedGrades: group.grades.length > 1, gradeTitleOverride: group.gradeTitleOverride,
       photographed: group.photographed, staff: group.staff.length,
       traditionalOrders: group.traditionalOrders, starOrders: group.starOrders,
       traditionalLayout: traditionalCompositeLayout(group.students.length)?.label || 'Over legacy limit',
@@ -4551,6 +4610,50 @@ function compositeStudentPositions(type, layout, count) {
 
 function compositePhotoData(subject) {
   return subject.photoPath ? imageDataUrlFromPath(subject.photoPath) : null;
+}
+
+const CODE128_PATTERNS = [
+  '212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213', '221312', '231212',
+  '112232', '122132', '122231', '113222', '123122', '123221', '223211', '221132', '221231', '213212', '223112', '312131',
+  '311222', '321122', '321221', '312212', '322112', '322211', '212123', '212321', '232121', '111323', '131123', '131321',
+  '112313', '132113', '132311', '211313', '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121',
+  '313121', '211331', '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111',
+  '314111', '221411', '431111', '111224', '111422', '121124', '121421', '141122', '141221', '112214', '112412', '122114',
+  '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111', '111242', '121142', '121241', '114212',
+  '124112', '124211', '411212', '421112', '421211', '212141', '214121', '412121', '111143', '111341', '131141', '114113',
+  '114311', '411113', '411311', '113141', '114131', '311141', '411131', '211412', '211214', '211232', '2331112'
+];
+
+function code128BSymbols(value) {
+  const text = String(value || '').trim();
+  if (!text) return [];
+  const data = [];
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+    if (code < 32 || code > 127) throw new Error(`CODE128 labels only support printable ASCII values: ${text}`);
+    data.push(code - 32);
+  }
+  const symbols = [104, ...data];
+  const checksum = symbols.reduce((total, symbol, index) => total + symbol * (index || 1), 0) % 103;
+  return [...symbols, checksum, 106];
+}
+
+function code128BarcodeSvg(value, x, y, width, height) {
+  const symbols = code128BSymbols(value);
+  if (!symbols.length) return '';
+  const quietModules = 10;
+  const moduleCount = symbols.reduce((total, symbol) => total + CODE128_PATTERNS[symbol].split('').reduce((sum, digit) => sum + Number(digit), 0), quietModules * 2);
+  const moduleWidth = width / moduleCount;
+  let cursor = x + quietModules * moduleWidth;
+  const bars = [];
+  symbols.forEach((symbol) => {
+    CODE128_PATTERNS[symbol].split('').forEach((digit, index) => {
+      const segmentWidth = Number(digit) * moduleWidth;
+      if (index % 2 === 0) bars.push(`<rect x="${cursor.toFixed(2)}" y="${y}" width="${Math.max(segmentWidth, 0.7).toFixed(2)}" height="${height}" fill="#111"/>`);
+      cursor += segmentWidth;
+    });
+  });
+  return `<g aria-label="CODE128 ${escapeXml(value)}">${bars.join('')}</g>`;
 }
 
 function uniqueCompositeStaff(classStaff = [], additionalStaff = []) {
@@ -4582,6 +4685,7 @@ function compositeFeatureGeometry(count) {
 }
 
 function compositeSvg(group, type, options = {}, featured = null, purchaserLabel = '') {
+  const gradeLabel = options.gradeTitleOverrides?.[group.homeroom] || group.gradeLabel || '';
   const students = options.photographedOnly ? group.students.filter((subject) => subject.hasPhoto) : group.students;
   const layout = type === 'star' ? starCompositeLayout(students.length) : traditionalCompositeLayout(students.length);
   if (!layout) throw new Error(`${group.homeroom} has ${students.length} students, above the legacy ${type === 'star' ? 'STAR 44' : 'traditional 40'}-student limit.`);
@@ -4601,7 +4705,7 @@ function compositeSvg(group, type, options = {}, featured = null, purchaserLabel
     ${featured ? `<text x="${feature.x + feature.width / 2}" y="${feature.nameY}" text-anchor="middle" font-family="Arial" font-size="${`${featured.firstName} ${featured.lastName}`.length > 22 ? 44 : 58}" font-weight="bold" fill="#3b2b09">${escapeXml(`${featured.firstName} ${featured.lastName}`)}</text>` : ''}` : '';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="2400" viewBox="0 0 ${width} 2400"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${pale}"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="${width}" height="2400" fill="#fff"/>
     <g transform="translate(${offsetX} 0)"><rect width="3000" height="2400" fill="url(#bg)"/><rect width="3000" height="405" fill="${accent}"/><rect y="390" width="3000" height="15" fill="${type === 'star' ? '#f0c755' : '#75b6c9'}"/>
-    <text x="110" y="145" font-family="Arial" font-size="120" font-weight="bold" fill="#fff">${escapeXml(options.schoolName || '')}</text><text x="110" y="215" font-family="Arial" font-size="42" fill="#fff">${escapeXml(options.principal || '')}</text><text x="110" y="295" font-family="Arial" font-size="64" font-weight="bold" fill="#fff">${escapeXml(options.classHeading || teacherNames || group.homeroom)}</text><text x="110" y="355" font-family="Arial" font-size="46" fill="#fff">${escapeXml(`${group.gradeLabel || ''}${options.schoolYear ? `  |  ${options.schoolYear}` : ''}`)}</text>
+    <text x="110" y="145" font-family="Arial" font-size="120" font-weight="bold" fill="#fff">${escapeXml(options.schoolName || '')}</text><text x="110" y="215" font-family="Arial" font-size="42" fill="#fff">${escapeXml(options.principal || '')}</text><text x="110" y="295" font-family="Arial" font-size="64" font-weight="bold" fill="#fff">${escapeXml(options.classHeading || teacherNames || group.homeroom)}</text><text x="110" y="355" font-family="Arial" font-size="46" fill="#fff">${escapeXml(`${gradeLabel}${options.schoolYear ? `  |  ${options.schoolYear}` : ''}`)}</text>
     ${featureSvg}${studentSlots}${staffSlots}</g>${purchaserLabel ? `<g transform="translate(62 2100) rotate(-90)"><text font-family="Arial" font-size="54" fill="#172b3a">${escapeXml(purchaserLabel)}</text></g>` : ''}</svg>`;
 }
 
@@ -4615,6 +4719,7 @@ function compositeOptions(input, job) {
     photographedOnly: input.photographedOnly === true,
     includeStaff: input.includeStaff !== false,
     includeNames: input.includeNames !== false,
+    gradeTitleOverrides: input.gradeTitleOverrides && typeof input.gradeTitleOverrides === 'object' ? input.gradeTitleOverrides : {},
     additionalStaffIds
   };
 }
@@ -4630,8 +4735,9 @@ async function previewComposite(event, input = {}) {
   const type = input.type === 'star' ? 'star' : 'traditional';
   const featured = type === 'star' ? group.students.find((subject) => Number(subject.id) === Number(input.featuredSubjectId)) || null : null;
   const svg = compositeSvg(group, type, applyCompositeAdditionalStaff(compositeOptions(input, data.job), data.staff), featured);
-  const dataUrl = await rasterizeUnitSheet(event.sender, svg, 3000, 2400);
-  return { dataUrl, width: 3000, height: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
+  const previewWidth = 1500; const previewHeight = 1200;
+  const dataUrl = await rasterizeUnitSheet(event.sender, svg, previewWidth, previewHeight);
+  return { dataUrl, width: previewWidth, height: previewHeight, fullWidth: 3000, fullHeight: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
 }
 
 async function chooseCompositeOutputFolder() {
@@ -4659,19 +4765,78 @@ function compositeProgressMessage(group, index, total, startedAt) {
   return `${prefix} - ETA ${formatCompositeEta(remainingMs)}`;
 }
 
+function compositePackagingLabelEntrySvg(entry) {
+  const imageSource = compositePhotoData(entry.subject);
+  const name = `${entry.subject.firstName || ''} ${entry.subject.lastName || ''}`.trim();
+  const ref = String(entry.subject.ref || '').trim();
+  const contents = [];
+  if (entry.traditional) contents.push(`Traditional Class Composite x${entry.traditional}`);
+  if (entry.star) contents.push(`STAR Composite x${entry.star}`);
+  return `<svg width="1200" height="600" viewBox="0 0 1200 600"><rect width="1200" height="600" fill="white"/>
+    ${imageSource ? `<image href="${imageSource}" x="25" y="25" width="520" height="550" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="25" y="25" width="520" height="550" fill="#eef2f5"/><text x="285" y="315" text-anchor="middle" font-family="Arial" font-size="44" font-weight="bold" fill="#607481">NO PHOTO</text>`}
+    <text x="580" y="90" font-family="Arial" font-size="${name.length > 21 ? 42 : 54}" font-weight="bold">${escapeXml(name)}</text>
+    <text x="580" y="160" font-family="Arial" font-size="44">${escapeXml(`${entry.subject.grade || ''}: ${entry.subject.homeroom || entry.group.homeroom || ''}`)}</text>
+    <text x="580" y="220" font-family="Arial" font-size="38">${escapeXml(entry.schoolName || '')}</text>
+    <text x="580" y="280" font-family="Arial" font-size="34" font-weight="bold">Class Composite Packaging</text>
+    ${contents.map((content, index) => `<text x="580" y="${330 + index * 38}" font-family="Arial" font-size="30">${escapeXml(content)}</text>`).join('')}
+    <text x="580" y="485" font-family="Arial" font-size="34">Ref Num: ${escapeXml(ref)}</text>
+    ${code128BarcodeSvg(ref, 580, 505, 560, 70)}</svg>`;
+}
+
+function compositePackagingLabelSheetSvg(entries, sheet, totalSheets) {
+  const labelWidth = 1200; const labelHeight = 600;
+  const xPositions = [75, 1275]; const yPositions = [150, 750, 1350, 1950, 2550];
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="2550" height="3300" viewBox="0 0 2550 3300"><rect width="2550" height="3300" fill="white"/>
+    ${entries.map((entry, index) => `<g transform="translate(${xPositions[index % 2]} ${yPositions[Math.floor(index / 2)]})">${compositePackagingLabelEntrySvg(entry)}</g>`).join('')}
+    ${entries.length < 10 ? Array.from({ length: 10 - entries.length }, (_value, offset) => {
+      const index = entries.length + offset;
+      return `<rect x="${xPositions[index % 2]}" y="${yPositions[Math.floor(index / 2)]}" width="${labelWidth}" height="${labelHeight}" fill="white"/>`;
+    }).join('') : ''}
+    <text x="1275" y="3265" text-anchor="middle" font-family="Arial" font-size="30" fill="#1f2933">Page ${sheet} of ${totalSheets}</text></svg>`;
+}
+
+async function renderCompositePackagingLabels(event, groups, options, folders, result) {
+  const entries = [];
+  groups.forEach((group) => {
+    group.students.forEach((subject) => {
+      const traditional = Number(subject.purchases.traditional || 0);
+      const star = Number(subject.purchases.star || 0);
+      if (!traditional && !star) return;
+      entries.push({ group, subject, traditional, star, schoolName: options.schoolName });
+    });
+  });
+  if (!entries.length) return;
+  const labelFolder = path.join(folders.labels);
+  fs.mkdirSync(labelFolder, { recursive: true });
+  const totalSheets = Math.ceil(entries.length / 10);
+  for (let index = 0; index < entries.length; index += 10) {
+    const sheet = Math.floor(index / 10) + 1;
+    const dataUrl = await rasterizeUnitSheet(event.sender, compositePackagingLabelSheetSvg(entries.slice(index, index + 10), sheet, totalSheets), 2550, 3300);
+    const outputPath = path.join(labelFolder, `_labels_${sheet}.jpg`);
+    fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+    result.packagingLabelSheets += 1;
+    result.files.push(outputPath);
+  }
+}
+
 async function runCompositeRender(event, input = {}) {
   const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
   if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const data = await compositeJobData(input.jobId); const scope = input.scope === 'all' ? 'all' : 'selected';
   const groups = scope === 'all' ? data.classes : data.classes.filter((group) => group.homeroom === String(input.homeroom || ''));
   if (!groups.length) throw new Error('Choose at least one class to render.');
+  await saveCompositeGradeTitleOverrides(Number(input.jobId), input.gradeTitleOverrides || {});
+  const overrideMap = input.gradeTitleOverrides && typeof input.gradeTitleOverrides === 'object' ? input.gradeTitleOverrides : {};
+  groups.forEach((group) => {
+    if (overrideMap[group.homeroom]) group.gradeLabel = String(overrideMap[group.homeroom]).trim();
+  });
   const options = applyCompositeAdditionalStaff(compositeOptions(input, data.job), data.staff); const includeTraditional = input.includeTraditional !== false; const includeStar = input.includeStar !== false;
   const selectedCounts = groups.map((group) => ({ group, count: options.photographedOnly ? group.students.filter((subject) => subject.hasPhoto).length : group.students.length }));
   const invalid = selectedCounts.find(({ count }) => (includeTraditional && !traditionalCompositeLayout(count)) || (includeStar && !starCompositeLayout(count)));
   if (invalid) throw new Error(`${invalid.group.homeroom} has ${invalid.count} selected students and is above a legacy layout limit.`);
-  const folders = { backgrounds: path.join(outputFolder, 'Composite Backgrounds'), students: path.join(outputFolder, 'Student Composites') };
+  const folders = { backgrounds: path.join(outputFolder, 'Composite Backgrounds'), students: path.join(outputFolder, 'Student Composites'), labels: path.join(outputFolder, 'Composite Packaging Labels') };
   Object.values(folders).forEach((folder) => fs.mkdirSync(folder, { recursive: true }));
-  const result = { jobId: Number(input.jobId), outputFolder, classes: groups.length, traditionalBackgrounds: 0, starBackgrounds: 0, traditionalCopies: 0, starCopies: 0, files: [] };
+  const result = { jobId: Number(input.jobId), outputFolder, classes: groups.length, traditionalBackgrounds: 0, starBackgrounds: 0, traditionalCopies: 0, starCopies: 0, packagingLabelSheets: 0, gradeTitleOverrides: overrideMap, files: [] };
   const startedAt = Date.now();
   for (let index = 0; index < groups.length; index += 1) {
     const group = groups[index]; event.sender.send('composite:progress', { current: index, total: groups.length, message: compositeProgressMessage(group, index, groups.length, startedAt) });
@@ -4695,6 +4860,10 @@ async function runCompositeRender(event, input = {}) {
         const outputPath = path.join(folders.students, `${baseName}_${safeFolderName(subject.lastName)}_${safeFolderName(subject.firstName)}_${copy + 1}s.jpg`); fs.writeFileSync(outputPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.starCopies += 1; result.files.push(outputPath);
       }
     }
+  }
+  if (input.includePackagingLabels) {
+    event.sender.send('composite:progress', { current: groups.length, total: groups.length + 1, message: 'Rendering composite packaging labels...' });
+    await renderCompositePackagingLabels(event, groups, options, folders, result);
   }
   fs.writeFileSync(path.join(outputFolder, 'composite-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString(), legacyLayouts: true }, null, 2));
   event.sender.send('composite:progress', { current: groups.length, total: groups.length, message: 'Composite render complete' });

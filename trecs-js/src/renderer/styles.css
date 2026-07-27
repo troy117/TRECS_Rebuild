@@ -1046,6 +1046,17 @@ dd {
   min-height: 18px;
 }
 
+.composite-grade-title-card {
+  width: min(92vw, 460px);
+}
+
+.modal-card .modal-help-text {
+  color: #1f2933;
+  font-size: 14px;
+  line-height: 1.45;
+  min-height: 0;
+}
+
 #envelopeConfirmMessage {
   color: #1f2933;
   font-size: 14px;

@@ -157,6 +157,15 @@ CREATE TABLE IF NOT EXISTS job_links (
   UNIQUE(source_job_id, target_job_id, relationship_type)
 );
 
+CREATE TABLE IF NOT EXISTS composite_grade_titles (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  homeroom TEXT NOT NULL,
+  grade_title TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(job_id, homeroom)
+);
+
 CREATE TABLE IF NOT EXISTS job_sessions (
   id INTEGER PRIMARY KEY,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,

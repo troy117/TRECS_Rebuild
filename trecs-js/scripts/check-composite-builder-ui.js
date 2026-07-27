@@ -17,7 +17,7 @@ async function waitForWindow() {
 
 async function waitForPreview(window) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const ready = await window.webContents.executeJavaScript(`Boolean(document.querySelector('#compositePreviewStage img')) && !document.getElementById('compositePreviewStage').textContent.includes('Building full-resolution preview')`);
+    const ready = await window.webContents.executeJavaScript(`Boolean(document.querySelector('#compositePreviewStage img')) && !document.getElementById('compositePreviewStage').textContent.includes('Building preview')`);
     if (ready) return;
     await wait(100);
   }
@@ -81,14 +81,20 @@ async function run() {
   })()`);
   const layoutTests = await window.webContents.executeJavaScript(`window.trecs.testCompositeLayouts()`);
   const outputFolder = path.resolve(__dirname, '../../exports/composite-builder-smoke');
+  fs.rmSync(outputFolder, { recursive: true, force: true });
   fs.mkdirSync(outputFolder, { recursive: true });
   const actualFeaturePath = path.join(outputFolder, 'actual-photo-star-feature-preview.jpg');
   fs.writeFileSync(actualFeaturePath, Buffer.from(actualFeature.dataUrl.split(',')[1], 'base64'));
   const actualFeatureSize = nativeImage.createFromPath(actualFeaturePath).getSize();
   delete actualFeature.dataUrl;
+  const renderTarget = await window.webContents.executeJavaScript(`(async () => {
+    const setup = await window.trecs.getCompositeSetup(${Number(selected.jobId)});
+    const group = setup.classes.find((item) => Number(item.traditionalOrders || 0) + Number(item.starOrders || 0) > 0) || setup.classes.find((item) => item.homeroom === ${JSON.stringify(selected.homeroom)}) || setup.classes[0];
+    return { homeroom: group.homeroom, traditionalOrders: group.traditionalOrders, starOrders: group.starOrders };
+  })()`);
   const render = await window.webContents.executeJavaScript(`window.trecs.renderComposites(${JSON.stringify({
     jobId: selected.jobId,
-    homeroom: selected.homeroom,
+    homeroom: renderTarget.homeroom,
     scope: 'selected',
     schoolName: 'ISLAND',
     principal: 'Composite Builder Smoke Test',
@@ -100,24 +106,29 @@ async function run() {
     includeTraditional: true,
     includeStar: true,
     includePurchaserCopies: true,
+    includePackagingLabels: true,
     outputFolder
   })})`);
 
   const backgrounds = fs.readdirSync(path.join(outputFolder, 'Composite Backgrounds')).filter((name) => name.toLowerCase().endsWith('.jpg'));
   const sizes = backgrounds.map((name) => ({ name, ...nativeImage.createFromPath(path.join(outputFolder, 'Composite Backgrounds', name)).getSize() }));
+  const labelFolder = path.join(outputFolder, 'Composite Packaging Labels');
+  const labels = fs.existsSync(labelFolder) ? fs.readdirSync(labelFolder).filter((name) => name.toLowerCase().endsWith('.jpg')) : [];
+  const labelSizes = labels.map((name) => ({ name, ...nativeImage.createFromPath(path.join(labelFolder, name)).getSize() }));
   const screenshotFolder = path.resolve(__dirname, '../../exports/ui-tests');
   fs.mkdirSync(screenshotFolder, { recursive: true });
   const screenshotPath = path.join(screenshotFolder, 'class-composite-builder.png');
   fs.writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
 
   const pass = sidebar.active && sidebar.title === 'Class Composites' && sidebar.jobCount > 0 && sidebar.classCount > 0
-    && sidebar.previewVisible && sidebar.previewNaturalWidth === 3000 && sidebar.previewNaturalHeight === 2400
+    && sidebar.previewVisible && sidebar.previewNaturalWidth === 1500 && sidebar.previewNaturalHeight === 1200
     && sidebar.hasTraditionalControl && sidebar.hasStarControl && sidebar.hasOutputControls && sidebar.legacyBadge
     && menu.active && menu.previewVisible && star.previewVisible && star.activeType === 'star' && layoutTests.passed
-    && actualFeature.hasPhoto && actualFeatureSize.width === 3000 && actualFeatureSize.height === 2400
-    && render.traditionalBackgrounds === 1 && render.starBackgrounds === 1
+    && actualFeature.hasPhoto && actualFeatureSize.width === 1500 && actualFeatureSize.height === 1200
+    && render.traditionalBackgrounds === 1 && render.starBackgrounds === 1 && render.packagingLabelSheets > 0
     && sizes.length === 2 && sizes.every((size) => size.width === 3000 && size.height === 2400);
-  const report = { pass, screenshotPath, outputFolder, sidebar, menu, star, actualFeature: { ...actualFeature, outputPath: actualFeaturePath, ...actualFeatureSize }, layoutTests, render, backgrounds, sizes };
+  const labelsPass = labelSizes.length > 0 && labelSizes.every((size) => size.width === 2550 && size.height === 3300);
+  const report = { pass: pass && labelsPass, screenshotPath, outputFolder, sidebar, menu, star, actualFeature: { ...actualFeature, outputPath: actualFeaturePath, ...actualFeatureSize }, layoutTests, renderTarget, render, backgrounds, sizes, labels, labelSizes };
   fs.writeFileSync(path.join(outputFolder, 'smoke-test-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   app.exit(pass ? 0 : 1);
