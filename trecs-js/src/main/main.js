@@ -1998,6 +1998,22 @@ async function pushProductionStatusSync(_event, input = {}) {
   };
 }
 
+async function testProductionStatusSync(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  if (!settings.credentialsPath || !settings.spreadsheetId || !settings.sheetName) {
+    throw new Error('Production sync needs credentials, spreadsheet ID, and sheet tab');
+  }
+  const value = `TRECS connection test - ${new Date().toLocaleString()}`;
+  const response = await googleSheetBatchUpdate(settings, [{ range: 'A1', value }]);
+  return {
+    settings,
+    range: 'A1',
+    value,
+    updatedCells: Number(response.totalUpdatedCells || 1),
+    serviceAccountEmail: response.serviceAccountEmail
+  };
+}
+
 function displayNameForSubject(firstName, lastName, displayName) {
   const explicitName = optionalText(displayName, 255);
   if (explicitName) {
@@ -5915,6 +5931,7 @@ ipcMain.handle('production-sync:settings:save', saveProductionSyncSettings);
 ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredentials);
 ipcMain.handle('production-sync:preview', previewProductionStatusSync);
 ipcMain.handle('production-sync:push', pushProductionStatusSync);
+ipcMain.handle('production-sync:test', testProductionStatusSync);
 
 async function getJobsData() {
   const jobs = await querySql(`

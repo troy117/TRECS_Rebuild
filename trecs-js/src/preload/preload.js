@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('trecs', {
   chooseProductionSyncCredentials: () => ipcRenderer.invoke('production-sync:choose-credentials'),
   previewProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:preview', input),
   pushProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:push', input),
+  testProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:test', input),
   createClient: (input) => ipcRenderer.invoke('client:create', input),
   createJob: (input) => ipcRenderer.invoke('job:create', input),
   updateJob: (jobId, input) => ipcRenderer.invoke('job:update', jobId, input),

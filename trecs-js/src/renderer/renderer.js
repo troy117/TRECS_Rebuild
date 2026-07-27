@@ -73,6 +73,7 @@ const productionSyncSheetName = document.getElementById('productionSyncSheetName
 const productionSyncHeaderRow = document.getElementById('productionSyncHeaderRow');
 const productionSyncFirstDataRow = document.getElementById('productionSyncFirstDataRow');
 const saveProductionSyncSettingsButton = document.getElementById('saveProductionSyncSettingsButton');
+const testProductionSyncButton = document.getElementById('testProductionSyncButton');
 const previewProductionSyncButton = document.getElementById('previewProductionSyncButton');
 const pushProductionSyncButton = document.getElementById('pushProductionSyncButton');
 const productionSyncSummary = document.getElementById('productionSyncSummary');
@@ -8350,6 +8351,24 @@ async function previewProductionSync() {
   }
 }
 
+async function testProductionSync() {
+  testProductionSyncButton.disabled = true;
+  previewProductionSyncButton.disabled = true;
+  pushProductionSyncButton.disabled = true;
+  productionSyncStatus.textContent = 'Writing test value to A1...';
+  try {
+    const result = await trecsApi('testProductionStatusSync').testProductionStatusSync(productionSyncInput());
+    productionSyncStatus.textContent = `Connected as ${result.serviceAccountEmail || 'service account'} and wrote "${result.value}" to ${result.settings?.sheetName || 'sheet'}!${result.range || 'A1'}.`;
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not test production sync connection.';
+    console.error(error);
+  } finally {
+    testProductionSyncButton.disabled = false;
+    previewProductionSyncButton.disabled = false;
+    pushProductionSyncButton.disabled = !(jobsState.productionSyncPreview?.updates || []).length;
+  }
+}
+
 async function pushProductionSync() {
   pushProductionSyncButton.disabled = true;
   productionSyncStatus.textContent = 'Pushing production status updates...';
@@ -10054,6 +10073,7 @@ onlineOrderMapping.addEventListener('change', () => refreshOnlineOrderPreviewFro
 importOnlineOrdersButton.addEventListener('click', importReadyOnlineOrders);
 chooseProductionSyncCredentialsButton.addEventListener('click', chooseProductionSyncCredentials);
 saveProductionSyncSettingsButton.addEventListener('click', saveProductionSyncSettings);
+testProductionSyncButton.addEventListener('click', testProductionSync);
 previewProductionSyncButton.addEventListener('click', previewProductionSync);
 pushProductionSyncButton.addEventListener('click', pushProductionSync);
 browseBatchRenderOutputButton.addEventListener('click', browseBatchRenderOutput);
