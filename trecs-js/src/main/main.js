@@ -365,7 +365,13 @@ function createJobDatabaseSchema(database) {
       homeroom TEXT,
       track TEXT,
       team TEXT,
+      field1 TEXT,
+      field2 TEXT,
       photographed_status TEXT NOT NULL DEFAULT 'unknown',
+      enrollment_status TEXT NOT NULL DEFAULT 'active',
+      include_in_composites INTEGER NOT NULL DEFAULT 0,
+      verified_at TEXT,
+      verification_source TEXT,
       primary_image_asset_id INTEGER,
       notes TEXT,
       created_at TEXT,
@@ -380,6 +386,41 @@ function createJobDatabaseSchema(database) {
       code TEXT NOT NULL,
       created_at TEXT,
       UNIQUE(subject_id, code_type, code)
+    );
+
+    CREATE TABLE IF NOT EXISTS staff_assignments (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      subject_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      homeroom TEXT,
+      class_description TEXT,
+      include_in_composites INTEGER NOT NULL DEFAULT 1,
+      include_in_exports INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      updated_at TEXT,
+      UNIQUE(job_id, subject_id, role, homeroom)
+    );
+
+    CREATE TABLE IF NOT EXISTS composite_grade_titles (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      homeroom TEXT NOT NULL,
+      grade_title TEXT NOT NULL,
+      reviewed INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, homeroom)
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      name_key TEXT NOT NULL,
+      subject_ids_key TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      UNIQUE(job_id, name_key, subject_ids_key)
     );
 
     CREATE TABLE IF NOT EXISTS subject_groups (
@@ -715,6 +756,41 @@ function createProgramDatabaseSchema(database) {
       UNIQUE(package_plan_id, code)
     );
 
+    CREATE TABLE IF NOT EXISTS staff_assignments (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      subject_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      homeroom TEXT,
+      class_description TEXT,
+      include_in_composites INTEGER NOT NULL DEFAULT 1,
+      include_in_exports INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, subject_id, role, homeroom)
+    );
+
+    CREATE TABLE IF NOT EXISTS composite_grade_titles (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      homeroom TEXT NOT NULL,
+      grade_title TEXT NOT NULL,
+      reviewed INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, homeroom)
+    );
+
+    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      name_key TEXT NOT NULL,
+      subject_ids_key TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      UNIQUE(job_id, name_key, subject_ids_key)
+    );
+
     CREATE TABLE IF NOT EXISTS package_code_items (
       id INTEGER PRIMARY KEY,
       package_code_id INTEGER NOT NULL,
@@ -825,6 +901,18 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
   const croppedMediumOnly = options.imageScope === 'cropped_med';
 
   try {
+    ensureCompositeGradeTitleTable(sourceDatabase);
+    sourceDatabase.run(`
+      CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        name_key TEXT NOT NULL,
+        subject_ids_key TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT,
+        UNIQUE(job_id, name_key, subject_ids_key)
+      );
+    `);
     const jobRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
       FROM jobs
@@ -882,6 +970,12 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'subjects', Object.keys(subjectRows[0] || {}), subjectRows);
     const subjectCodeRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subject_codes WHERE subject_id IN (${subjectIdList});`);
     insertRows(jobDatabase, 'subject_codes', Object.keys(subjectCodeRows[0] || {}), subjectCodeRows);
+    const staffAssignmentRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM staff_assignments WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'staff_assignments', Object.keys(staffAssignmentRows[0] || {}), staffAssignmentRows);
+    const compositeGradeRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM composite_grade_titles WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'composite_grade_titles', Object.keys(compositeGradeRows[0] || {}), compositeGradeRows);
+    const duplicateReviewRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'duplicate_record_reviews', Object.keys(duplicateReviewRows[0] || {}), duplicateReviewRows);
     const subjectGroupRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM subject_groups WHERE job_id = ${jobId};`);
     const subjectGroupIds = subjectGroupRows.map((row) => row.id);
     const subjectGroupIdList = subjectGroupIds.length ? subjectGroupIds.join(', ') : '0';
@@ -1214,6 +1308,24 @@ async function ensurePrototypeDatabaseShape() {
     changed = ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'") || changed;
     changed = ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER') || changed;
+    changed = ensureColumn(database, 'subjects', 'enrollment_status', "TEXT NOT NULL DEFAULT 'active'") || changed;
+    changed = ensureColumn(database, 'subjects', 'include_in_composites', 'INTEGER NOT NULL DEFAULT 0') || changed;
+    changed = ensureColumn(database, 'subjects', 'verified_at', 'TEXT') || changed;
+    changed = ensureColumn(database, 'subjects', 'verification_source', 'TEXT') || changed;
+    changed = ensureColumn(database, 'subjects', 'field1', 'TEXT') || changed;
+    changed = ensureColumn(database, 'subjects', 'field2', 'TEXT') || changed;
+    ensureCompositeGradeTitleTable(database);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        name_key TEXT NOT NULL,
+        subject_ids_key TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT,
+        UNIQUE(job_id, name_key, subject_ids_key)
+      );
+    `);
     changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
@@ -1356,6 +1468,26 @@ function normalizePhotographedStatus(value) {
   return status;
 }
 
+function normalizeEnrollmentStatus(value) {
+  const text = String(value || 'active').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const aliases = {
+    enrolled: 'active',
+    current: 'active',
+    active: 'active',
+    withdrawn: 'unenrolled',
+    transferred: 'unenrolled',
+    left: 'unenrolled',
+    inactive: 'unenrolled',
+    unenrolled: 'unenrolled',
+    un_enrolled: 'unenrolled'
+  };
+  const status = aliases[text] || text;
+  if (!new Set(['active', 'unenrolled']).has(status)) {
+    throw new Error('Invalid enrollment status');
+  }
+  return status;
+}
+
 const STUDENT_FIELD_SETTINGS_KEY = 'student_field_visibility';
 const STUDENT_FIELD_KEYS = [
   'firstName',
@@ -1365,7 +1497,10 @@ const STUDENT_FIELD_KEYS = [
   'homeroom',
   'track',
   'team',
+  'field1',
+  'field2',
   'subjectType',
+  'enrollmentStatus',
   'photographedStatus'
 ];
 const STUDENT_FIELD_LABELS = {
@@ -1376,7 +1511,10 @@ const STUDENT_FIELD_LABELS = {
   homeroom: 'Homeroom',
   track: 'Track',
   team: 'Team',
+  field1: 'Field1',
+  field2: 'Field2',
   subjectType: 'Type',
+  enrollmentStatus: 'Enrollment Status',
   photographedStatus: 'Photo Status'
 };
 const DEFAULT_STUDENT_FIELD_VISIBILITY = STUDENT_FIELD_KEYS.reduce((fields, key) => {
@@ -4421,14 +4559,16 @@ function compositeImagePath(subject, jobRoot) {
 }
 
 function compositeGradeLabel(grades) {
-  const labels = { KIN: 'Kindergarten', PRE: 'Preschool', TK: 'Transitional Kindergarten', '01': '1st Grade', '02': '2nd Grade', '03': '3rd Grade', '04': '4th Grade', '05': '5th Grade', '06': '6th Grade', '07': '7th Grade', '08': '8th Grade', '09': '9th Grade', '10': '10th Grade', '11': '11th Grade', '12': '12th Grade' };
-  const values = [...new Set(grades.filter(Boolean).map(String))];
-  if (values.length === 1) return labels[values[0]] || (/^\d+$/.test(values[0]) ? `${Number(values[0])}${['th', 'st', 'nd', 'rd'][Number(values[0]) % 10] || 'th'} Grade` : values[0]);
-  return values.join(' / ');
+  const labels = { PRE: 'Preschool', TK: 'Transitional Kindergarten', KIN: 'Kindergarten', FAC: 'Faculty', EXMPT: 'Exempt' };
+  const values = [...new Set(grades.filter(Boolean).map(normalizeTrecsGrade).filter(Boolean))]
+    .sort((a, b) => gradeSortIndex(a) - gradeSortIndex(b) || a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  if (values.length === 1) return labels[values[0]] || ordinalGradeLabel(values[0]);
+  return values.map((value) => labels[value] || value).join(' / ');
 }
 
 function normalizedCompositeGrades(grades) {
-  return [...new Set(grades.filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  return [...new Set(grades.filter(Boolean).map(normalizeTrecsGrade).filter(Boolean))]
+    .sort((a, b) => gradeSortIndex(a) - gradeSortIndex(b) || a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
 function ensureCompositeGradeTitleTable(database) {
@@ -4438,17 +4578,19 @@ function ensureCompositeGradeTitleTable(database) {
       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
       homeroom TEXT NOT NULL,
       grade_title TEXT NOT NULL,
+      reviewed INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(job_id, homeroom)
     );
   `);
+  ensureColumn(database, 'composite_grade_titles', 'reviewed', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 async function compositeGradeTitleRows(jobId) {
   await mutateSql((database) => {
     ensureCompositeGradeTitleTable(database);
   });
-  return querySql(`SELECT homeroom, grade_title AS gradeTitle FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
+  return querySql(`SELECT homeroom, grade_title AS gradeTitle, reviewed FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
 }
 
 async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
@@ -4476,6 +4618,7 @@ function compositeSchoolYear(jobName) {
 }
 
 async function compositeJobData(jobIdValue) {
+  await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
   const jobs = await querySql(`
     SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
@@ -4492,6 +4635,7 @@ async function compositeJobData(jobIdValue) {
     WHERE s.job_id = ${jobId} AND TRIM(COALESCE(s.homeroom, '')) != ''
       AND TRIM(COALESCE(s.first_name, '')) != '' AND TRIM(COALESCE(s.last_name, '')) != ''
       AND UPPER(COALESCE(s.grade, '')) != 'EXMPT'
+      AND (COALESCE(s.enrollment_status, 'active') != 'unenrolled' OR COALESCE(s.include_in_composites, 0) = 1)
     ORDER BY s.homeroom, s.last_name, s.first_name, s.id;
   `);
   subjects.forEach((subject) => {
@@ -4527,6 +4671,7 @@ async function compositeJobData(jobIdValue) {
     FROM subjects s LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
     WHERE s.job_id = ${jobId}
       AND TRIM(COALESCE(s.first_name, '')) != '' AND TRIM(COALESCE(s.last_name, '')) != ''
+      AND (COALESCE(s.enrollment_status, 'active') != 'unenrolled' OR COALESCE(s.include_in_composites, 0) = 1)
       AND (
         LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff', 'teacher')
         OR UPPER(COALESCE(s.grade, '')) = 'FAC'
@@ -4543,11 +4688,24 @@ async function compositeJobData(jobIdValue) {
     if (!classMap.has(subject.homeroom)) classMap.set(subject.homeroom, { homeroom: subject.homeroom, students: [], staff: [] });
     classMap.get(subject.homeroom)[subject.staff ? 'staff' : 'students'].push(subject);
   });
+  const staffById = new Map(allStaff.map((subject) => [Number(subject.id), subject]));
+  const staffAssignments = await querySql(`SELECT subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, sort_order AS sortOrder FROM staff_assignments WHERE job_id = ${jobId} ORDER BY sort_order, id;`);
+  const teacherCompositeTitles = new Map();
+  staffAssignments.forEach((assignment) => {
+    if (assignment.role !== 'teacher' || !assignment.homeroom || Number(assignment.includeInComposites || 0) === 0) return;
+    const staffSubject = staffById.get(Number(assignment.subjectId));
+    if (!staffSubject) return;
+    if (!classMap.has(assignment.homeroom)) classMap.set(assignment.homeroom, { homeroom: assignment.homeroom, students: [], staff: [] });
+    const group = classMap.get(assignment.homeroom);
+    if (!group.staff.some((subject) => Number(subject.id) === Number(staffSubject.id))) group.staff.push({ ...staffSubject, homeroom: assignment.homeroom });
+    if (assignment.classDescription && !teacherCompositeTitles.has(String(assignment.homeroom))) teacherCompositeTitles.set(String(assignment.homeroom), assignment.classDescription);
+  });
   const classes = [...classMap.values()].map((group) => ({
     ...group,
     grades: normalizedCompositeGrades(group.students.map((subject) => subject.grade)),
     gradeLabel: gradeTitles.get(String(group.homeroom)) || compositeGradeLabel(group.students.map((subject) => subject.grade)),
     gradeTitleOverride: gradeTitles.get(String(group.homeroom)) || '',
+    teacherCompositeTitle: teacherCompositeTitles.get(String(group.homeroom)) || '',
     photographed: group.students.filter((subject) => subject.hasPhoto).length,
     traditionalOrders: group.students.reduce((total, subject) => total + subject.purchases.traditional, 0),
     starOrders: group.students.reduce((total, subject) => total + subject.purchases.star, 0)
@@ -4571,10 +4729,22 @@ async function getCompositeSetup(_event, jobIdValue = null) {
   const selectedJobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.classes) > 0)?.id || jobs[0]?.id || null);
   if (!selectedJobId) return { jobs, selectedJobId: null, job: null, classes: [] };
   const data = await compositeJobData(selectedJobId);
+  const keyStaffRows = await querySql(`
+    SELECT subject_id AS subjectId, role
+    FROM staff_assignments
+    WHERE job_id = ${Number(selectedJobId)}
+      AND role IN ('principal', 'vp')
+    ORDER BY sort_order, id;
+  `);
+  const keyStaff = {
+    principalSubjectId: keyStaffRows.find((row) => row.role === 'principal')?.subjectId || '',
+    vpSubjectId: keyStaffRows.find((row) => row.role === 'vp')?.subjectId || ''
+  };
   return {
     jobs,
     selectedJobId,
     job: data.job,
+    keyStaff,
     staff: data.staff.map((subject) => ({
       id: subject.id,
       ref: subject.ref,
@@ -4666,14 +4836,32 @@ function uniqueCompositeStaff(classStaff = [], additionalStaff = []) {
   });
 }
 
-function compositeSlotSvg(subject, position, layout, includeNames, kind) {
+function compositeSlotSvg(subject, position, layout, includeNames, kind, options = {}) {
   const x = position.x; const y = position.y; const photo = compositePhotoData(subject);
   const fullName = `${subject.firstName || ''} ${subject.lastName || ''}`.trim();
   const initials = `${String(subject.firstName || '').charAt(0)}${String(subject.lastName || '').charAt(0)}`.toUpperCase();
   const fontSize = fullName.length > 25 ? 22 : fullName.length > 19 ? 25 : 30;
+  const nameColor = options.nameColor || (kind === 'star' ? '#3b2b09' : '#172b3a');
   return `<g><rect x="${x + layout.frameX}" y="${y + layout.frameY}" width="${layout.frameWidth}" height="${layout.frameHeight}" rx="5" fill="#172b3a"/>
     ${photo ? `<image href="${photo}" x="${x + layout.photoX}" y="${y + layout.photoY}" width="${layout.photoWidth}" height="${layout.photoHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<rect x="${x + layout.photoX}" y="${y + layout.photoY}" width="${layout.photoWidth}" height="${layout.photoHeight}" fill="#dce4e9"/><text x="${x + layout.photoX + layout.photoWidth / 2}" y="${y + layout.photoY + layout.photoHeight / 2}" text-anchor="middle" dominant-baseline="middle" font-family="Arial" font-size="62" font-weight="bold" fill="#8093a0">${escapeXml(initials || subject.ref || '?')}</text>`}
-    ${includeNames ? `<text x="${x + layout.nameX + layout.nameWidth / 2}" y="${y + layout.nameY}" text-anchor="middle" font-family="Arial" font-size="${fontSize}" font-weight="bold" fill="${kind === 'star' ? '#3b2b09' : '#172b3a'}">${escapeXml(fullName)}</text>` : ''}</g>`;
+    ${includeNames ? `<text x="${x + layout.nameX + layout.nameWidth / 2}" y="${y + layout.nameY}" text-anchor="middle" font-family="Arial" font-size="${fontSize}" font-weight="bold" fill="${nameColor}">${escapeXml(fullName)}</text>` : ''}</g>`;
+}
+
+function compositeStaffSlotsSvg(staff, layout, includeNames, kind) {
+  if (!staff.length) return '';
+  if (staff.length < 4) {
+    const firstStaffColumn = Math.max(0, layout.cols.length - staff.length);
+    return staff.map((subject, index) => compositeSlotSvg(subject, { x: layout.cols[firstStaffColumn + index], y: layout.rows[0] }, layout, includeNames, kind)).join('');
+  }
+  const scale = staff.length >= 5 ? 0.72 : 0.78;
+  const gap = staff.length >= 5 ? 28 : 45;
+  const slotWidth = layout.frameWidth * scale;
+  const totalWidth = staff.length * slotWidth + (staff.length - 1) * gap;
+  const startX = Math.max(1120, 3000 - 110 - totalWidth);
+  return staff.map((subject, index) => {
+    const x = startX + index * (slotWidth + gap);
+    return `<g transform="translate(${x.toFixed(2)} ${layout.rows[0]}) scale(${scale})">${compositeSlotSvg(subject, { x: 0, y: 0 }, layout, includeNames, kind, { nameColor: '#fff' })}</g>`;
+  }).join('');
 }
 
 function compositeFeatureGeometry(count) {
@@ -4694,18 +4882,18 @@ function compositeSvg(group, type, options = {}, featured = null, purchaserLabel
   const studentSlots = students.map((subject, index) => compositeSlotSvg(subject, positions[index], layout, options.includeNames !== false, type)).join('');
   const classStaff = options.includeStaff === false ? [] : group.staff;
   const teacherNames = classStaff.map((subject) => `${subject.firstName} ${subject.lastName}`).join('; ');
+  const teacherTitle = group.teacherCompositeTitle || teacherNames || group.homeroom;
   const staff = uniqueCompositeStaff(options.additionalStaff || [], classStaff).slice(-layout.cols.length);
-  const firstStaffColumn = Math.max(0, layout.cols.length - staff.length);
-  const staffSlots = staff.map((subject, index) => compositeSlotSvg(subject, { x: layout.cols[firstStaffColumn + index], y: layout.rows[0] }, layout, options.includeNames !== false, type)).join('');
+  const staffSlots = compositeStaffSlotsSvg(staff, layout, options.includeNames !== false, type);
   const accent = type === 'star' ? '#b88718' : '#176b87'; const pale = type === 'star' ? '#fff7df' : '#eef7fa';
   const feature = type === 'star' ? compositeFeatureGeometry(students.length) : null;
   const featuredPhoto = featured ? compositePhotoData(featured) : null;
   const featureSvg = feature ? `<rect x="${feature.x}" y="${feature.y}" width="${feature.width}" height="${feature.height}" rx="9" fill="#fff" stroke="#d3aa4e" stroke-width="8" ${featured ? '' : 'stroke-dasharray="22 16"'}/>
-    ${featuredPhoto ? `<image href="${featuredPhoto}" x="${feature.imageX}" y="${feature.imageY}" width="${feature.imageWidth}" height="${feature.imageHeight}" preserveAspectRatio="xMidYMid slice"/><path d="M${feature.imageX + feature.imageWidth / 2} ${feature.imageY + 12}l22 42 47 7-34 33 8 47-43-23-43 23 8-47-34-33 47-7z" fill="#f4c542" stroke="#8d6512" stroke-width="5"/>` : `<text x="${feature.x + feature.width / 2}" y="${feature.y + feature.height / 2}" text-anchor="middle" font-family="Arial" font-size="42" font-weight="bold" fill="#b49a61">FEATURED PORTRAIT</text>`}
+    ${featuredPhoto ? `<image href="${featuredPhoto}" x="${feature.imageX}" y="${feature.imageY}" width="${feature.imageWidth}" height="${feature.imageHeight}" preserveAspectRatio="xMidYMid slice"/>` : `<text x="${feature.x + feature.width / 2}" y="${feature.y + feature.height / 2}" text-anchor="middle" font-family="Arial" font-size="42" font-weight="bold" fill="#b49a61">FEATURED PORTRAIT</text>`}
     ${featured ? `<text x="${feature.x + feature.width / 2}" y="${feature.nameY}" text-anchor="middle" font-family="Arial" font-size="${`${featured.firstName} ${featured.lastName}`.length > 22 ? 44 : 58}" font-weight="bold" fill="#3b2b09">${escapeXml(`${featured.firstName} ${featured.lastName}`)}</text>` : ''}` : '';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="2400" viewBox="0 0 ${width} 2400"><defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${pale}"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect width="${width}" height="2400" fill="#fff"/>
     <g transform="translate(${offsetX} 0)"><rect width="3000" height="2400" fill="url(#bg)"/><rect width="3000" height="405" fill="${accent}"/><rect y="390" width="3000" height="15" fill="${type === 'star' ? '#f0c755' : '#75b6c9'}"/>
-    <text x="110" y="145" font-family="Arial" font-size="120" font-weight="bold" fill="#fff">${escapeXml(options.schoolName || '')}</text><text x="110" y="215" font-family="Arial" font-size="42" fill="#fff">${escapeXml(options.principal || '')}</text><text x="110" y="295" font-family="Arial" font-size="64" font-weight="bold" fill="#fff">${escapeXml(options.classHeading || teacherNames || group.homeroom)}</text><text x="110" y="355" font-family="Arial" font-size="46" fill="#fff">${escapeXml(`${gradeLabel}${options.schoolYear ? `  |  ${options.schoolYear}` : ''}`)}</text>
+    <text x="110" y="145" font-family="Arial" font-size="120" font-weight="bold" fill="#fff">${escapeXml(options.schoolName || '')}</text><text x="110" y="215" font-family="Arial" font-size="42" fill="#fff">${escapeXml(options.principal || '')}</text><text x="110" y="295" font-family="Arial" font-size="64" font-weight="bold" fill="#fff">${escapeXml(options.classHeading || teacherTitle)}</text><text x="110" y="355" font-family="Arial" font-size="46" fill="#fff">${escapeXml(`${gradeLabel}${options.schoolYear ? `  |  ${options.schoolYear}` : ''}`)}</text>
     ${featureSvg}${studentSlots}${staffSlots}</g>${purchaserLabel ? `<g transform="translate(62 2100) rotate(-90)"><text font-family="Arial" font-size="54" fill="#172b3a">${escapeXml(purchaserLabel)}</text></g>` : ''}</svg>`;
 }
 
@@ -6630,7 +6818,10 @@ async function adminSubjectRows(jobId) {
       s.homeroom,
       s.track,
       s.team,
+      s.field1 AS field1,
+      s.field2 AS field2,
       s.subject_type AS subjectType,
+      s.enrollment_status AS enrollmentStatus,
       s.photographed_status AS photographedStatus,
       ia.filename AS imageFilename,
       (
@@ -7509,16 +7700,8 @@ function oldTrecsBool(row, column) {
 function mergedOldTrecsNotes(row) {
   const notes = [];
   const base = oldTrecsText(row, 'Notes');
-  const field1 = oldTrecsText(row, 'Field1');
-  const field2 = oldTrecsText(row, 'Field2');
   if (base) {
     notes.push(base);
-  }
-  if (field1) {
-    notes.push(`Field1: ${field1}`);
-  }
-  if (field2) {
-    notes.push(`Field2: ${field2}`);
   }
   return notes.join('\n');
 }
@@ -8873,10 +9056,12 @@ async function importPreviousTrecsJob(_event, input = {}) {
         grade,
         homeroom,
         track,
+        field1,
+        field2,
         photographed_status,
         notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `);
     const subjectCodeStatement = database.prepare(`
       INSERT OR IGNORE INTO subject_codes (
@@ -8959,6 +9144,8 @@ async function importPreviousTrecsJob(_event, input = {}) {
           grade,
           oldTrecsText(row, 'Homeroom'),
           oldTrecsText(row, 'Track'),
+          oldTrecsText(row, 'Field1'),
+          oldTrecsText(row, 'Field2'),
           photoTaken ? 'photographed' : 'not_photographed',
           mergedOldTrecsNotes(row)
         ]);
@@ -9213,7 +9400,10 @@ const SCHOOL_IMPORT_FIELDS = [
   { key: 'homeroom', label: 'Homeroom / Teacher', aliases: ['homeroom', 'home room', 'teacher', 'classroom', 'room'] },
   { key: 'track', label: 'Track', aliases: ['track', 'program'] },
   { key: 'team', label: 'Team', aliases: ['team', 'sport'] },
+  { key: 'field1', label: 'Field1', aliases: ['field1', 'field 1', 'custom field 1', 'custom1', 'custom 1'] },
+  { key: 'field2', label: 'Field2', aliases: ['field2', 'field 2', 'custom field 2', 'custom2', 'custom 2'] },
   { key: 'subjectType', label: 'Subject Type', aliases: ['type', 'subject type', 'student type'] },
+  { key: 'enrollmentStatus', label: 'Enrollment Status', aliases: ['enrollment', 'enrollment status', 'status', 'student status', 'enrolled', 'withdrawn'] },
   { key: 'notes', label: 'Notes', aliases: ['notes', 'note', 'comments', 'comment'] }
 ];
 
@@ -9404,10 +9594,13 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         homeroom,
         track,
         team,
+        field1,
+        field2,
         photographed_status,
+        enrollment_status,
         notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?);
     `);
     const updateStatement = database.prepare(`
       UPDATE subjects
@@ -9420,6 +9613,9 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
           homeroom = ?,
           track = ?,
           team = ?,
+          field1 = ?,
+          field2 = ?,
+          enrollment_status = ?,
           notes = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?;
@@ -9443,11 +9639,19 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
         const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
         const externalId = optionalText(importRowValue(row, mapping, 'externalId'), 255);
-        const grade = optionalText(importRowValue(row, mapping, 'grade'), 100);
+        const grade = normalizeTrecsGrade(importRowValue(row, mapping, 'grade'));
         const homeroom = optionalText(importRowValue(row, mapping, 'homeroom'), 100);
         const track = optionalText(importRowValue(row, mapping, 'track'), 100);
         const team = optionalText(importRowValue(row, mapping, 'team'), 100);
+        const field1 = optionalText(importRowValue(row, mapping, 'field1'), 255);
+        const field2 = optionalText(importRowValue(row, mapping, 'field2'), 255);
         const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
+        const rawEnrollmentStatus = mapping.enrollmentStatus !== null && mapping.enrollmentStatus !== undefined && mapping.enrollmentStatus !== ''
+          ? importRowValue(row, mapping, 'enrollmentStatus')
+          : '';
+        const enrollmentStatus = rawEnrollmentStatus
+          ? normalizeEnrollmentStatus(rawEnrollmentStatus)
+          : 'active';
         const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
         const mappedRef = importRowValue(row, mapping, 'ref');
         const hasImportedData = Boolean(
@@ -9460,6 +9664,9 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
           homeroom ||
           track ||
           team ||
+          field1 ||
+          field2 ||
+          rawEnrollmentStatus ||
           notes
         );
         if (!hasImportedData) {
@@ -9492,6 +9699,9 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
             homeroom,
             track,
             team,
+            field1,
+            field2,
+            enrollmentStatus,
             notes,
             subjectId
           ]);
@@ -9509,6 +9719,9 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
             homeroom,
             track,
             team,
+            field1,
+            field2,
+            enrollmentStatus,
             notes
           ]);
           subjectId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
@@ -9545,7 +9758,596 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 ipcMain.handle('school-data:choose-file', chooseSchoolDataFile);
 ipcMain.handle('school-data:import', importSchoolData);
 
+function normalizedRosterText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+const TRECS_GRADE_ORDER = ['PRE', 'TK', 'KIN', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', 'FAC', 'EXMPT'];
+
+function normalizeTrecsGrade(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const compact = raw.replace(/\s+/g, ' ').toUpperCase();
+  const alpha = compact.replace(/[^A-Z0-9]/g, '');
+  const aliases = {
+    P: 'PRE',
+    PRE: 'PRE',
+    PRESCHOOL: 'PRE',
+    PREK: 'PRE',
+    PREKINDER: 'PRE',
+    TK: 'TK',
+    TRANSITIONALKINDERGARTEN: 'TK',
+    K: 'KIN',
+    KG: 'KIN',
+    KIN: 'KIN',
+    KINDER: 'KIN',
+    KINDERGARTEN: 'KIN',
+    FAC: 'FAC',
+    FACULTY: 'FAC',
+    STAFF: 'FAC',
+    TEACHER: 'FAC',
+    EXMPT: 'EXMPT',
+    EXEMPT: 'EXMPT'
+  };
+  if (aliases[alpha]) return aliases[alpha];
+  const numberMatch = alpha.match(/^(?:GRADE|GR)?0?([1-9]|1[0-2])(?:ST|ND|RD|TH)?$/) || alpha.match(/^0?([1-9]|1[0-2])$/);
+  if (numberMatch) return String(Number(numberMatch[1])).padStart(2, '0');
+  return compact;
+}
+
+function gradeCompareKey(value) {
+  return normalizeTrecsGrade(value) || normalizedRosterText(value);
+}
+
+function gradeSortIndex(value) {
+  const grade = normalizeTrecsGrade(value);
+  const index = TRECS_GRADE_ORDER.indexOf(grade);
+  return index === -1 ? 1000 : index;
+}
+
+function ordinalGradeLabel(value) {
+  const grade = normalizeTrecsGrade(value);
+  if (!/^\d+$/.test(grade)) return grade;
+  const number = Number(grade);
+  const suffix = number % 100 >= 11 && number % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[number % 10] || 'th');
+  return `${number}${suffix} Grade`;
+}
+
+function normalizedHomeroomTeacherKey(value) {
+  return normalizedRosterText(value).split(/[_\s-]+/).filter(Boolean)[0] || normalizedRosterText(value);
+}
+
+function staffCompositeTitle(person) {
+  const display = [person?.firstName, person?.lastName].filter(Boolean).join(' ') || person?.displayName || person?.ref || '';
+  if (!display) return 'Teacher';
+  return `${display.toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase())}, Teacher`;
+}
+
+function ensureVerificationSchema(database) {
+  ensureColumn(database, 'subjects', 'enrollment_status', "TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn(database, 'subjects', 'include_in_composites', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(database, 'subjects', 'verified_at', 'TEXT');
+  ensureColumn(database, 'subjects', 'verification_source', 'TEXT');
+  ensureColumn(database, 'subjects', 'field1', 'TEXT');
+  ensureColumn(database, 'subjects', 'field2', 'TEXT');
+  ensureCompositeGradeTitleTable(database);
+  database.run(`
+    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      name_key TEXT NOT NULL,
+      subject_ids_key TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      UNIQUE(job_id, name_key, subject_ids_key)
+    );
+  `);
+  database.run(`
+    CREATE TABLE IF NOT EXISTS staff_assignments (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      subject_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      homeroom TEXT,
+      class_description TEXT,
+      include_in_composites INTEGER NOT NULL DEFAULT 1,
+      include_in_exports INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, subject_id, role, homeroom)
+    );
+  `);
+}
+
+async function ensureVerificationSchemaReady() {
+  await mutateSql((database) => {
+    ensureVerificationSchema(database);
+  });
+}
+
+function duplicateNameKey(subject) {
+  const first = normalizedRosterText(subject.firstName);
+  const last = normalizedRosterText(subject.lastName);
+  if (first || last) return `${last}|${first}`;
+  return normalizedRosterText(subject.displayName || subject.name);
+}
+
+function duplicateSubjectIdsKey(subjects) {
+  return subjects
+    .map((subject) => Number(subject.id))
+    .filter(Boolean)
+    .sort((a, b) => a - b)
+    .join(',');
+}
+
+async function getDuplicateRecordReview(_event, jobIdValue) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const subjects = await querySql(`
+    SELECT
+      s.id,
+      s.legacy_ref_num AS ref,
+      s.first_name AS firstName,
+      s.last_name AS lastName,
+      COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS displayName,
+      s.external_id AS externalId,
+      s.grade,
+      s.homeroom,
+      s.field1 AS field1,
+      s.field2 AS field2,
+      s.subject_type AS subjectType,
+      s.enrollment_status AS enrollmentStatus,
+      s.photographed_status AS photographedStatus,
+      CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END AS hasPhoto,
+      ia.filename AS imageFilename,
+      COUNT(DISTINCT o.id) AS orderCount,
+      COUNT(DISTINCT si.id) AS linkedImages
+    FROM subjects s
+    LEFT JOIN image_assets ia ON ia.id = s.primary_image_asset_id
+    LEFT JOIN orders o ON o.subject_id = s.id
+    LEFT JOIN subject_images si ON si.subject_id = s.id
+    WHERE s.job_id = ${jobId}
+      AND LOWER(COALESCE(s.subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
+      AND COALESCE(s.enrollment_status, 'active') != 'unenrolled'
+      AND (
+        TRIM(COALESCE(s.first_name, '')) != ''
+        OR TRIM(COALESCE(s.last_name, '')) != ''
+        OR TRIM(COALESCE(s.display_name, '')) != ''
+      )
+    GROUP BY s.id
+    ORDER BY s.last_name, s.first_name, s.legacy_ref_num;
+  `);
+  const byName = new Map();
+  subjects.forEach((subject) => {
+    const key = duplicateNameKey(subject);
+    if (!key) return;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(subject);
+  });
+  const reviews = await querySql(`SELECT name_key AS nameKey, subject_ids_key AS subjectIdsKey, reviewed_at AS reviewedAt FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
+  const reviewedKeys = new Map(reviews.map((row) => [`${row.nameKey}::${row.subjectIdsKey}`, row.reviewedAt]));
+  const groups = [...byName.entries()]
+    .filter(([_key, rows]) => rows.length > 1)
+    .map(([nameKey, rows]) => {
+      const subjectIdsKey = duplicateSubjectIdsKey(rows);
+      const reviewKey = `${nameKey}::${subjectIdsKey}`;
+      const photographed = rows.filter((row) => Number(row.hasPhoto || 0) > 0).length;
+      const orders = rows.reduce((total, row) => total + Number(row.orderCount || 0), 0);
+      return {
+        nameKey,
+        subjectIdsKey,
+        reviewedAt: reviewedKeys.get(reviewKey) || '',
+        displayName: rows[0].displayName || [rows[0].firstName, rows[0].lastName].filter(Boolean).join(' '),
+        risk: photographed && photographed < rows.length ? 'split-photo' : orders ? 'orders' : 'same-name',
+        subjects: rows.map((row) => ({
+          ...row,
+          hasPhoto: Number(row.hasPhoto || 0) > 0,
+          orderCount: Number(row.orderCount || 0),
+          linkedImages: Number(row.linkedImages || 0)
+        }))
+      };
+    })
+    .sort((a, b) => {
+      const riskOrder = { 'split-photo': 0, orders: 1, 'same-name': 2 };
+      return (riskOrder[a.risk] ?? 9) - (riskOrder[b.risk] ?? 9)
+        || a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base' });
+    });
+  return {
+    jobId,
+    groups,
+    totals: {
+      groups: groups.length,
+      unreviewed: groups.filter((group) => !group.reviewedAt).length,
+      reviewed: groups.filter((group) => group.reviewedAt).length
+    }
+  };
+}
+
+async function markDuplicateRecordReviewed(_event, jobIdValue, input = {}) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const nameKey = normalizeText(input.nameKey, 'Duplicate name key', 255);
+  const subjectIdsKey = normalizeText(input.subjectIdsKey, 'Duplicate subject list', 1000);
+  const reviewed = input.reviewed !== false;
+  const result = await writeSql((database) => {
+    if (reviewed) {
+      database.run(`
+        INSERT INTO duplicate_record_reviews (job_id, name_key, subject_ids_key, reviewed_at, notes)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+        ON CONFLICT(job_id, name_key, subject_ids_key)
+        DO UPDATE SET reviewed_at = CURRENT_TIMESTAMP, notes = excluded.notes;
+      `, [jobId, nameKey, subjectIdsKey, optionalText(input.notes, 1000)]);
+    } else {
+      database.run('DELETE FROM duplicate_record_reviews WHERE job_id = ? AND name_key = ? AND subject_ids_key = ?;', [jobId, nameKey, subjectIdsKey]);
+    }
+    return { jobId, reviewed };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+function rosterMatchKey(row) {
+  return [
+    normalizedRosterText(row.lastName),
+    normalizedRosterText(row.firstName),
+    gradeCompareKey(row.grade),
+    normalizedRosterText(row.homeroom)
+  ].join('|');
+}
+
+function schoolDataImportRowsFromInput(input = {}) {
+  const mapping = input.mapping || {};
+  const enrollmentStatusMapped = mapping.enrollmentStatus !== null && mapping.enrollmentStatus !== undefined && mapping.enrollmentStatus !== '';
+  const allRows = nonEmptySchoolDataRows(readSchoolDataRowsSync(input.filePath));
+  const dataRows = input.hasHeader ? allRows.slice(1) : allRows;
+  return dataRows.map((row, index) => {
+    const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
+    const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
+    const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
+    return {
+      rowNumber: index + (input.hasHeader ? 2 : 1),
+      ref: optionalText(importRowValue(row, mapping, 'ref'), 100),
+      firstName,
+      lastName,
+      displayName,
+      externalId: optionalText(importRowValue(row, mapping, 'externalId'), 255),
+      grade: normalizeTrecsGrade(importRowValue(row, mapping, 'grade')),
+      homeroom: optionalText(importRowValue(row, mapping, 'homeroom'), 100),
+      track: optionalText(importRowValue(row, mapping, 'track'), 100),
+      team: optionalText(importRowValue(row, mapping, 'team'), 100),
+      field1: optionalText(importRowValue(row, mapping, 'field1'), 255),
+      field2: optionalText(importRowValue(row, mapping, 'field2'), 255),
+      subjectType: normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType')),
+      enrollmentStatus: enrollmentStatusMapped ? normalizeEnrollmentStatus(importRowValue(row, mapping, 'enrollmentStatus')) : '',
+      notes: optionalText(importRowValue(row, mapping, 'notes'), 5000)
+    };
+  }).filter((row) => row.ref || row.firstName || row.lastName || row.displayName || row.externalId || row.grade || row.homeroom || row.field1 || row.field2);
+}
+
+function readSchoolDataRowsSync(filePathValue) {
+  const filePath = normalizeText(filePathValue, 'School data file', 1000);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('School data file was not found');
+  const extension = path.extname(filePath).toLowerCase();
+  if (['.csv', '.txt'].includes(extension)) {
+    return parseDelimitedRows(fs.readFileSync(filePath, 'utf8'));
+  }
+  if (['.xls', '.xlsx', '.xlsm'].includes(extension)) {
+    const workbook = XLSX.readFile(filePath, { cellDates: false });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) return [];
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: false, defval: '' });
+  }
+  throw new Error('School data file must be CSV, XLS, XLSX, or XLSM');
+}
+
+function rosterSubjectSummary(row) {
+  return {
+    id: Number(row.id || 0),
+    ref: row.ref || '',
+    firstName: row.firstName || '',
+    lastName: row.lastName || '',
+    displayName: row.displayName || [row.firstName, row.lastName].filter(Boolean).join(' '),
+    externalId: row.externalId || '',
+    grade: normalizeTrecsGrade(row.grade) || row.grade || '',
+    homeroom: row.homeroom || '',
+    field1: row.field1 || '',
+    field2: row.field2 || '',
+    subjectType: row.subjectType || 'student',
+    enrollmentStatus: row.enrollmentStatus || 'active',
+    includeInComposites: Number(row.includeInComposites || 0),
+    hasPhoto: Number(row.hasPhoto || 0) > 0,
+    orderCount: Number(row.orderCount || 0)
+  };
+}
+
+async function previewRosterVerification(_event, jobIdValue, input = {}) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const imported = schoolDataImportRowsFromInput(input);
+  const subjects = (await querySql(`
+    SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
+           s.display_name AS displayName, s.external_id AS externalId, s.grade, s.homeroom,
+           s.field1 AS field1, s.field2 AS field2,
+           s.subject_type AS subjectType, s.enrollment_status AS enrollmentStatus,
+           s.include_in_composites AS includeInComposites,
+           CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END AS hasPhoto,
+           COUNT(DISTINCT o.id) AS orderCount
+    FROM subjects s
+    LEFT JOIN orders o ON o.subject_id = s.id
+    WHERE s.job_id = ${jobId}
+      AND LOWER(COALESCE(s.subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
+      AND COALESCE(s.legacy_ref_num, '') != ''
+    GROUP BY s.id
+    ORDER BY s.last_name, s.first_name, s.legacy_ref_num;
+  `)).map(rosterSubjectSummary);
+  const byExternalId = new Map(subjects.filter((subject) => subject.externalId).map((subject) => [normalizedRosterText(subject.externalId), subject]));
+  const byRef = new Map(subjects.filter((subject) => subject.ref).map((subject) => [normalizedRosterText(subject.ref), subject]));
+  const byExact = new Map(subjects.map((subject) => [rosterMatchKey(subject), subject]));
+  const matchedIds = new Set();
+  const exactMatches = [];
+  const newStudents = [];
+  const changedStudents = [];
+  imported.forEach((row) => {
+    const match = (row.externalId && byExternalId.get(normalizedRosterText(row.externalId)))
+      || (row.ref && byRef.get(normalizedRosterText(row.ref)))
+      || byExact.get(rosterMatchKey(row));
+    if (!match) {
+      newStudents.push({ ...row });
+      return;
+    }
+    matchedIds.add(match.id);
+    const fields = ['externalId', 'firstName', 'lastName', 'displayName', 'grade', 'homeroom'];
+    if (input.mapping && input.mapping.enrollmentStatus !== null && input.mapping.enrollmentStatus !== undefined && input.mapping.enrollmentStatus !== '') fields.push('enrollmentStatus');
+    ['field1', 'field2'].forEach((field) => {
+      if (input.mapping && input.mapping[field] !== null && input.mapping[field] !== undefined && input.mapping[field] !== '') fields.push(field);
+    });
+    const changes = fields
+      .filter((field) => {
+        if (field === 'grade') return gradeCompareKey(match[field]) !== gradeCompareKey(row[field]);
+        if (field === 'enrollmentStatus') return normalizeEnrollmentStatus(match[field]) !== normalizeEnrollmentStatus(row[field]);
+        return normalizedRosterText(match[field]) !== normalizedRosterText(row[field]);
+      })
+      .map((field) => ({ field, current: match[field] || '', incoming: row[field] || '' }));
+    if (changes.length) {
+      changedStudents.push({ subject: match, incoming: row, changes });
+    } else {
+      exactMatches.push({ subject: match, incoming: row });
+    }
+  });
+  const missingStudents = subjects.filter((subject) => !matchedIds.has(subject.id));
+  return {
+    jobId,
+    filePath: input.filePath,
+    fileName: path.basename(input.filePath || ''),
+    hasHeader: Boolean(input.hasHeader),
+    mapping: input.mapping || {},
+    totals: {
+      imported: imported.length,
+      exact: exactMatches.length,
+      newStudents: newStudents.length,
+      changed: changedStudents.length,
+      missing: missingStudents.length
+    },
+    exactMatches: exactMatches.slice(0, 50),
+    newStudents,
+    changedStudents,
+    missingStudents
+  };
+}
+
+async function applyRosterVerification(_event, jobIdValue, input = {}) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const filePath = normalizeText(input.filePath, 'School data file', 1000);
+  const importedAt = new Date().toISOString();
+  const result = await writeSql((database) => {
+    const job = rowsFromDatabase(database, `SELECT root_path AS rootPath FROM jobs WHERE id = ${jobId} LIMIT 1;`)[0];
+    if (!job) throw new Error('Job not found');
+    const copiedSourcePath = copySchoolDataSourceFile(filePath, resolveProjectPath(job.rootPath));
+    const newRows = Array.isArray(input.newStudents) ? input.newStudents : [];
+    const changedRows = Array.isArray(input.changedStudents) ? input.changedStudents : [];
+    const removeIds = (input.removeSubjectIds || []).map(Number).filter(Boolean);
+    const unenrollIds = (input.unenrollSubjectIds || []).map(Number).filter(Boolean);
+    const includeIds = new Set((input.includeCompositeSubjectIds || []).map(Number).filter(Boolean));
+    const existingRefs = rowsFromDatabase(database, `SELECT legacy_ref_num AS ref FROM subjects WHERE job_id = ${jobId} AND COALESCE(legacy_ref_num, '') != '';`).map((row) => String(row.ref));
+    const usedRefs = new Set(existingRefs);
+    const maxExistingRef = existingRefs.map(numericReferenceValue).filter((value) => value !== null).reduce((max, value) => Math.max(max, value), 0);
+    const clientRef = rowsFromDatabase(database, `SELECT c.reference_number AS value FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId} LIMIT 1;`)[0]?.value;
+    const referenceState = { nextRef: maxExistingRef > 0 ? maxExistingRef + 1 : (numericReferenceValue(clientRef) || 1) };
+    const insertStatement = database.prepare(`
+      INSERT INTO subjects (job_id, legacy_ref_num, subject_type, first_name, last_name, display_name, external_id, grade, homeroom, track, team, field1, field2, photographed_status, enrollment_status, include_in_composites, verified_at, verification_source, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, 0, ?, ?, ?);
+    `);
+    const codeStatement = database.prepare(`INSERT OR IGNORE INTO subject_codes (subject_id, code_type, code) VALUES (?, ?, ?);`);
+    let created = 0; let updated = 0; let removed = 0; let unenrolled = 0;
+    try {
+      newRows.forEach((row) => {
+        const ref = row.ref || nextImportReference(usedRefs, referenceState);
+        insertStatement.run([jobId, ref, row.subjectType || 'student', row.firstName || null, row.lastName || null, row.displayName || displayNameFromImport(row.firstName, row.lastName, ''), row.externalId || null, row.grade || null, row.homeroom || null, row.track || null, row.team || null, row.field1 || null, row.field2 || null, row.enrollmentStatus || 'active', importedAt, copiedSourcePath, row.notes || null]);
+        const subjectId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
+        codeStatement.run([subjectId, 'legacy_ref', ref]);
+        if (row.externalId) codeStatement.run([subjectId, 'student_id', row.externalId]);
+        created += 1;
+      });
+      changedRows.forEach((item) => {
+        const subjectId = Number(item.subjectId || item.subject?.id || 0);
+        if (!subjectId) return;
+        const incoming = item.incoming || item;
+        database.run(`
+          UPDATE subjects
+          SET first_name = ?, last_name = ?, display_name = ?, external_id = ?, grade = ?, homeroom = ?,
+              field1 = COALESCE(NULLIF(?, ''), field1),
+              field2 = COALESCE(NULLIF(?, ''), field2),
+              enrollment_status = COALESCE(NULLIF(?, ''), enrollment_status),
+              verified_at = ?, verification_source = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND job_id = ?;
+        `, [incoming.firstName || null, incoming.lastName || null, incoming.displayName || displayNameFromImport(incoming.firstName, incoming.lastName, ''), incoming.externalId || null, incoming.grade || null, incoming.homeroom || null, incoming.field1 || '', incoming.field2 || '', incoming.enrollmentStatus || '', importedAt, copiedSourcePath, subjectId, jobId]);
+        if (incoming.externalId) codeStatement.run([subjectId, 'student_id', incoming.externalId]);
+        updated += 1;
+      });
+      removeIds.forEach((subjectId) => {
+        const row = rowsFromDatabase(database, `SELECT primary_image_asset_id AS imageId, (SELECT COUNT(*) FROM orders WHERE subject_id = ${subjectId}) AS orderCount FROM subjects WHERE id = ${subjectId} AND job_id = ${jobId};`)[0];
+        if (!row || row.imageId || Number(row.orderCount || 0) > 0) return;
+        database.run('DELETE FROM subjects WHERE id = ? AND job_id = ?;', [subjectId, jobId]);
+        removed += 1;
+      });
+      unenrollIds.forEach((subjectId) => {
+        database.run("UPDATE subjects SET enrollment_status = 'unenrolled', include_in_composites = ?, verified_at = ?, verification_source = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?;", [includeIds.has(subjectId) ? 1 : 0, importedAt, copiedSourcePath, subjectId, jobId]);
+        unenrolled += 1;
+      });
+    } finally {
+      insertStatement.free();
+      codeStatement.free();
+    }
+    return { jobId, created, updated, removed, unenrolled, sourceFilePath: copiedSourcePath };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+async function getStaffVerificationSetup(_event, jobIdValue) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const jobs = await querySql(`SELECT j.id, c.display_name AS clientName, j.name AS jobName FROM jobs j JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;`);
+  const selectedJobId = jobId || jobs[0]?.id || null;
+  if (!selectedJobId) return { jobs, selectedJobId: null, staff: [], homerooms: [], assignments: [] };
+  const staff = await querySql(`
+    SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.display_name AS displayName,
+           s.grade, s.homeroom, s.subject_type AS subjectType, CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END AS hasPhoto
+    FROM subjects s
+    WHERE s.job_id = ${Number(selectedJobId)}
+      AND (LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff', 'teacher') OR UPPER(COALESCE(s.grade, '')) = 'FAC')
+    ORDER BY s.last_name, s.first_name, s.legacy_ref_num;
+  `);
+  const homerooms = (await querySql(`
+    SELECT DISTINCT homeroom AS value
+    FROM subjects
+    WHERE job_id = ${Number(selectedJobId)}
+      AND COALESCE(homeroom, '') != ''
+      AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
+    ORDER BY homeroom;
+  `)).map((row) => row.value);
+  const homeroomGradeRows = await querySql(`
+    SELECT homeroom, grade
+    FROM subjects
+    WHERE job_id = ${Number(selectedJobId)}
+      AND COALESCE(homeroom, '') != ''
+      AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
+    ORDER BY homeroom, grade;
+  `);
+  const assignments = await querySql(`SELECT id, subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, include_in_exports AS includeInExports, sort_order AS sortOrder, notes FROM staff_assignments WHERE job_id = ${Number(selectedJobId)} ORDER BY sort_order, role, homeroom;`);
+  const gradeTitleRows = await compositeGradeTitleRows(selectedJobId);
+  const gradeTitles = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
+  const reviewedByHomeroom = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), Number(row.reviewed || 0) > 0]));
+  const gradesByHomeroom = new Map();
+  const studentCountByHomeroom = new Map();
+  homeroomGradeRows.forEach((row) => {
+    const homeroom = String(row.homeroom || '');
+    if (!gradesByHomeroom.has(homeroom)) gradesByHomeroom.set(homeroom, []);
+    gradesByHomeroom.get(homeroom).push(row.grade || '');
+    studentCountByHomeroom.set(homeroom, Number(studentCountByHomeroom.get(homeroom) || 0) + 1);
+  });
+  const staffByLastName = new Map();
+  staff.forEach((person) => {
+    const key = normalizedRosterText(person.lastName);
+    if (!key) return;
+    if (!staffByLastName.has(key)) staffByLastName.set(key, []);
+    staffByLastName.get(key).push(Number(person.id));
+  });
+  const teacherAssignments = assignments.filter((assignment) => assignment.role === 'teacher' && assignment.homeroom);
+  const homeroomRows = homerooms.map((homeroom, index) => {
+    const existing = teacherAssignments.filter((assignment) => String(assignment.homeroom || '') === String(homeroom));
+    const smartMatches = staffByLastName.get(normalizedHomeroomTeacherKey(homeroom)) || [];
+    const computedGradeLabel = compositeGradeLabel(gradesByHomeroom.get(String(homeroom)) || []);
+    const smartTeacher = smartMatches.length === 1 ? staff.find((person) => Number(person.id) === Number(smartMatches[0])) : null;
+    const savedTeacherTitle = existing.find((assignment) => assignment.classDescription && assignment.classDescription !== computedGradeLabel)?.classDescription || '';
+    return {
+      homeroom,
+      gradeLabel: gradeTitles.get(String(homeroom)) || computedGradeLabel,
+      gradeTitle: gradeTitles.get(String(homeroom)) || computedGradeLabel,
+      gradeTitleDefault: computedGradeLabel,
+      grades: normalizedCompositeGrades(gradesByHomeroom.get(String(homeroom)) || []),
+      studentCount: Number(studentCountByHomeroom.get(String(homeroom)) || 0),
+      classDescription: savedTeacherTitle || (smartTeacher ? staffCompositeTitle(smartTeacher) : ''),
+      teacherSubjectIds: existing.map((assignment) => Number(assignment.subjectId)),
+      candidateTeacherIds: smartMatches,
+      suggestedTeacherIds: smartMatches.length === 1 ? smartMatches : [],
+      includeInComposites: existing.length ? existing.some((assignment) => Number(assignment.includeInComposites || 0) > 0) : true,
+      includeInExports: existing.length ? existing.some((assignment) => Number(assignment.includeInExports || 0) > 0) : true,
+      reviewed: reviewedByHomeroom.get(String(homeroom)) || false,
+      sortOrder: index
+    };
+  });
+  return {
+    jobs,
+    selectedJobId,
+    staff,
+    homerooms,
+    homeroomRows,
+    principalSubjectId: assignments.find((assignment) => assignment.role === 'principal')?.subjectId || '',
+    vpSubjectId: assignments.find((assignment) => assignment.role === 'vp')?.subjectId || '',
+    assignments
+  };
+}
+
+async function saveStaffVerification(_event, jobIdValue, input = []) {
+  await ensureVerificationSchemaReady();
+  const jobId = numericId(jobIdValue);
+  const rows = Array.isArray(input) ? input : input.rows;
+  const gradeTitles = Array.isArray(input) ? {} : input.gradeTitles || {};
+  const result = await writeSql((database) => {
+    database.run('DELETE FROM staff_assignments WHERE job_id = ?;', [jobId]);
+    ensureCompositeGradeTitleTable(database);
+    database.run('DELETE FROM composite_grade_titles WHERE job_id = ?;', [jobId]);
+    Object.entries(gradeTitles || {}).forEach(([homeroom, value]) => {
+      const title = value && typeof value === 'object' ? value.gradeTitle : value;
+      const reviewed = value && typeof value === 'object' && value.reviewed ? 1 : 0;
+      const cleanHomeroom = optionalText(homeroom, 100);
+      const cleanTitle = optionalText(title, 255);
+      if (!cleanHomeroom || !cleanTitle) return;
+      database.run(`
+        INSERT INTO composite_grade_titles (job_id, homeroom, grade_title, reviewed, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP);
+      `, [jobId, cleanHomeroom, cleanTitle, reviewed]);
+    });
+    const statement = database.prepare(`
+      INSERT INTO staff_assignments (job_id, subject_id, role, homeroom, class_description, include_in_composites, include_in_exports, sort_order, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
+    `);
+    let saved = 0;
+    try {
+      (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+        const subjectId = Number(row.subjectId || 0);
+        const role = ['principal', 'vp', 'teacher', 'staff', 'other'].includes(String(row.role || '')) ? String(row.role) : 'staff';
+        if (!subjectId) return;
+        statement.run([jobId, subjectId, role, optionalText(row.homeroom, 100), optionalText(row.classDescription, 255), row.includeInComposites === false ? 0 : 1, row.includeInExports === false ? 0 : 1, Number(row.sortOrder ?? index), optionalText(row.notes, 1000)]);
+        if (role === 'teacher' && row.homeroom) {
+          database.run("UPDATE subjects SET subject_type = 'faculty', homeroom = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?;", [optionalText(row.homeroom, 100), subjectId, jobId]);
+        }
+        saved += 1;
+      });
+    } finally {
+      statement.free();
+    }
+    return { jobId, saved };
+  });
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  return result;
+}
+
+ipcMain.handle('roster-verification:preview', previewRosterVerification);
+ipcMain.handle('roster-verification:apply', applyRosterVerification);
+ipcMain.handle('duplicate-records:get', getDuplicateRecordReview);
+ipcMain.handle('duplicate-records:mark-reviewed', markDuplicateRecordReviewed);
+ipcMain.handle('staff-verification:get', getStaffVerificationSetup);
+ipcMain.handle('staff-verification:save', saveStaffVerification);
+
 async function getJobDetail(_event, jobIdValue) {
+  await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
 
   const summary = await querySql(`
@@ -9640,7 +10442,10 @@ async function getJobDetail(_event, jobIdValue) {
       s.homeroom,
       s.track,
       s.team,
+      s.field1 AS field1,
+      s.field2 AS field2,
       s.subject_type AS subjectType,
+      s.enrollment_status AS enrollmentStatus,
       s.photographed_status AS photographedStatus,
       s.notes,
       s.created_at AS createdAt,
@@ -10032,7 +10837,10 @@ async function createSubject(_event, jobIdValue, input = {}) {
   const homeroom = optionalText(input.homeroom, 100);
   const track = optionalText(input.track, 100);
   const team = optionalText(input.team, 100);
+  const field1 = optionalText(input.field1, 255);
+  const field2 = optionalText(input.field2, 255);
   const subjectType = normalizeSubjectType(input.subjectType);
+  const enrollmentStatus = normalizeEnrollmentStatus(input.enrollmentStatus);
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
   const notes = optionalText(input.notes, 5000);
 
@@ -10055,10 +10863,13 @@ async function createSubject(_event, jobIdValue, input = {}) {
         homeroom,
         track,
         team,
+        field1,
+        field2,
+        enrollment_status,
         photographed_status,
         notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `);
 
     try {
@@ -10074,6 +10885,9 @@ async function createSubject(_event, jobIdValue, input = {}) {
         homeroom,
         track,
         team,
+        field1,
+        field2,
+        enrollmentStatus,
         photographedStatus,
         notes
       ]);
@@ -10180,7 +10994,10 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
   const homeroom = optionalText(input.homeroom, 100);
   const track = optionalText(input.track, 100);
   const team = optionalText(input.team, 100);
+  const field1 = optionalText(input.field1, 255);
+  const field2 = optionalText(input.field2, 255);
   const subjectType = normalizeSubjectType(input.subjectType);
+  const enrollmentStatus = normalizeEnrollmentStatus(input.enrollmentStatus);
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
 
   const result = await writeSql((database) => {
@@ -10195,6 +11012,9 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
           homeroom = ?,
           track = ?,
           team = ?,
+          field1 = ?,
+          field2 = ?,
+          enrollment_status = ?,
           photographed_status = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?;
@@ -10211,6 +11031,9 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
         homeroom,
         track,
         team,
+        field1,
+        field2,
+        enrollmentStatus,
         photographedStatus,
         subjectId
       ]);
@@ -12764,6 +13587,8 @@ function menuActionMap(window) {
     eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
     studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
     onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
+    dataVerification: menuAction(window, 'After Makeup Data Verification', 'data-verification'),
+    staffVerification: menuAction(window, 'Staff Verification', 'staff-verification'),
     packagePlanEditor: menuAction(window, 'Package Plan Editor', 'package-plan-editor'),
     unitRender: menuAction(window, 'Unit Render', 'unit-render'),
     batchRender: menuAction(window, 'Multi-Job Batch Render', 'batch-render'),
@@ -12820,6 +13645,8 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.dataVerification,
+          actions.staffVerification,
           actions.packagePlanEditor,
           actions.unitRender,
           actions.batchRender,
@@ -12861,6 +13688,8 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.dataVerification,
+          actions.staffVerification,
           actions.packagePlanEditor,
           actions.unitRender,
           actions.batchRender,
@@ -12899,6 +13728,8 @@ function createContextMenus(window, context) {
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
+          actions.dataVerification,
+          actions.staffVerification,
           actions.packagePlanEditor,
           actions.unitRender,
           actions.batchRender,
@@ -12932,6 +13763,8 @@ function createContextMenus(window, context) {
         actions.eventWorkflow,
         actions.studentListBuilder,
         actions.onlineOrderImport,
+        actions.dataVerification,
+        actions.staffVerification,
         actions.packagePlanEditor,
         actions.unitRender,
         actions.batchRender,

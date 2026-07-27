@@ -162,8 +162,19 @@ CREATE TABLE IF NOT EXISTS composite_grade_titles (
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   homeroom TEXT NOT NULL,
   grade_title TEXT NOT NULL,
+  reviewed INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(job_id, homeroom)
+);
+
+CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  name_key TEXT NOT NULL,
+  subject_ids_key TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  notes TEXT,
+  UNIQUE(job_id, name_key, subject_ids_key)
 );
 
 CREATE TABLE IF NOT EXISTS job_sessions (
@@ -228,12 +239,33 @@ CREATE TABLE IF NOT EXISTS subjects (
   homeroom TEXT,
   track TEXT,
   team TEXT,
+  field1 TEXT,
+  field2 TEXT,
   photographed_status TEXT NOT NULL DEFAULT 'unknown',
+  enrollment_status TEXT NOT NULL DEFAULT 'active',
+  include_in_composites INTEGER NOT NULL DEFAULT 0,
+  verified_at TEXT,
+  verification_source TEXT,
   primary_image_asset_id INTEGER,
   notes TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(job_id, legacy_ref_num)
+);
+
+CREATE TABLE IF NOT EXISTS staff_assignments (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('principal', 'vp', 'teacher', 'staff', 'other')),
+  homeroom TEXT,
+  class_description TEXT,
+  include_in_composites INTEGER NOT NULL DEFAULT 1,
+  include_in_exports INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(job_id, subject_id, role, homeroom)
 );
 
 CREATE TABLE IF NOT EXISTS subject_field_values (

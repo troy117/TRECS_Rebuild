@@ -25,6 +25,8 @@
           <button data-view-button="products">Products</button>
           <button data-view-button="studentLists">Student Lists</button>
           <button data-view-button="onlineOrders">Online Orders</button>
+          <button data-view-button="dataVerification">Data Verification</button>
+          <button data-view-button="staffVerification">Staff Verification</button>
           <button data-view-button="unitRender">Unit Render</button>
           <button data-view-button="batchRender">Batch Render</button>
           <button data-view-button="composites">Class Composites</button>
@@ -184,6 +186,79 @@
           </section>
         </section>
 
+        <section id="dataVerificationView" class="view">
+          <section class="panel verification-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>After Makeup Data Verification</h2>
+                <p>Compare the schoolâ€™s updated roster against this job before adding, updating, removing, or marking students unenrolled.</p>
+              </div>
+              <span class="status review">Review before apply</span>
+            </div>
+            <div class="production-toolbar verification-toolbar">
+              <label><span>Job</span><select id="verificationJobSelect"></select></label>
+              <button id="chooseVerificationFileButton" type="button">Choose School Excel / CSV</button>
+              <span id="verificationFileName" class="file-summary">No file chosen</span>
+            </div>
+            <div id="verificationMapping" class="mapping-grid"></div>
+            <div id="verificationSummary" class="unit-render-metrics"><div class="empty-state">Choose a school file to preview changes.</div></div>
+            <div id="verificationResults" class="verification-results">
+              <div class="empty-state">New students, changed records, and missing students will appear here.</div>
+            </div>
+            <div class="production-footer">
+              <p id="verificationStatus" class="tool-status">Exact matches are ignored automatically.</p>
+              <button id="applyVerificationButton" class="primary" type="button" disabled>Apply Selected Changes</button>
+            </div>
+            <section class="duplicate-review-panel">
+              <div class="column-title">
+                <div>
+                  <h3>Duplicate Record Review</h3>
+                  <p>Find same-name student records and verify whether they are correct or need cleanup.</p>
+                </div>
+                <div class="toolbar-actions">
+                  <label class="checkbox-line compact"><input id="showReviewedDuplicatesToggle" type="checkbox"><span>Show reviewed</span></label>
+                  <button id="refreshDuplicateRecordsButton" type="button">Refresh Duplicates</button>
+                </div>
+              </div>
+              <div id="duplicateRecordSummary" class="duplicate-record-summary">Choose a job to scan for duplicate names.</div>
+              <div id="duplicateRecordResults" class="duplicate-record-results">
+                <div class="empty-state">Duplicate student records will appear here.</div>
+              </div>
+            </section>
+          </section>
+        </section>
+
+        <section id="staffVerificationView" class="view">
+          <section class="panel verification-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Staff Verification</h2>
+                <p>Verify principal, VP, and homeroom teachers so class composites and staff exports use clean role data.</p>
+              </div>
+              <span class="status ready">Composite-aware</span>
+            </div>
+            <div class="production-toolbar verification-toolbar">
+              <label><span>Job</span><select id="staffVerificationJobSelect"></select></label>
+              <button id="addStaffAssignmentButton" type="button">Smart Match Teachers</button>
+              <div id="staffVerificationSummary" class="staff-verification-summary"></div>
+            </div>
+            <div class="staff-verification-layout">
+              <section>
+                <div class="column-title"><h3>Homeroom Teachers</h3><span id="staffAssignmentCount"></span></div>
+                <input id="staffVerificationSearch" type="search" placeholder="Filter homerooms">
+                <div class="key-staff-controls">
+                  <div id="staffVerificationList" class="key-staff-row"></div>
+                  <button id="saveStaffVerificationButton" class="primary" type="button">Save Staff Verification</button>
+                </div>
+                <div id="staffAssignmentRows" class="staff-assignment-list"></div>
+                <div class="production-footer">
+                  <p id="staffVerificationStatus" class="tool-status">Assign teachers to homerooms and key staff roles.</p>
+                </div>
+              </section>
+            </div>
+          </section>
+        </section>
+
         <section id="unitRenderView" class="view">
           <section class="panel unit-render-panel">
             <div class="panel-heading">
@@ -264,10 +339,10 @@
                   <label class="checkbox-line"><input name="includeTraditional" type="checkbox" checked><span>Traditional Backgrounds</span></label>
                   <label class="checkbox-line"><input name="includeStar" type="checkbox" checked><span>STAR Backgrounds</span></label>
                   <label class="checkbox-line"><input name="includePurchaserCopies" type="checkbox" checked><span>Paid Purchaser Copies</span></label>
-                  <label class="checkbox-line"><input name="includePackagingLabels" type="checkbox"><span>Packaging Labels</span></label>
+                  <label class="checkbox-line"><input name="includePackagingLabels" type="checkbox" checked><span>Packaging Labels</span></label>
                   <label class="checkbox-line"><input name="includeNames" type="checkbox" checked><span>Student Names</span></label>
                   <label class="checkbox-line"><input name="includeStaff" type="checkbox" checked><span>Class Staff</span></label>
-                  <label class="checkbox-line"><input name="photographedOnly" type="checkbox"><span>Photographed Students Only</span></label>
+                  <label class="checkbox-line"><input name="photographedOnly" type="checkbox" checked><span>Photographed Students Only</span></label>
                 </div>
                 <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose composite output folder"><button id="browseCompositeOutputButton" type="button">Browse</button></div></label>
                 <progress id="compositeProgress" value="0" max="100"></progress>

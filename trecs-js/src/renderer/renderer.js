@@ -65,6 +65,30 @@ const onlineOrderSummary = document.getElementById('onlineOrderSummary');
 const onlineOrderPreviewBody = document.getElementById('onlineOrderPreviewBody');
 const onlineOrderStatus = document.getElementById('onlineOrderStatus');
 const importOnlineOrdersButton = document.getElementById('importOnlineOrdersButton');
+const dataVerificationView = document.getElementById('dataVerificationView');
+const verificationJobSelect = document.getElementById('verificationJobSelect');
+const chooseVerificationFileButton = document.getElementById('chooseVerificationFileButton');
+const verificationFileName = document.getElementById('verificationFileName');
+const verificationMapping = document.getElementById('verificationMapping');
+const verificationSummary = document.getElementById('verificationSummary');
+const verificationResults = document.getElementById('verificationResults');
+const verificationStatus = document.getElementById('verificationStatus');
+const applyVerificationButton = document.getElementById('applyVerificationButton');
+const refreshDuplicateRecordsButton = document.getElementById('refreshDuplicateRecordsButton');
+const duplicateRecordSummary = document.getElementById('duplicateRecordSummary');
+const duplicateRecordResults = document.getElementById('duplicateRecordResults');
+const showReviewedDuplicatesToggle = document.getElementById('showReviewedDuplicatesToggle');
+const staffVerificationView = document.getElementById('staffVerificationView');
+const staffVerificationJobSelect = document.getElementById('staffVerificationJobSelect');
+const addStaffAssignmentButton = document.getElementById('addStaffAssignmentButton');
+const staffVerificationCount = document.getElementById('staffVerificationCount');
+const staffVerificationSummary = document.getElementById('staffVerificationSummary');
+const staffVerificationSearch = document.getElementById('staffVerificationSearch');
+const staffVerificationList = document.getElementById('staffVerificationList');
+const staffAssignmentCount = document.getElementById('staffAssignmentCount');
+const staffAssignmentRows = document.getElementById('staffAssignmentRows');
+const staffVerificationStatus = document.getElementById('staffVerificationStatus');
+const saveStaffVerificationButton = document.getElementById('saveStaffVerificationButton');
 const unitRenderView = document.getElementById('unitRenderView');
 const unitRenderForm = document.getElementById('unitRenderForm');
 const unitRenderFilterField = document.getElementById('unitRenderFilterField');
@@ -420,6 +444,9 @@ let jobsState = {
     editedSubjects: false
   },
   schoolDataImport: null,
+  rosterVerification: null,
+  duplicateRecords: null,
+  staffVerification: null,
   showNewSchoolForm: false,
   selectedNewClientId: null,
   showNewJobForm: false,
@@ -521,7 +548,10 @@ const STUDENT_FIELD_DEFINITIONS = [
   { key: 'homeroom', label: 'Homeroom' },
   { key: 'track', label: 'Track' },
   { key: 'team', label: 'Team' },
+  { key: 'field1', label: 'Field1' },
+  { key: 'field2', label: 'Field2' },
   { key: 'subjectType', label: 'Type' },
+  { key: 'enrollmentStatus', label: 'Enrollment Status' },
   { key: 'photographedStatus', label: 'Photo Status', editOnly: true }
 ];
 const DEFAULT_STUDENT_VISIBLE_FIELDS = Object.fromEntries(
@@ -540,6 +570,10 @@ function trecsApi(methodName) {
 
 function formatNumber(value) {
   return Number(value).toLocaleString();
+}
+
+function normalizedRosterText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 function formatType(type) {
@@ -705,10 +739,12 @@ function setView(view) {
   eventsView.classList.toggle('active-view', view === 'events');
   studentListsView.classList.toggle('active-view', view === 'studentLists');
   onlineOrdersView.classList.toggle('active-view', view === 'onlineOrders');
+  dataVerificationView.classList.toggle('active-view', view === 'dataVerification');
+  staffVerificationView.classList.toggle('active-view', view === 'staffVerification');
   unitRenderView.classList.toggle('active-view', view === 'unitRender');
   batchRenderView.classList.toggle('active-view', view === 'batchRender');
   compositesView.classList.toggle('active-view', view === 'composites');
-  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
+  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
@@ -735,6 +771,12 @@ function setView(view) {
   }
   if (view === 'onlineOrders') {
     loadOnlineOrderJobs().catch((error) => { onlineOrderStatus.textContent = error.message || 'Could not load jobs.'; });
+  }
+  if (view === 'dataVerification') {
+    loadRosterVerificationJobs().catch((error) => { verificationStatus.textContent = error.message || 'Could not load jobs.'; });
+  }
+  if (view === 'staffVerification') {
+    loadStaffVerificationSetup().catch((error) => { staffVerificationStatus.textContent = error.message || 'Could not load staff verification.'; });
   }
   if (view === 'batchRender') {
     loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message || 'Could not load batch rendering.'; });
@@ -1735,6 +1777,539 @@ async function confirmSchoolDataImport() {
   }
 }
 
+function jobOptionLabel(job) {
+  return `${job.location || job.clientName || 'School'} - ${job.name || job.jobName || ''}`;
+}
+
+async function ensureJobsLoadedForTools() {
+  if (!jobsState.jobs.length) await loadJobs();
+}
+
+function populateJobSelect(select, selectedId = null) {
+  const current = selectedId || select.value || jobsState.selectedJobId || jobsState.jobs[0]?.id || '';
+  select.innerHTML = jobsState.jobs.map((job) => `<option value="${job.id}" ${Number(current) === Number(job.id) ? 'selected' : ''}>${escapeHtml(jobOptionLabel(job))}</option>`).join('');
+  return Number(select.value || current || 0);
+}
+
+async function loadRosterVerificationJobs() {
+  await ensureJobsLoadedForTools();
+  populateJobSelect(verificationJobSelect);
+  if (!jobsState.rosterVerification) {
+    jobsState.rosterVerification = { preview: null, mapping: {}, sort: { panel: 'changed', field: 'lastName', direction: 1 } };
+  }
+  await loadDuplicateRecordReview();
+}
+
+function verificationColumnOptions(preview, selectedIndex) {
+  return schoolDataColumnOptions(preview, selectedIndex);
+}
+
+function collectVerificationMapping() {
+  const mapping = {};
+  verificationMapping.querySelectorAll('[data-verification-field]').forEach((select) => {
+    if (select.value !== '') mapping[select.dataset.verificationField] = Number(select.value);
+  });
+  return mapping;
+}
+
+function renderVerificationMapping() {
+  const state = jobsState.rosterVerification;
+  const preview = state?.preview;
+  if (!preview) {
+    verificationMapping.innerHTML = '';
+    return;
+  }
+  const mapping = state.mapping || {};
+  verificationMapping.innerHTML = (preview.fields || []).map((field) => `
+    <label>
+      <span>${escapeHtml(field.label)}</span>
+      <select data-verification-field="${escapeHtml(field.key)}">${verificationColumnOptions(preview, mapping[field.key])}</select>
+    </label>
+  `).join('');
+  verificationMapping.querySelectorAll('[data-verification-field]').forEach((select) => {
+    select.addEventListener('change', async () => {
+      jobsState.rosterVerification.mapping = collectVerificationMapping();
+      await previewRosterVerification();
+    });
+  });
+}
+
+function sortVerificationRows(rows, field, direction) {
+  return [...rows].sort((a, b) => String(a[field] || a.subject?.[field] || a.incoming?.[field] || '').localeCompare(String(b[field] || b.subject?.[field] || b.incoming?.[field] || ''), undefined, { numeric: true, sensitivity: 'base' }) * direction);
+}
+
+function sortButton(panel, field, label) {
+  return `<button type="button" data-verification-sort="${panel}:${field}">${escapeHtml(label)}</button>`;
+}
+
+function renderVerificationSummary(preview) {
+  const totals = preview?.totals || {};
+  verificationSummary.innerHTML = `
+    <article><span>School Rows</span><strong>${formatNumber(totals.imported || 0)}</strong></article>
+    <article><span>Exact Matches</span><strong>${formatNumber(totals.exact || 0)}</strong></article>
+    <article><span>New</span><strong>${formatNumber(totals.newStudents || 0)}</strong></article>
+    <article><span>Changed</span><strong>${formatNumber(totals.changed || 0)}</strong></article>
+    <article><span>Missing</span><strong>${formatNumber(totals.missing || 0)}</strong></article>
+  `;
+}
+
+function renderNewStudentRows(rows) {
+  return rows.map((row) => `<tr>
+    <td><input type="checkbox" data-verification-new="${row._index}" checked></td>
+    <td>${escapeHtml(row.lastName || '')}, ${escapeHtml(row.firstName || '')}</td>
+    <td>${escapeHtml(row.externalId || '')}</td>
+    <td>${escapeHtml(row.grade || '')}</td>
+    <td>${escapeHtml(row.homeroom || '')}</td>
+    <td>${escapeHtml(row.ref || 'Next ref')}</td>
+  </tr>`).join('');
+}
+
+function renderChangedStudentRows(rows) {
+  return rows.map((item) => `<tr>
+    <td><input type="checkbox" data-verification-changed="${item._index}" checked></td>
+    <td>${escapeHtml(item.subject.ref || '')}</td>
+    <td>${escapeHtml(item.subject.lastName || '')}, ${escapeHtml(item.subject.firstName || '')}</td>
+    <td>${item.changes.map((change) => `<div><strong>${escapeHtml(change.field)}</strong>: ${escapeHtml(change.current || '(blank)')} -> ${escapeHtml(change.incoming || '(blank)')}</div>`).join('')}</td>
+  </tr>`).join('');
+}
+
+function renderMissingStudentRows(rows) {
+  return rows.map((subject) => {
+    const protectedRecord = subject.hasPhoto || Number(subject.orderCount || 0) > 0;
+    return `<tr>
+      <td><input type="checkbox" data-verification-missing="${subject._index}" ${protectedRecord ? 'checked' : ''}></td>
+      <td>${escapeHtml(subject.ref || '')}</td>
+      <td>${escapeHtml(subject.lastName || '')}, ${escapeHtml(subject.firstName || '')}</td>
+      <td>${escapeHtml(subject.grade || '')}</td>
+      <td>${escapeHtml(subject.homeroom || '')}</td>
+      <td>${subject.hasPhoto ? 'Photo' : 'No photo'} / ${formatNumber(subject.orderCount || 0)} orders</td>
+      <td>${protectedRecord ? 'Mark unenrolled' : 'Remove'}</td>
+      <td>${protectedRecord ? `<label class="checkbox-line compact"><input type="checkbox" data-verification-include-composite="${subject.id}" ${subject.includeInComposites ? 'checked' : ''}><span>Composite</span></label>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderVerificationPanel(id, title, count, toolbar, body) {
+  return `<details class="verification-section" open>
+    <summary><strong>${escapeHtml(title)}</strong><span>${formatNumber(count)}</span></summary>
+    ${toolbar ? `<div class="verification-sort-row">${toolbar}</div>` : ''}
+    <div class="table-scroll verification-table">${body}</div>
+  </details>`;
+}
+
+function renderVerificationResults() {
+  const preview = jobsState.rosterVerification?.preview;
+  if (!preview) {
+    verificationResults.innerHTML = '<div class="empty-state">New students, changed records, and missing students will appear here.</div>';
+    verificationSummary.innerHTML = '<div class="empty-state">Choose a school file to preview changes.</div>';
+    applyVerificationButton.disabled = true;
+    return;
+  }
+  renderVerificationSummary(preview);
+  const sort = jobsState.rosterVerification.sort || { panel: 'changed', field: 'lastName', direction: 1 };
+  const indexedNew = preview.newStudents.map((row, index) => ({ ...row, _index: index }));
+  const indexedChanged = preview.changedStudents.map((row, index) => ({ ...row, _index: index }));
+  const indexedMissing = preview.missingStudents.map((row, index) => ({ ...row, _index: index }));
+  const newRows = sort.panel === 'new' ? sortVerificationRows(indexedNew, sort.field, sort.direction) : indexedNew;
+  const changedRows = sort.panel === 'changed' ? sortVerificationRows(indexedChanged, sort.field, sort.direction) : indexedChanged;
+  const missingRows = sort.panel === 'missing' ? sortVerificationRows(indexedMissing, sort.field, sort.direction) : indexedMissing;
+  verificationResults.innerHTML = [
+    renderVerificationPanel('new', 'New Students', newRows.length, `${sortButton('new', 'lastName', 'Last')}${sortButton('new', 'grade', 'Grade')}${sortButton('new', 'homeroom', 'Homeroom')}`, `<table><thead><tr><th>Use</th><th>Name</th><th>ID</th><th>Grade</th><th>Homeroom</th><th>Ref</th></tr></thead><tbody>${renderNewStudentRows(newRows)}</tbody></table>`),
+    renderVerificationPanel('changed', 'Changed Students', changedRows.length, `${sortButton('changed', 'lastName', 'Last')}${sortButton('changed', 'grade', 'Grade')}${sortButton('changed', 'homeroom', 'Homeroom')}`, `<table><thead><tr><th>Use</th><th>Ref</th><th>Student</th><th>Changes</th></tr></thead><tbody>${renderChangedStudentRows(changedRows)}</tbody></table>`),
+    renderVerificationPanel('missing', 'Missing From School File', missingRows.length, `${sortButton('missing', 'lastName', 'Last')}${sortButton('missing', 'grade', 'Grade')}${sortButton('missing', 'homeroom', 'Homeroom')}`, `<table><thead><tr><th>Use</th><th>Ref</th><th>Student</th><th>Grade</th><th>Homeroom</th><th>Status</th><th>Action</th><th>Include</th></tr></thead><tbody>${renderMissingStudentRows(missingRows)}</tbody></table>`)
+  ].join('');
+  verificationResults.querySelectorAll('[data-verification-sort]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const [panel, field] = button.dataset.verificationSort.split(':');
+      const current = jobsState.rosterVerification.sort || {};
+      jobsState.rosterVerification.sort = { panel, field, direction: current.panel === panel && current.field === field ? -Number(current.direction || 1) : 1 };
+      renderVerificationResults();
+    });
+  });
+  applyVerificationButton.disabled = false;
+}
+
+async function previewRosterVerification() {
+  const state = jobsState.rosterVerification;
+  if (!state?.preview) return;
+  verificationStatus.textContent = 'Comparing school data...';
+  applyVerificationButton.disabled = true;
+  try {
+    const result = await trecsApi('previewRosterVerification').previewRosterVerification(Number(verificationJobSelect.value), {
+      filePath: state.preview.filePath,
+      hasHeader: state.preview.hasHeader,
+      mapping: state.mapping || {}
+    });
+    jobsState.rosterVerification.preview = { ...state.preview, ...result };
+    verificationFileName.textContent = result.fileName || state.preview.fileName || 'School data selected';
+    renderVerificationResults();
+    verificationStatus.textContent = 'Review the action-needed records before applying.';
+  } catch (error) {
+    verificationStatus.textContent = error.message || 'Roster verification failed.';
+    console.error(error);
+  }
+}
+
+async function chooseVerificationFile() {
+  await loadRosterVerificationJobs();
+  chooseVerificationFileButton.disabled = true;
+  chooseVerificationFileButton.textContent = 'Choosing...';
+  try {
+    const preview = await trecsApi('chooseSchoolDataFile').chooseSchoolDataFile(Number(verificationJobSelect.value));
+    if (!preview || preview.canceled) return;
+    jobsState.rosterVerification = { preview, mapping: { ...(preview.mapping || {}) }, sort: { panel: 'changed', field: 'lastName', direction: 1 } };
+    renderVerificationMapping();
+    await previewRosterVerification();
+  } catch (error) {
+    verificationStatus.textContent = error.message || 'Could not load school file.';
+  } finally {
+    chooseVerificationFileButton.disabled = false;
+    chooseVerificationFileButton.textContent = 'Choose School Excel / CSV';
+  }
+}
+
+async function applyRosterVerification() {
+  const preview = jobsState.rosterVerification?.preview;
+  if (!preview) return;
+  const newStudents = [];
+  const changedStudents = [];
+  const removeSubjectIds = [];
+  const unenrollSubjectIds = [];
+  const includeCompositeSubjectIds = [];
+  verificationResults.querySelectorAll('[data-verification-new]:checked').forEach((checkbox) => newStudents.push(preview.newStudents[Number(checkbox.dataset.verificationNew)]));
+  verificationResults.querySelectorAll('[data-verification-changed]:checked').forEach((checkbox) => changedStudents.push(preview.changedStudents[Number(checkbox.dataset.verificationChanged)]));
+  verificationResults.querySelectorAll('[data-verification-missing]:checked').forEach((checkbox) => {
+    const subject = preview.missingStudents[Number(checkbox.dataset.verificationMissing)];
+    if (!subject) return;
+    if (subject.hasPhoto || Number(subject.orderCount || 0) > 0) unenrollSubjectIds.push(subject.id);
+    else removeSubjectIds.push(subject.id);
+  });
+  verificationResults.querySelectorAll('[data-verification-include-composite]:checked').forEach((checkbox) => includeCompositeSubjectIds.push(Number(checkbox.dataset.verificationIncludeComposite)));
+  applyVerificationButton.disabled = true;
+  applyVerificationButton.textContent = 'Applying...';
+  try {
+    const result = await trecsApi('applyRosterVerification').applyRosterVerification(Number(verificationJobSelect.value), {
+      filePath: preview.filePath,
+      newStudents,
+      changedStudents,
+      removeSubjectIds,
+      unenrollSubjectIds,
+      includeCompositeSubjectIds
+    });
+    verificationStatus.textContent = `Applied ${formatNumber(result.created)} new, ${formatNumber(result.updated)} changed, ${formatNumber(result.removed)} removed, and ${formatNumber(result.unenrolled)} unenrolled.`;
+    await loadDashboard();
+    await loadJobs();
+    await previewRosterVerification();
+  } catch (error) {
+    verificationStatus.textContent = error.message || 'Could not apply verification.';
+  } finally {
+    applyVerificationButton.disabled = false;
+    applyVerificationButton.textContent = 'Apply Selected Changes';
+  }
+}
+
+function duplicateRiskLabel(risk) {
+  if (risk === 'split-photo') return 'Photo on one record';
+  if (risk === 'orders') return 'Order attached';
+  return 'Same name';
+}
+
+function renderDuplicateSubject(subject) {
+  const details = [
+    ['Ref', subject.ref],
+    ['ID', subject.externalId],
+    ['Grade', subject.grade],
+    ['Homeroom', subject.homeroom],
+    ['Field1', subject.field1],
+    ['Field2', subject.field2]
+  ].filter(([_label, value]) => String(value || '').trim());
+  return `<article class="duplicate-subject-card ${subject.hasPhoto ? 'has-photo' : ''}">
+    <div>
+      <strong>${escapeHtml(subject.displayName || subject.name || 'Unnamed student')}</strong>
+      <span>${subject.hasPhoto ? 'Photographed' : 'No photo'} / ${formatNumber(subject.orderCount || 0)} orders / ${formatNumber(subject.linkedImages || 0)} linked images</span>
+    </div>
+    <dl>${details.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>
+    <small>${escapeHtml(formatStatusLabel(subject.enrollmentStatus || 'active'))} / ${escapeHtml(formatStatusLabel(subject.photographedStatus || 'unknown'))}</small>
+  </article>`;
+}
+
+function renderDuplicateRecordReview() {
+  const state = jobsState.duplicateRecords;
+  if (!state) {
+    duplicateRecordSummary.textContent = 'Duplicate records have not been scanned yet.';
+    duplicateRecordResults.innerHTML = '<div class="empty-state">Duplicate student records will appear here.</div>';
+    return;
+  }
+  const showReviewed = Boolean(showReviewedDuplicatesToggle?.checked);
+  const groups = (state.groups || []).filter((group) => showReviewed || !group.reviewedAt);
+  const totals = state.totals || {};
+  duplicateRecordSummary.textContent = `${formatNumber(totals.unreviewed || 0)} unreviewed / ${formatNumber(totals.reviewed || 0)} reviewed duplicate-name groups`;
+  duplicateRecordResults.innerHTML = groups.length ? groups.map((group) => `
+    <section class="duplicate-record-group ${group.reviewedAt ? 'reviewed' : ''}">
+      <div class="duplicate-record-heading">
+        <div>
+          <h4>${escapeHtml(group.displayName || 'Same-name records')}</h4>
+          <span>${escapeHtml(duplicateRiskLabel(group.risk))} / ${formatNumber(group.subjects.length)} records${group.reviewedAt ? ` / Reviewed ${escapeHtml(formatShortDateTime(group.reviewedAt))}` : ''}</span>
+        </div>
+        <button type="button" data-duplicate-reviewed="${escapeHtml(group.nameKey)}" data-duplicate-subjects="${escapeHtml(group.subjectIdsKey)}">${group.reviewedAt ? 'Mark Unreviewed' : 'Mark Reviewed'}</button>
+      </div>
+      <div class="duplicate-subject-grid">${group.subjects.map(renderDuplicateSubject).join('')}</div>
+    </section>
+  `).join('') : '<div class="empty-state">No duplicate-name groups need review.</div>';
+}
+
+async function loadDuplicateRecordReview() {
+  if (!verificationJobSelect.value) return;
+  duplicateRecordSummary.textContent = 'Scanning duplicate records...';
+  try {
+    jobsState.duplicateRecords = await trecsApi('getDuplicateRecordReview').getDuplicateRecordReview(Number(verificationJobSelect.value));
+    renderDuplicateRecordReview();
+  } catch (error) {
+    duplicateRecordSummary.textContent = error.message || 'Could not scan duplicate records.';
+    duplicateRecordResults.innerHTML = '<div class="empty-state">Duplicate scan failed.</div>';
+  }
+}
+
+async function toggleDuplicateRecordReviewed(button) {
+  const nameKey = button.dataset.duplicateReviewed || '';
+  const subjectIdsKey = button.dataset.duplicateSubjects || '';
+  const group = (jobsState.duplicateRecords?.groups || []).find((candidate) => candidate.nameKey === nameKey && candidate.subjectIdsKey === subjectIdsKey);
+  if (!group) return;
+  button.disabled = true;
+  try {
+    await trecsApi('markDuplicateRecordReviewed').markDuplicateRecordReviewed(Number(verificationJobSelect.value), {
+      nameKey,
+      subjectIdsKey,
+      reviewed: !group.reviewedAt
+    });
+    await loadDuplicateRecordReview();
+  } catch (error) {
+    duplicateRecordSummary.textContent = error.message || 'Could not update duplicate review.';
+    button.disabled = false;
+  }
+}
+
+async function loadStaffVerificationSetup(jobId = null) {
+  await ensureJobsLoadedForTools();
+  populateJobSelect(staffVerificationJobSelect, jobId);
+  staffVerificationList.innerHTML = '';
+  staffAssignmentRows.innerHTML = '';
+  const setup = await trecsApi('getStaffVerificationSetup').getStaffVerificationSetup(Number(staffVerificationJobSelect.value));
+  jobsState.staffVerification = { ...setup, search: staffVerificationSearch.value || '' };
+  populateJobSelect(staffVerificationJobSelect, setup.selectedJobId);
+  renderStaffVerification(false);
+}
+
+function staffDisplayName(staff) {
+  return staff.displayName || [staff.firstName, staff.lastName].filter(Boolean).join(' ') || staff.ref || `Staff ${staff.id}`;
+}
+
+function staffCompositeTitle(staff) {
+  const display = [staff?.firstName, staff?.lastName].filter(Boolean).join(' ') || staff?.displayName || staff?.ref || '';
+  return display ? `${display.toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase())}, Teacher` : '';
+}
+
+function renderStaffVerification(preserveDomValues = true) {
+  const setup = jobsState.staffVerification;
+  if (!setup) return;
+  const principalSelect = staffVerificationList.querySelector('[data-key-staff-role="principal"]');
+  const vpSelect = staffVerificationList.querySelector('[data-key-staff-role="vp"]');
+  if (principalSelect) setup.principalSubjectId = principalSelect.value;
+  if (vpSelect) setup.vpSubjectId = vpSelect.value;
+  if (preserveDomValues && staffAssignmentRows.querySelector('[data-homeroom-row]')) {
+    collectHomeroomTeacherRows();
+  }
+  const query = normalizedRosterText(staffVerificationSearch.value);
+  const rows = (setup.homeroomRows || []).map((row, index) => ({ ...row, rowIndex: index })).filter((row) => {
+    const teacherNames = (row.teacherSubjectIds || [])
+      .map((id) => (setup.staff || []).find((person) => Number(person.id) === Number(id)))
+      .filter(Boolean)
+      .map(staffDisplayName);
+    return !query || [
+      row.homeroom,
+      row.gradeLabel,
+      row.gradeTitle,
+      row.classDescription,
+      ...(row.grades || []),
+      ...teacherNames
+    ].some((value) => normalizedRosterText(value).includes(query));
+  });
+  if (staffVerificationCount) staffVerificationCount.textContent = `${formatNumber(setup.staff?.length || 0)} staff`;
+  staffVerificationList.innerHTML = `
+    <label><span>Principal</span><select data-key-staff-role="principal"><option value="">None</option>${staffOptions(setup.principalSubjectId)}</select></label>
+    <label><span>VP</span><select data-key-staff-role="vp"><option value="">None</option>${staffOptions(setup.vpSubjectId)}</select></label>
+  `;
+  renderStaffVerificationSummary();
+  staffAssignmentCount.textContent = `${formatNumber(rows.length)} of ${formatNumber(setup.homeroomRows?.length || 0)} homerooms`;
+  staffAssignmentRows.innerHTML = rows.map((row) => homeroomTeacherRow(row, row.rowIndex)).join('') || '<div class="empty-state">No homerooms found.</div>';
+  staffAssignmentRows.querySelectorAll('[data-homeroom-teacher]').forEach((select) => select.addEventListener('change', () => {
+    const [rowIndex] = select.dataset.homeroomTeacher.split(':').map(Number);
+    const rowNode = staffAssignmentRows.querySelector(`[data-homeroom-row="${rowIndex}"]`);
+    const titleInput = rowNode?.querySelector('[data-homeroom-field="classDescription"]');
+    if (!titleInput || String(titleInput.value || '').trim()) return;
+    const teacher = (jobsState.staffVerification?.staff || []).find((person) => Number(person.id) === Number(select.value));
+    if (teacher) titleInput.value = staffCompositeTitle(teacher);
+  }));
+}
+
+function renderStaffVerificationSummary() {
+  const setup = jobsState.staffVerification;
+  if (!setup || !staffVerificationSummary) return;
+  const principalOk = Number(setup.principalSubjectId || 0) > 0;
+  const vpOk = Number(setup.vpSubjectId || 0) > 0;
+  const homerooms = setup.homeroomRows || [];
+  const finalized = homerooms.filter((row) => row.reviewed === true || Number(row.reviewed || 0) > 0).length;
+  const total = homerooms.length;
+  const homeroomsOk = total > 0 && finalized === total;
+  const allOk = principalOk && vpOk && homeroomsOk;
+  staffVerificationSummary.classList.toggle('complete', allOk);
+  staffVerificationSummary.innerHTML = `
+    <span class="${principalOk ? 'ok' : 'bad'}">${principalOk ? '&#10003;' : '&#10005;'} Principal</span>
+    <span class="${vpOk ? 'ok' : 'bad'}">${vpOk ? '&#10003;' : '&#10005;'} VP</span>
+    <span class="${homeroomsOk ? 'ok' : 'bad'}">${formatNumber(finalized)} / ${formatNumber(total)} finalized</span>
+  `;
+}
+
+function staffOptions(selectedId) {
+  return (jobsState.staffVerification?.staff || []).map((person) => `<option value="${person.id}" ${Number(selectedId) === Number(person.id) ? 'selected' : ''}>${escapeHtml(staffDisplayName(person))}</option>`).join('');
+}
+
+function homeroomOptions(selected) {
+  return ['<option value="">No homeroom</option>', ...(jobsState.staffVerification?.homerooms || []).map((value) => `<option value="${escapeHtml(value)}" ${String(selected || '') === String(value) ? 'selected' : ''}>${escapeHtml(value)}</option>`)].join('');
+}
+
+function teacherSelect(selectedId, rowIndex, teacherIndex, reviewed = false) {
+  const removeButton = reviewed || (teacherIndex === 0 && !selectedId) ? '' : `<button type="button" data-remove-homeroom-teacher="${rowIndex}:${teacherIndex}">Remove</button>`;
+  return `<span class="teacher-select-row"><select data-homeroom-teacher="${rowIndex}:${teacherIndex}" ${reviewed ? 'disabled' : ''}><option value="">Choose teacher</option>${staffOptions(selectedId)}</select>${removeButton}</span>`;
+}
+
+function addHomeroomTeacher(rowIndex) {
+  collectHomeroomTeacherRows();
+  const row = jobsState.staffVerification?.homeroomRows?.[Number(rowIndex)];
+  if (!row || row.reviewed) return;
+  row.teacherSubjectIds = [...(row.teacherSubjectIds || []), ''];
+  staffVerificationStatus.textContent = `Added another teacher slot for ${row.homeroom}.`;
+  renderStaffVerification(false);
+}
+
+async function toggleHomeroomReviewed(rowIndex) {
+  collectHomeroomTeacherRows();
+  const row = jobsState.staffVerification?.homeroomRows?.[Number(rowIndex)];
+  if (!row) return;
+  row.reviewed = !(row.reviewed === true || Number(row.reviewed || 0) > 0);
+  staffVerificationStatus.textContent = `${row.homeroom} is now ${row.reviewed ? 'finalized' : 'editable'}.`;
+  renderStaffVerification(false);
+  if (row.reviewed) {
+    await saveStaffVerification({ auto: true });
+  }
+}
+
+function removeHomeroomTeacher(rowIndex, teacherIndex) {
+  collectHomeroomTeacherRows();
+  const row = jobsState.staffVerification?.homeroomRows?.[Number(rowIndex)];
+  if (!row || row.reviewed) return;
+  row.teacherSubjectIds.splice(Number(teacherIndex), 1);
+  renderStaffVerification(false);
+}
+
+function homeroomTeacherRow(row, index) {
+  const suggested = (row.suggestedTeacherIds || []).length && !(row.teacherSubjectIds || []).length ? row.suggestedTeacherIds : [];
+  const teacherIds = (row.teacherSubjectIds || []).length ? row.teacherSubjectIds : (suggested.length ? suggested : ['']);
+  const smartLabel = suggested.length ? 'Smart match' : (row.candidateTeacherIds || []).length > 1 ? 'Multiple possible teachers' : 'Choose teacher';
+  const reviewed = row.reviewed === true || Number(row.reviewed || 0) > 0;
+  return `<div class="staff-assignment-row homeroom-teacher-row ${reviewed ? 'reviewed' : 'unreviewed'}" data-homeroom-row="${index}">
+    <div class="homeroom-title"><strong>${escapeHtml(row.homeroom || 'No homeroom')}</strong><small>${escapeHtml(smartLabel)}</small><small>${formatNumber(row.studentCount || 0)} students</small></div>
+    <div class="teacher-select-list">${teacherIds.map((id, teacherIndex) => teacherSelect(id, index, teacherIndex, reviewed)).join('')}</div>
+    ${reviewed ? '<span class="finalized-spacer"></span>' : `<button type="button" data-add-homeroom-teacher="${index}">Add Teacher</button>`}
+    <label class="compact-field grade-line-field"><span>Composite Grade Line</span><input data-homeroom-field="gradeTitle" value="${escapeHtml(row.gradeTitle || row.gradeLabel || '')}" placeholder="${escapeHtml(row.gradeTitleDefault || 'Grade line')}" ${reviewed ? 'disabled' : ''}></label>
+    <label class="compact-field teacher-title-field"><span>Teacher Composite Title</span><input data-homeroom-field="classDescription" value="${escapeHtml(row.classDescription || '')}" placeholder="Teacher composite title" ${reviewed ? 'disabled' : ''}></label>
+    <button type="button" class="review-toggle ${reviewed ? 'reviewed' : ''}" data-toggle-homeroom-reviewed="${index}">${reviewed ? 'Edit' : 'Finalize'}</button>
+  </div>`;
+}
+
+function applySmartStaffMatches() {
+  collectHomeroomTeacherRows();
+  (jobsState.staffVerification?.homeroomRows || []).forEach((row) => {
+    if ((row.teacherSubjectIds || []).filter(Boolean).length) return;
+    if ((row.suggestedTeacherIds || []).length === 1) {
+      row.teacherSubjectIds = [...row.suggestedTeacherIds];
+      const teacher = (jobsState.staffVerification?.staff || []).find((person) => Number(person.id) === Number(row.suggestedTeacherIds[0]));
+      if (teacher && !String(row.classDescription || '').trim()) row.classDescription = staffCompositeTitle(teacher);
+    }
+  });
+  renderStaffVerification(false);
+}
+
+function collectHomeroomTeacherRows() {
+  const setup = jobsState.staffVerification;
+  if (!setup) return;
+  [...staffAssignmentRows.querySelectorAll('[data-homeroom-row]')].forEach((rowNode) => {
+    const index = Number(rowNode.dataset.homeroomRow);
+    const row = setup.homeroomRows[index];
+    row.teacherSubjectIds = [...rowNode.querySelectorAll('[data-homeroom-teacher]')].map((select) => select.value ? Number(select.value) : '');
+    row.gradeTitle = rowNode.querySelector('[data-homeroom-field="gradeTitle"]')?.value || '';
+    row.gradeLabel = row.gradeTitle || row.gradeTitleDefault || row.gradeLabel || '';
+    row.classDescription = rowNode.querySelector('[data-homeroom-field="classDescription"]')?.value || '';
+    row.includeInComposites = true;
+    row.includeInExports = true;
+    row.reviewed = rowNode.classList.contains('reviewed');
+  });
+}
+
+function collectStaffAssignments() {
+  const setup = jobsState.staffVerification;
+  collectHomeroomTeacherRows();
+  const rows = [];
+  const principalId = Number(staffVerificationList.querySelector('[data-key-staff-role="principal"]')?.value || 0);
+  const vpId = Number(staffVerificationList.querySelector('[data-key-staff-role="vp"]')?.value || 0);
+  if (principalId) rows.push({ subjectId: principalId, role: 'principal', homeroom: '', includeInComposites: 1, includeInExports: 1, sortOrder: 0 });
+  if (vpId) rows.push({ subjectId: vpId, role: 'vp', homeroom: '', includeInComposites: 1, includeInExports: 1, sortOrder: 1 });
+  (setup?.homeroomRows || []).forEach((row, rowIndex) => {
+    (row.teacherSubjectIds || []).filter(Boolean).forEach((subjectId, teacherIndex) => {
+      rows.push({
+        subjectId: Number(subjectId),
+        role: 'teacher',
+        homeroom: row.homeroom,
+        classDescription: row.classDescription || '',
+        includeInComposites: row.includeInComposites !== false,
+        includeInExports: row.includeInExports !== false,
+        sortOrder: 10 + rowIndex * 10 + teacherIndex
+      });
+    });
+  });
+  return rows;
+}
+
+function collectStaffGradeTitles() {
+  collectHomeroomTeacherRows();
+  const titles = {};
+  (jobsState.staffVerification?.homeroomRows || []).forEach((row) => {
+    const homeroom = String(row.homeroom || '').trim();
+    const title = String(row.gradeTitle || '').trim();
+    if (homeroom && title) titles[homeroom] = { gradeTitle: title, reviewed: row.reviewed === true || Number(row.reviewed || 0) > 0 };
+  });
+  return titles;
+}
+
+async function saveStaffVerification(options = {}) {
+  const autoSave = Boolean(options.auto);
+  saveStaffVerificationButton.disabled = true;
+  const previousButtonText = saveStaffVerificationButton.textContent;
+  saveStaffVerificationButton.textContent = autoSave ? 'Auto-saving...' : 'Saving...';
+  try {
+    const rows = collectStaffAssignments();
+    const result = await trecsApi('saveStaffVerification').saveStaffVerification(Number(staffVerificationJobSelect.value), { rows, gradeTitles: collectStaffGradeTitles() });
+    staffVerificationStatus.textContent = autoSave ? 'Finalized teacher saved.' : `Saved ${formatNumber(result.saved)} staff assignments.`;
+    await loadStaffVerificationSetup(Number(staffVerificationJobSelect.value));
+    jobsState.compositeSetup = null;
+  } catch (error) {
+    staffVerificationStatus.textContent = error.message || 'Could not save staff verification.';
+  } finally {
+    saveStaffVerificationButton.disabled = false;
+    saveStaffVerificationButton.textContent = previousButtonText || 'Save Staff Verification';
+  }
+}
+
 function moveWorkspaceSubject(offset) {
   const subjects = workspaceSubjects();
   if (!subjects.length) {
@@ -1870,7 +2445,10 @@ function studentDetailFieldRows(subject, fields) {
     ['homeroom', 'Homeroom', subject.homeroom || ''],
     ['track', 'Track', subject.track || ''],
     ['team', 'Team', subject.team || ''],
+    ['field1', 'Field1', subject.field1 || ''],
+    ['field2', 'Field2', subject.field2 || ''],
     ['subjectType', 'Type', formatType(subject.subjectType || 'student')],
+    ['enrollmentStatus', 'Enrollment Status', formatStatusLabel(subject.enrollmentStatus || 'active')],
     ['photographedStatus', 'Photo Status', formatStatusLabel(subject.photographedStatus || 'unknown')]
   ];
 
@@ -1964,11 +2542,31 @@ function renderStudentEditForm(subject) {
         <input name="team" value="${escapeHtml(subject.team || '')}">
       </label>
     ` : '',
+    studentFieldVisible(visibleFields, 'field1') ? `
+      <label>
+        <span>Field1</span>
+        <input name="field1" value="${escapeHtml(subject.field1 || '')}">
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'field2') ? `
+      <label>
+        <span>Field2</span>
+        <input name="field2" value="${escapeHtml(subject.field2 || '')}">
+      </label>
+    ` : '',
     studentFieldVisible(visibleFields, 'subjectType') ? `
       <label>
         <span>Type</span>
         <select name="subjectType">
           ${studentTypeOptions(subject.subjectType)}
+        </select>
+      </label>
+    ` : '',
+    studentFieldVisible(visibleFields, 'enrollmentStatus') ? `
+      <label>
+        <span>Enrollment Status</span>
+        <select name="enrollmentStatus">
+          ${enrollmentStatusOptions(subject.enrollmentStatus)}
         </select>
       </label>
     ` : '',
@@ -2143,6 +2741,15 @@ function photoStatusOptions(selectedStatus) {
   `).join('');
 }
 
+function enrollmentStatusOptions(selectedStatus) {
+  return [
+    ['active', 'Active'],
+    ['unenrolled', 'Unenrolled']
+  ].map(([value, label]) => `
+    <option value="${value}" ${value === (selectedStatus || 'active') ? 'selected' : ''}>${label}</option>
+  `).join('');
+}
+
 function subjectInputFromForm(form) {
   const currentSubject = findById(jobsState.detail.subjects || [], Number(form.dataset.subjectId)) || {};
   const valueFor = (name, fallback = '') => (form.elements[name] ? form.elements[name].value : (currentSubject[name] || fallback));
@@ -2154,7 +2761,10 @@ function subjectInputFromForm(form) {
     homeroom: valueFor('homeroom'),
     track: valueFor('track'),
     team: valueFor('team'),
+    field1: valueFor('field1'),
+    field2: valueFor('field2'),
     subjectType: valueFor('subjectType', 'student'),
+    enrollmentStatus: valueFor('enrollmentStatus', 'active'),
     photographedStatus: valueFor('photographedStatus', 'unknown')
   };
 }
@@ -6481,6 +7091,18 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'data-verification') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('dataVerification');
+    return;
+  }
+
+  if (action === 'staff-verification') {
+    if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
+    setView('staffVerification');
+    return;
+  }
+
   if (action === 'batch-render') {
     if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
     setView('batchRender');
@@ -8797,6 +9419,23 @@ function compositeStaffLabel(staff) {
   return `${staff.name || `Ref ${staff.ref || staff.id}`}${details ? ` - ${details}` : ''}${staff.hasPhoto ? '' : ' - NO PHOTO'}`;
 }
 
+function compositeStaffDisplayName(staff) {
+  const name = staff?.name || [staff?.firstName, staff?.lastName].filter(Boolean).join(' ') || '';
+  return name.toLowerCase().replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+function compositePrincipalSubtitle() {
+  const setup = jobsState.compositeSetup;
+  const staff = setup?.staff || [];
+  const keyStaff = setup?.keyStaff || {};
+  const principal = staff.find((subject) => Number(subject.id) === Number(keyStaff.principalSubjectId || 0));
+  const vp = staff.find((subject) => Number(subject.id) === Number(keyStaff.vpSubjectId || 0));
+  return [
+    principal ? `${compositeStaffDisplayName(principal)}, Principal` : '',
+    vp ? `${compositeStaffDisplayName(vp)}, Vice Principal` : ''
+  ].filter(Boolean).join(' & ');
+}
+
 function setSidebarCollapsed(collapsed) {
   appShell.classList.toggle('sidebar-collapsed', collapsed);
   toggleSidebarButton.title = collapsed ? 'Show menu' : 'Hide menu';
@@ -8805,13 +9444,17 @@ function setSidebarCollapsed(collapsed) {
 
 function updateCompositeAdditionalStaffOptions() {
   const staff = jobsState.compositeSetup?.staff || [];
+  const keyStaff = jobsState.compositeSetup?.keyStaff || {};
   const options = `<option value="">None</option>${staff.map((subject) => `<option value="${subject.id}">${escapeHtml(compositeStaffLabel(subject))}</option>`).join('')}`;
+  const defaults = {
+    additionalStaff1Id: keyStaff.principalSubjectId ? String(keyStaff.principalSubjectId) : '',
+    additionalStaff2Id: keyStaff.vpSubjectId ? String(keyStaff.vpSubjectId) : ''
+  };
   ['additionalStaff1Id', 'additionalStaff2Id'].forEach((field) => {
     const select = compositeRenderForm.elements[field];
     if (!select) return;
-    const current = select.value;
     select.innerHTML = options;
-    if (staff.some((subject) => String(subject.id) === current)) select.value = current;
+    if (staff.some((subject) => String(subject.id) === defaults[field])) select.value = defaults[field];
   });
 }
 
@@ -8833,6 +9476,7 @@ async function loadCompositeSetup(jobId = null) {
   compositeRenderForm.elements.schoolName.value = setup.job?.clientName || '';
   compositeRenderForm.elements.schoolYear.value = setup.job?.schoolYear || '';
   updateCompositeAdditionalStaffOptions();
+  compositeRenderForm.elements.principal.value = compositePrincipalSubtitle();
   jobsState.compositeHomeroom = setup.classes[0]?.homeroom || '';
   renderCompositeJobSummary();
   renderCompositeClasses();
@@ -9962,6 +10606,57 @@ cancelImportPreviousJobButton.addEventListener('click', () => {
 
 browsePreviousJobFolderButton.addEventListener('click', browsePreviousJobFolder);
 importPreviousJobForm.addEventListener('submit', submitImportPreviousJob);
+
+verificationJobSelect.addEventListener('change', () => {
+  jobsState.rosterVerification = { preview: null, mapping: {}, sort: { panel: 'changed', field: 'lastName', direction: 1 } };
+  jobsState.duplicateRecords = null;
+  verificationFileName.textContent = 'No file chosen';
+  verificationMapping.innerHTML = '';
+  renderVerificationResults();
+  loadDuplicateRecordReview();
+});
+chooseVerificationFileButton.addEventListener('click', chooseVerificationFile);
+applyVerificationButton.addEventListener('click', applyRosterVerification);
+refreshDuplicateRecordsButton.addEventListener('click', loadDuplicateRecordReview);
+showReviewedDuplicatesToggle.addEventListener('change', renderDuplicateRecordReview);
+duplicateRecordResults.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-duplicate-reviewed]');
+  if (button && duplicateRecordResults.contains(button)) {
+    toggleDuplicateRecordReviewed(button);
+  }
+});
+staffVerificationJobSelect.addEventListener('change', () => {
+  loadStaffVerificationSetup(Number(staffVerificationJobSelect.value)).catch((error) => { staffVerificationStatus.textContent = error.message || 'Could not load staff verification.'; });
+});
+staffVerificationSearch.addEventListener('input', () => renderStaffVerification(true));
+addStaffAssignmentButton.addEventListener('click', applySmartStaffMatches);
+saveStaffVerificationButton.addEventListener('click', saveStaffVerification);
+staffVerificationList.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-key-staff-role]');
+  if (!select || !staffVerificationList.contains(select) || !jobsState.staffVerification) return;
+  if (select.dataset.keyStaffRole === 'principal') jobsState.staffVerification.principalSubjectId = select.value;
+  if (select.dataset.keyStaffRole === 'vp') jobsState.staffVerification.vpSubjectId = select.value;
+  renderStaffVerificationSummary();
+});
+staffAssignmentRows.addEventListener('click', (event) => {
+  const addButton = event.target.closest('[data-add-homeroom-teacher]');
+  if (addButton && staffAssignmentRows.contains(addButton)) {
+    addHomeroomTeacher(Number(addButton.dataset.addHomeroomTeacher));
+    return;
+  }
+  const toggleButton = event.target.closest('[data-toggle-homeroom-reviewed]');
+  if (toggleButton && staffAssignmentRows.contains(toggleButton)) {
+    toggleHomeroomReviewed(Number(toggleButton.dataset.toggleHomeroomReviewed)).catch((error) => {
+      staffVerificationStatus.textContent = error.message || 'Could not save finalized teacher.';
+    });
+    return;
+  }
+  const removeButton = event.target.closest('[data-remove-homeroom-teacher]');
+  if (removeButton && staffAssignmentRows.contains(removeButton)) {
+    const [rowIndex, teacherIndex] = removeButton.dataset.removeHomeroomTeacher.split(':').map(Number);
+    removeHomeroomTeacher(rowIndex, teacherIndex);
+  }
+});
 
 unitRenderForm.elements.jobId.addEventListener('change', () => {
   loadUnitRenderSetup(Number(unitRenderForm.elements.jobId.value)).catch((error) => {
