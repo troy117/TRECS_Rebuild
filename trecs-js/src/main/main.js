@@ -15,24 +15,32 @@ const portableMode = app.isPackaged || runningFromPortableFolder;
 const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
 const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
 const defaultProjectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
-function dataRootFromPathFile() {
-  const pathFile = path.join(defaultProjectRoot, 'path.txt');
-  if (!fs.existsSync(pathFile) || !fs.statSync(pathFile).isFile()) {
-    return defaultProjectRoot;
+function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackRoot) {
+  const configFile = path.join(defaultProjectRoot, fileName);
+  if (!fs.existsSync(configFile) || !fs.statSync(configFile).isFile()) {
+    return fallbackPath;
   }
 
-  const configuredPath = fs.readFileSync(pathFile, 'utf8')
+  const configuredPath = fs.readFileSync(configFile, 'utf8')
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/^["']|["']$/g, ''))
     .find((line) => line && !line.startsWith('#'));
   if (!configuredPath) {
-    return defaultProjectRoot;
+    return fallbackPath;
   }
 
-  return path.resolve(defaultProjectRoot, configuredPath);
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(fallbackRoot, configuredPath);
 }
 
-const projectRoot = dataRootFromPathFile();
+const projectRoot = configuredPathFromFile('path.txt', defaultProjectRoot);
+const captureConfigName = 'capture.txt';
+const captureConfigPath = path.join(defaultProjectRoot, captureConfigName);
+const captureStationMode = fs.existsSync(captureConfigPath) && fs.statSync(captureConfigPath).isFile();
+const captureHotFolder = configuredPathFromFile(
+  captureConfigName,
+  defaultProjectRoot,
+  path.join(projectRoot, 'CaptureHotFolder')
+);
 const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : defaultProjectRoot;
 const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
@@ -97,7 +105,10 @@ function systemInfo() {
     userName: process.env.USERNAME || os.userInfo().username || '',
     dataRoot: projectRoot,
     defaultDataRoot: defaultProjectRoot,
-    pathFile: path.join(defaultProjectRoot, 'path.txt')
+    pathFile: path.join(defaultProjectRoot, 'path.txt'),
+    captureFile: captureConfigPath,
+    captureHotFolder,
+    captureStationMode
   };
 }
 
@@ -115,6 +126,52 @@ function focusWindow(event) {
     window.webContents.focus();
   }
   return { focused: Boolean(window) };
+}
+
+async function confirmImageUnlink(event, labelValue) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const label = String(labelValue || 'this image');
+  const result = await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'Unlink Image',
+    message: `Unlink ${label} from this student?`,
+    detail: 'If this image has no other student links, the reference prefix will be removed from the JPG and CR3 filenames.',
+    buttons: ['Unlink', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function confirmAction(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showMessageBox(window, {
+    type: input.type === 'warning' ? 'warning' : 'question',
+    title: String(input.title || 'Confirm'),
+    message: String(input.message || 'Continue?'),
+    detail: String(input.detail || ''),
+    buttons: [String(input.confirmLabel || 'Continue'), 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function showMessage(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  await dialog.showMessageBox(window, {
+    type: input.type === 'error' ? 'error' : input.type === 'warning' ? 'warning' : 'info',
+    title: String(input.title || 'TRECS'),
+    message: String(input.message || ''),
+    detail: String(input.detail || ''),
+    buttons: ['OK'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  return { shown: true };
 }
 
 function logStartup(message, error = null) {
@@ -1087,7 +1144,7 @@ async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
   fs.mkdirSync(path.join(projectRoot, 'database'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
-  fs.mkdirSync(path.join(projectRoot, 'CaptureHotFolder'), { recursive: true });
+  fs.mkdirSync(captureHotFolder, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
 
@@ -4412,8 +4469,8 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
   return { jobs, selectedJobId: jobId, filters };
 }
 
-async function chooseUnitRenderOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseUnitRenderOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -6411,8 +6468,8 @@ async function previewComposite(event, input = {}) {
   return { dataUrl, width: previewWidth, height: previewHeight, fullWidth: 3000, fullHeight: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
 }
 
-async function chooseCompositeOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseCompositeOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -10849,6 +10906,9 @@ ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
 ipcMain.handle('job:load-onsite-setups', loadOnsiteSetups);
 ipcMain.handle('app:system-info', () => systemInfo());
 ipcMain.handle('app:focus-window', focusWindow);
+ipcMain.handle('app:confirm-image-unlink', confirmImageUnlink);
+ipcMain.handle('app:confirm-action', confirmAction);
+ipcMain.handle('app:show-message', showMessage);
 ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
 ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
@@ -14348,7 +14408,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   const subjectId = numericId(subjectIdValue);
   const fileMode = normalizeCaptureFileMode(options.fileMode);
   const shootStage = normalizeShootStage(options.shootStage);
-  const hotFolder = resolveWorkspacePath('CaptureHotFolder');
+  const hotFolder = captureHotFolder;
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
   }
@@ -14921,8 +14981,8 @@ async function getImagePreview(_event, imageIdValue) {
 
 ipcMain.handle('image:preview', getImagePreview);
 
-async function chooseCropToolImage() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolImage(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Image To Crop',
     properties: ['openFile'],
     filters: [
@@ -14965,8 +15025,8 @@ function cropToolImagePayload(filePath) {
   };
 }
 
-async function chooseCropToolInputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolInputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Input Folder',
     properties: ['openDirectory']
   });
@@ -14983,8 +15043,8 @@ async function chooseCropToolInputFolder() {
   };
 }
 
-async function chooseCropToolOutputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Output Folder',
     properties: ['openDirectory', 'createDirectory']
   });
@@ -15068,7 +15128,7 @@ async function saveCropToolImage(_event, input = {}) {
     const defaultPath = input.sourcePath
       ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}.jpg`)
       : '8x10-crop.jpg';
-    const result = await dialog.showSaveDialog({
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(_event.sender), {
       title: 'Save 8x10 Crop',
       defaultPath,
       filters: [
@@ -15151,7 +15211,9 @@ function pictureDayMenu(actions) {
       actions.createCameraCards,
       { type: 'separator' },
       actions.prepareOnsiteSetup,
-      actions.loadOnsiteSetup
+      actions.loadOnsiteSetup,
+      { type: 'separator' },
+      actions.makeEndOfDay
     ]
   };
 }
@@ -15189,8 +15251,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -15233,8 +15294,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -15245,7 +15305,6 @@ function createContextMenus(window, context) {
       {
         label: 'Capture',
         submenu: [
-          actions.makeEndOfDay,
           actions.addBlankRecords
         ]
       },
@@ -15315,14 +15374,17 @@ function createContextMenus(window, context) {
         actions.syncCroppedImages,
         actions.createCroppedMedium,
         actions.imageReview,
-        actions.cropTool,
-        actions.makeEndOfDay
+        actions.cropTool
       ]
     }
   ];
 }
 
 function createApplicationMenu(window, context = 'job') {
+  const contextMenus = createContextMenus(window, context);
+  const visibleContextMenus = captureStationMode
+    ? contextMenus.filter((item) => !['Job', 'TRECS'].includes(item.label))
+    : contextMenus;
   const template = [
     {
       label: 'File',
@@ -15363,7 +15425,7 @@ function createApplicationMenu(window, context = 'job') {
         { role: 'close' }
       ]
     },
-    ...createContextMenus(window, context),
+    ...visibleContextMenus,
     {
       label: 'Help',
       submenu: [
@@ -15406,7 +15468,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot}`);
+  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot} captureStationMode=${captureStationMode} captureFile=${captureConfigPath} captureHotFolder=${captureHotFolder}`);
   await ensurePrototypeDatabaseShape();
   logStartup('database ready');
   createWindow();

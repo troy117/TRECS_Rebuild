@@ -8,6 +8,7 @@ const title = document.querySelector('.topbar h1');
 const navButtons = document.querySelectorAll('nav button');
 const viewButtons = document.querySelectorAll('[data-view-button]');
 const viewTargets = document.querySelectorAll('[data-view-target]');
+let captureStationMode = false;
 const dashboardView = document.getElementById('dashboardView');
 const jobsView = document.getElementById('jobsView');
 const productsView = document.getElementById('productsView');
@@ -525,7 +526,7 @@ if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
   window.trecs.onTrecsMenuAction((action) => {
     handleTrecsMenuAction(action).catch((error) => {
       console.error(error);
-      window.alert(error.message || 'Menu action failed');
+      showMessage(error.message || 'Menu action failed', { type: 'error' }).catch((messageError) => console.error(messageError));
     });
   });
 }
@@ -1014,6 +1015,7 @@ async function openJob(jobId) {
   }
   setJobsWorkspaceMode(true);
   setWorkspaceMode(jobsState.selectedTab === 'pictureDay' ? 'pictureDay' : 'students');
+  await restoreElectronFocus();
 }
 
 function closeJobWorkspace() {
@@ -1027,6 +1029,45 @@ function closeJobWorkspace() {
 function activeElementAcceptsTyping() {
   const element = document.activeElement;
   return Boolean(element && ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName));
+}
+
+async function restoreElectronFocus(element = null, selectText = false) {
+  try {
+    if (window.trecs && typeof window.trecs.focusWindow === 'function') {
+      await window.trecs.focusWindow();
+    }
+  } catch (error) {
+    console.warn('Could not restore TRECS focus', error);
+  }
+  requestAnimationFrame(() => {
+    if (!element || !element.isConnected) {
+      return;
+    }
+    element.focus({ preventScroll: true });
+    if (selectText && typeof element.select === 'function') {
+      element.select();
+    }
+  });
+}
+
+async function confirmAction(input) {
+  if (window.trecs && typeof window.trecs.confirmAction === 'function') {
+    return window.trecs.confirmAction(input);
+  }
+  return window.confirm([input.message, input.detail].filter(Boolean).join('\n\n'));
+}
+
+function showMessage(message, options = {}) {
+  if (window.trecs && typeof window.trecs.showMessage === 'function') {
+    return window.trecs.showMessage({
+      type: options.type || 'info',
+      title: options.title || 'TRECS',
+      message: String(message || ''),
+      detail: options.detail || ''
+    });
+  }
+  window.alert(message);
+  return Promise.resolve({ shown: true });
 }
 
 function focusCaptureBarcode(force = false) {
@@ -1044,6 +1085,7 @@ function focusCaptureBarcode(force = false) {
 
 function setCaptureLoginVisible(visible) {
   captureLoginModal.hidden = !visible;
+  appShell.inert = visible;
   if (!visible) {
     jobsState.pendingCaptureJobId = null;
     captureLoginStatus.textContent = '';
@@ -1056,20 +1098,31 @@ async function focusCaptureLoginPhotographer() {
     return;
   }
 
-  try {
-    if (window.trecs && typeof window.trecs.focusWindow === 'function') {
-      await window.trecs.focusWindow();
-    }
-  } catch (error) {
-    console.warn('Could not focus TRECS window', error);
-  }
-
-  requestAnimationFrame(() => {
-    if (!captureLoginModal.hidden && !activeElementAcceptsTyping()) {
+  await restoreElectronFocus(input, true);
+  setTimeout(() => {
+    if (!captureLoginModal.hidden && document.activeElement !== input) {
       input.focus({ preventScroll: true });
       input.select();
     }
+  }, 100);
+}
+
+async function configureStationMode() {
+  if (!window.trecs || typeof window.trecs.getSystemInfo !== 'function') {
+    return;
+  }
+  const info = await window.trecs.getSystemInfo();
+  captureStationMode = Boolean(info.captureStationMode);
+  if (!captureStationMode) {
+    return;
+  }
+  navButtons.forEach((button) => {
+    const isJobs = button.dataset.viewButton === 'jobs';
+    const isCapture = button.dataset.viewTarget === 'jobs' && button.dataset.jobTabTarget === 'capture';
+    button.hidden = !isJobs && !isCapture;
   });
+  jobsState.selectedTab = 'subjects';
+  setView('jobs');
 }
 
 async function openCaptureLogin(jobId) {
@@ -1202,13 +1255,15 @@ function setAddRecordsModalVisible(visible) {
   addRecordsStatus.textContent = '';
   if (visible) {
     addRecordsForm.reset();
-    addRecordsForm.elements.recordCount.focus();
-    addRecordsForm.elements.recordCount.select();
+    restoreElectronFocus(addRecordsForm.elements.recordCount, true).catch((error) => console.error(error));
   }
 }
 
 function setEndOfDayModalVisible(visible) {
   endOfDayModal.hidden = !visible;
+  if (visible) {
+    restoreElectronFocus(cancelEndOfDayButton).catch((error) => console.error(error));
+  }
   if (!visible) {
     jobsState.endOfDayReview = null;
     endOfDayStatus.textContent = '';
@@ -1617,7 +1672,7 @@ async function confirmEndOfDayPackage() {
         jobsState.detail = null;
         await loadJobDetail(result.id);
       }
-      window.alert([
+      await showMessage([
         'End of Day package approved.',
         '',
         `Files copied: ${formatNumber((result.counts && result.counts.copiedFiles) || 0)}`,
@@ -1675,6 +1730,7 @@ function openSchoolDataImport(jobId) {
   schoolDataPreview.innerHTML = '';
   confirmSchoolDataButton.disabled = true;
   setSchoolDataModalVisible(true);
+  restoreElectronFocus(browseSchoolDataButton).catch((error) => console.error(error));
 }
 
 function schoolDataColumnOptions(preview, selectedIndex) {
@@ -2457,6 +2513,8 @@ function renderStudentWorkspace() {
         setView('events');
       } else {
         setWorkspaceMode('imageReview');
+        const searchInput = imageReviewWorkspace.querySelector('input[name="subjectSearch"]');
+        restoreElectronFocus(searchInput).catch((error) => console.error(error));
       }
     });
   }
@@ -2730,6 +2788,7 @@ async function openStudentFieldSettings() {
     console.error(error);
   }
   renderStudentFieldSettingsModal();
+  restoreElectronFocus(studentFieldSettingsForm.elements.scope).catch((error) => console.error(error));
 }
 
 function closeStudentFieldSettings() {
@@ -3117,6 +3176,7 @@ async function openImageLightbox(imageId, options = {}) {
     : lightboxImagesForSubject(subjectId, imageId);
 
   imageLightboxModal.hidden = false;
+  restoreElectronFocus(closeImageLightboxButton).catch((error) => console.error(error));
   imageLightboxTitle.textContent = 'Image Preview';
   imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
   renderImageLightboxActions();
@@ -3386,6 +3446,7 @@ function renderWorkspaceOrderDetail(subject) {
 async function showOrderEnvelope(orderId) {
   jobsState.viewingEnvelopeScanId = null;
   orderEnvelopeModal.hidden = false;
+  restoreElectronFocus(closeOrderEnvelopeButton).catch((error) => console.error(error));
   orderEnvelopeActions.hidden = true;
   orderEnvelopeTitle.textContent = `Order #${orderId} Envelope`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
@@ -3437,8 +3498,7 @@ function showEditOrder(orderId) {
   editOrderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
   editOrderStatus.textContent = '';
   editOrderModal.hidden = false;
-  editOrderForm.elements.orderCodes.focus();
-  editOrderForm.elements.orderCodes.select();
+  restoreElectronFocus(editOrderForm.elements.orderCodes, true).catch((error) => console.error(error));
   loadEditOrderEnvelope(orderId);
 }
 
@@ -3488,7 +3548,13 @@ async function submitEditOrder(event) {
 async function deleteWorkspaceOrder(orderId) {
   const order = findById(jobsState.detail.subjectOrders || [], orderId) || findById(jobsState.detail.orders || [], orderId);
   const label = order && order.packageCodes ? `#${orderId} (${order.packageCodes})` : `#${orderId}`;
-  if (!confirm(`Delete order ${label}? This will keep the envelope scan but remove the order and its items.`)) {
+  if (!(await confirmAction({
+    type: 'warning',
+    title: 'Delete Order',
+    message: `Delete order ${label}?`,
+    detail: 'The envelope scan will be kept, but the order and its items will be removed.',
+    confirmLabel: 'Delete Order'
+  }))) {
     return;
   }
 
@@ -3502,7 +3568,7 @@ async function deleteWorkspaceOrder(orderId) {
       await loadUnlinkedEnvelopeScans();
     }
   } catch (error) {
-    alert(error.message || 'Delete failed');
+    await showMessage(error.message || 'Delete failed', { type: 'error' });
     console.error(error);
   }
 }
@@ -3656,7 +3722,7 @@ function renderImageReviewWorkspace() {
         ${renderImageLinkPanel(jobsState.selectedImageId, { mode: 'review' })}
       </section>
       <section class="image-review-main">
-        <aside class="capture-preview image-review-preview" id="imagePreviewPanel">
+        <aside class="capture-preview image-review-preview" id="imageReviewPreviewPanel">
           <div class="empty-state">Select an image to review.</div>
         </aside>
         <div class="image-review-list">
@@ -3686,7 +3752,11 @@ function renderImageReviewWorkspace() {
 
   bindImagePreviewLinkForm({ mode: 'review' });
   loadReviewSubjectPreview();
-  loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false, layout: 'review' });
+  loadImagePreview(jobsState.selectedImageId, {
+    panelId: 'imageReviewPreviewPanel',
+    includeLinkPanel: false,
+    layout: 'review'
+  });
 }
 
 function isBlankCaptureSubject(subject) {
@@ -4250,6 +4320,7 @@ function renderUnlinkedEnvelopeScans() {
 async function showEnvelopeScan(scanId) {
   jobsState.viewingEnvelopeScanId = scanId;
   orderEnvelopeModal.hidden = false;
+  restoreElectronFocus(closeOrderEnvelopeButton).catch((error) => console.error(error));
   orderEnvelopeActions.hidden = false;
   orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
@@ -4272,7 +4343,7 @@ async function assignViewedEnvelopeScan() {
     return;
   }
   if (!subject) {
-    alert('Load a student reference before assigning this envelope.');
+    await showMessage('Load a student reference before assigning this envelope.', { type: 'warning' });
     envelopeEntryForm.elements.barcode.focus();
     return;
   }
@@ -4306,7 +4377,12 @@ async function deleteViewedEnvelopeScan() {
   if (!scanId) {
     return;
   }
-  if (!confirm('Delete this unlinked envelope scan and its image file?')) {
+  if (!(await confirmAction({
+    type: 'warning',
+    title: 'Delete Envelope Scan',
+    message: 'Delete this unlinked envelope scan and its image file?',
+    confirmLabel: 'Delete Scan'
+  }))) {
     return;
   }
 
@@ -4321,7 +4397,7 @@ async function deleteViewedEnvelopeScan() {
     closeOrderEnvelope();
     await loadUnlinkedEnvelopeScans();
   } catch (error) {
-    alert(error.message || 'Could not delete envelope.');
+    await showMessage(error.message || 'Could not delete envelope.', { type: 'error' });
     console.error(error);
   } finally {
     assignEnvelopeScanButton.disabled = false;
@@ -4551,7 +4627,7 @@ function showEnvelopeConfirm(pending) {
   jobsState.envelopePending = pending;
   envelopeConfirmMessage.textContent = `Another envelope was scanned. Attach ${pending.filename} to ref ${jobsState.envelopeSubject.ref || ''}?`;
   envelopeConfirmModal.hidden = false;
-  confirmEnvelopeButton.focus();
+  restoreElectronFocus(confirmEnvelopeButton).catch((error) => console.error(error));
 }
 
 async function respondEnvelopeConfirm(accept) {
@@ -6259,8 +6335,7 @@ function openEditJobModal() {
   editJobForm.elements.notes.value = job.notes || '';
   editJobStatus.textContent = '';
   editJobModal.hidden = false;
-  editJobForm.elements.name.focus();
-  editJobForm.elements.name.select();
+  restoreElectronFocus(editJobForm.elements.name, true).catch((error) => console.error(error));
 }
 
 function closeEditJobModal() {
@@ -6551,7 +6626,7 @@ function selectedJobIdForAction() {
   if (jobsState.selectedJobId) {
     return jobsState.selectedJobId;
   }
-  window.alert('Select a job first.');
+  showMessage('Select a job first.', { type: 'warning' }).catch((error) => console.error(error));
   return null;
 }
 
@@ -6593,7 +6668,7 @@ async function performPrepareOnsiteSetup(jobId) {
       packagePath: result.packagePath,
       subjects: result.counts.subjects
     };
-    alert(`Onsite setup created.\n\n${result.packagePath}`);
+    await showMessage(`Onsite setup created.\n\n${result.packagePath}`);
     await loadPictureDayPrep(true);
   } catch (error) {
     jobsState.lastLaptopPackage = {
@@ -6680,6 +6755,7 @@ async function openCameraCardsModal(jobId) {
     filterOptions: { grades: [], homerooms: [], tracks: [] }
   };
   cameraCardsModal.hidden = false;
+  restoreElectronFocus(cameraCardsForm.elements.source).catch((error) => console.error(error));
   cameraCardsForm.elements.source.value = jobsState.cameraCardSource || 'all';
   cameraCardsForm.elements.sortMethod.value = jobsState.cameraCardSortMethod || 'alpha_grade';
   cameraCardsForm.elements.outputFolder.value = jobsState.adminOutputFolder || '';
@@ -7018,6 +7094,7 @@ function setCropToolVisible(visible) {
   if (visible) {
     renderCropToolBatchList();
     drawCropTool();
+    restoreElectronFocus(chooseCropToolImageButton).catch((error) => console.error(error));
   }
 }
 
@@ -7957,9 +8034,14 @@ async function unlinkLinkedImage(subjectId, imageId, control) {
   hideImageHoverPreview();
   const image = linkedImagesForSubject(subjectId).find((item) => Number(item.imageAssetId) === Number(imageId));
   const label = image && image.filename ? image.filename : `image #${imageId}`;
-  if (!confirm(`Unlink ${label} from this student? If this image has no other student links, the reference prefix will be removed from the filename.`)) {
+  const confirmed = window.trecs && typeof window.trecs.confirmImageUnlink === 'function'
+    ? await window.trecs.confirmImageUnlink(label)
+    : confirm(`Unlink ${label} from this student? If this image has no other student links, the reference prefix will be removed from the filename.`);
+  if (!confirmed) {
+    await restoreElectronFocus();
     return;
   }
+  await restoreElectronFocus();
 
   const originalText = control ? control.textContent : '';
   if (control) {
@@ -8216,7 +8298,7 @@ async function acquireUiJobLock(jobId, scope = 'job_write') {
   const result = await trecsApi('acquireJobSession').acquireJobSession(Number(jobId), scope);
   if (!result.acquired) {
     const owner = [result.conflict?.userName, result.conflict?.workstationName].filter(Boolean).join(' on ');
-    window.alert(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nIf TRECS was closed normally, the lock is released immediately. After an unexpected shutdown on another workstation, the lock expires automatically after two minutes.`);
+    await showMessage(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nIf TRECS was closed normally, the lock is released immediately. After an unexpected shutdown on another workstation, the lock expires automatically after two minutes.`, { type: 'warning' });
     return false;
   }
   activeJobLockIds.add(Number(jobId));
@@ -8290,7 +8372,12 @@ async function saveCurrentStudentList() {
 }
 
 async function deleteCurrentStudentList() {
-  if (!jobsState.studentListId || !window.confirm(`Delete “${studentListName.value}”?`)) return;
+  if (!jobsState.studentListId || !(await confirmAction({
+    type: 'warning',
+    title: 'Delete Student List',
+    message: `Delete “${studentListName.value}”?`,
+    confirmLabel: 'Delete List'
+  }))) return;
   const jobId = Number(jobsState.studentListSetup.selectedJobId); if (!(await acquireUiJobLock(jobId))) return;
   await trecsApi('deleteStudentList').deleteStudentList(jobsState.studentListId); await loadStudentListSetup(jobId); studentListStatus.textContent = 'List deleted.';
 }
@@ -9041,7 +9128,11 @@ function bindPackageEditor(selected) {
     }
   });
   document.querySelector('#saveProductsDefaultButton').addEventListener('click', async (event) => {
-    if (!window.confirm('Save the current product list as the default products loaded by TRECS?')) return;
+    if (!(await confirmAction({
+      title: 'Save Default Products',
+      message: 'Save the current product list as the default products loaded by TRECS?',
+      confirmLabel: 'Save Defaults'
+    }))) return;
     event.currentTarget.disabled = true;
     try {
       rememberProductListScroll();
@@ -9110,7 +9201,12 @@ function bindPackageEditor(selected) {
     }
     if (deleteButton) {
       const product = jobsState.packageEditor.products.find((row) => Number(row.id) === Number(deleteButton.dataset.deleteProduct));
-      if (!product || !window.confirm(`Delete product ${product.name}?`)) return;
+      if (!product || !(await confirmAction({
+        type: 'warning',
+        title: 'Delete Product',
+        message: `Delete product ${product.name}?`,
+        confirmLabel: 'Delete Product'
+      }))) return;
       deleteButton.disabled = true;
       try {
         rememberProductListScroll();
@@ -9200,7 +9296,12 @@ function bindPackageEditor(selected) {
     } catch (error) { status.textContent = error.message; }
   });
   document.querySelector('#deletePackageCodeButton').addEventListener('click', async () => {
-    if (!selected || !window.confirm(`Delete package code ${selected.code}?`)) return;
+    if (!selected || !(await confirmAction({
+      type: 'warning',
+      title: 'Delete Package Code',
+      message: `Delete package code ${selected.code}?`,
+      confirmLabel: 'Delete Code'
+    }))) return;
     rememberPackageCodeListScroll();
     await trecsApi('deletePackageCode').deletePackageCode(selected.id);
     jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
@@ -9272,13 +9373,15 @@ async function reloadCurrentJobDetail() {
 async function loadImagePreview(imageId, options = {}) {
   const panel = document.getElementById(options.panelId || 'imagePreviewPanel');
   if (!panel || !imageId) {
-    if (panel) {
-      panel.innerHTML = '<div class="empty-state">Select an image to review.</div>';
-    }
     return;
   }
 
+  const requestId = `${imageId}:${Date.now()}:${Math.random()}`;
+  panel.dataset.previewRequest = requestId;
   const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+  if (!panel.isConnected || panel.dataset.previewRequest !== requestId) {
+    return;
+  }
   if (!preview || preview.missing || !preview.dataUrl) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     return;
@@ -10164,9 +10267,9 @@ async function loadOnsiteSetup() {
       await loadJobDetail(firstLoaded.id);
     }
     const skippedText = result.counts.skipped ? `\nSkipped ${result.counts.skipped}.` : '';
-    window.alert(`Loaded ${result.counts.loaded} onsite setup${result.counts.loaded === 1 ? '' : 's'}.${skippedText}`);
+    await showMessage(`Loaded ${result.counts.loaded} onsite setup${result.counts.loaded === 1 ? '' : 's'}.${skippedText}`);
   } catch (error) {
-    window.alert(error.message || 'Load onsite setup failed');
+    await showMessage(error.message || 'Load onsite setup failed', { type: 'error' });
     console.error(error);
   } finally {
     if (loadOnsiteSetupButton) {
@@ -10200,7 +10303,7 @@ async function loadEndOfDayPackage() {
 
     openEndOfDayPackageReview(choice);
   } catch (error) {
-    window.alert(error.message || 'Load End of Day failed');
+    await showMessage(error.message || 'Load End of Day failed', { type: 'error' });
     console.error(error);
   } finally {
     if (loadEndOfDayButton) {
@@ -10229,6 +10332,7 @@ async function loadDashboard() {
 }
 
 loadDashboard();
+configureStationMode().catch((error) => console.error('Could not configure capture station mode.', error));
 
 toggleSidebarButton.addEventListener('click', () => {
   setSidebarCollapsed(!appShell.classList.contains('sidebar-collapsed'));
@@ -10290,7 +10394,21 @@ eventPackageCodeShortcuts.addEventListener('click', (event) => { const button = 
 eventOrderForm.addEventListener('submit', (event) => { event.preventDefault(); saveEventOrder(true); });
 eventSaveStayButton.addEventListener('click', () => saveEventOrder(false));
 eventAddAnotherButton.addEventListener('click', () => { jobsState.eventSelectedCandidateId = null; eventStudentSearch.value = ''; eventOrderForm.reset(); eventOrderForm.elements.paidStatus.value = 'paid'; renderEventSelectedCandidate(); searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }); eventStudentSearch.focus(); });
-eventExistingLinks.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-event-link]'); if (!button || !window.confirm('Remove this fall-student match and its event order?')) return; try { await trecsApi('removeEventSubjectLink').removeEventSubjectLink(Number(button.dataset.removeEventLink)); await loadEventWorkflow(jobsState.eventSetup.selectedEventJobId, jobsState.eventSetup.selectedEntry.id); } catch (error) { eventOrderStatus.textContent = error.message; } });
+eventExistingLinks.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-remove-event-link]');
+  if (!button || !(await confirmAction({
+    type: 'warning',
+    title: 'Remove Student Match',
+    message: 'Remove this fall-student match and its event order?',
+    confirmLabel: 'Remove Match'
+  }))) return;
+  try {
+    await trecsApi('removeEventSubjectLink').removeEventSubjectLink(Number(button.dataset.removeEventLink));
+    await loadEventWorkflow(jobsState.eventSetup.selectedEventJobId, jobsState.eventSetup.selectedEntry.id);
+  } catch (error) {
+    eventOrderStatus.textContent = error.message;
+  }
+});
 
 studentListJobSelect.addEventListener('change', () => loadStudentListSetup(Number(studentListJobSelect.value)).catch((error) => { studentListStatus.textContent = error.message; }));
 studentListSearch.addEventListener('input', renderStudentListBuilder);
@@ -10988,6 +11106,11 @@ cancelSchoolDataButton.addEventListener('click', () => {
 browseSchoolDataButton.addEventListener('click', browseSchoolDataFile);
 confirmSchoolDataButton.addEventListener('click', confirmSchoolDataImport);
 captureLoginForm.addEventListener('submit', submitCaptureLogin);
+window.addEventListener('focus', () => {
+  if (!captureLoginModal.hidden) {
+    focusCaptureLoginPhotographer().catch((error) => console.error(error));
+  }
+});
 cancelCaptureLoginButton.addEventListener('click', () => {
   const jobId = jobsState.pendingCaptureJobId;
   setCaptureLoginVisible(false);
