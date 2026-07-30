@@ -194,13 +194,13 @@ async function run() {
       storedPackageCodes: storedLink?.packageCodes || '',
       paidStatus: storedLink?.paidStatus || ''
     };
-    const pass = backend.imported && backend.queueCount === 1 && backend.confirmationRequired
+    const pass = backend.imported && backend.queueCount === 1 && !backend.confirmationRequired
       && backend.savedStatus === 'coded' && Number(backend.storedSubjectId) === Number(fixture.subject.id)
       && Number(backend.storedOrderId) > 0 && backend.storedPackageCodes === '1' && backend.paidStatus === 'paid'
       && sidebar.active && sidebar.title === 'Events' && sidebar.eventJobId === eventJobId
       && sidebar.fallJobId === Number(fixture.job.id) && sidebar.queueCards === 1 && sidebar.activeQueueCards === 1
       && sidebar.eventPreview && sidebar.fallPreview && sidebar.candidateCount === 1 && sidebar.existingLinks === 1
-      && sidebar.currentStatus.toLowerCase() === 'order coded' && sidebar.hasIdentityConfirmation && sidebar.hasOrderEntry
+      && sidebar.currentStatus.toLowerCase() === 'order coded' && !sidebar.hasIdentityConfirmation && sidebar.hasOrderEntry
       && sidebar.orderCodes === '1' && sidebar.hasFastImageJump && sidebar.hasFilters && sidebar.hasAddPerson
       && menu.active && menu.eventJobId === eventJobId && menu.eventPreview && menu.fallPreview && lockIntegrated;
     report = {

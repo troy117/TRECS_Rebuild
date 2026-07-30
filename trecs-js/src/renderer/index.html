@@ -84,7 +84,7 @@
           <section class="panel event-workflow-panel">
             <div class="panel-heading">
               <div><h2>Event Workflow</h2><p>Match event photographs to the school’s fall students, visually confirm identity, and key picture orders at production speed.</p></div>
-              <span class="status ready">Fall-record linked</span>
+              <div class="event-heading-actions"><button id="eventBackToJobsButton" type="button">Back to Jobs</button><span class="status ready">Fall-record linked</span></div>
             </div>
             <div class="event-setup-toolbar">
               <label><span>Event Job</span><select id="eventJobSelect"></select></label>
@@ -117,7 +117,6 @@
                 <div id="eventStudentResults" class="event-student-results"><div class="empty-state">Link a fall job to begin searching.</div></div>
                 <form id="eventOrderForm" class="event-order-form">
                   <div id="eventSelectedStudent" class="event-selected-student"><span>No fall student selected.</span></div>
-                  <label class="event-confirm-line"><input name="confirmed" type="checkbox"><span>I confirmed the fall thumbnail matches the person in the event photo.</span></label>
                   <label><span>Picture Order Code</span><input name="orderCodes" autocomplete="off" placeholder="Example: 1 or 1.2"></label>
                   <div id="eventPackageCodeShortcuts" class="event-code-shortcuts"></div>
                   <div class="event-order-row"><label><span>Payment</span><select name="paidStatus"><option value="paid">Paid</option><option value="unpaid">Unpaid</option><option value="unknown">Unknown</option></select></label><label><span>Notes</span><input name="notes"></label></div>
@@ -189,8 +188,12 @@
             <div class="production-sync-actions">
               <button id="saveProductionSyncSettingsButton" type="button">Save Settings</button>
               <button id="testProductionSyncButton" type="button">Test A1</button>
+              <button id="buildProductionSheetButton" type="button">Build Sheet</button>
               <button id="previewProductionSyncButton" type="button">Preview Sheet Updates</button>
               <button id="pushProductionSyncButton" class="primary" type="button" disabled>Push Updates</button>
+            </div>
+            <div id="productionMilestoneGrid" class="production-milestone-grid">
+              <div class="empty-state">Loading production milestones...</div>
             </div>
             <div id="productionSyncSummary" class="unit-render-metrics">
               <div class="empty-state">Configure the Google Sheet and preview updates before pushing.</div>
@@ -321,6 +324,14 @@
                 <label><span>Render Orders</span><select name="source"><option value="all">All Paid Orders</option><option value="grade">Grade</option><option value="homeroom">Homeroom</option><option value="individual">Individual Order</option></select></label>
                 <label id="unitRenderFilterField" hidden><span id="unitRenderFilterLabel">Filter</span><select name="sourceValue"></select></label>
                 <label><span>Output By</span><select name="sortBy"><option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option></select></label>
+                <div class="unit-render-event-options" id="unitRenderEventOptions" hidden>
+                  <label><span>Event Product Mapping</span><select name="eventPlanMode"><option value="package_plan" selected>Use Package Plan Products</option><option value="count_5x7">Order code is 5x7 count</option><option value="count_wallets">Order code is wallet count</option></select></label>
+                  <div class="unit-render-checks compact">
+                    <label class="checkbox-line"><input name="eventIndividualCards" type="checkbox" checked><span>Individual 5.5 x 8 cards</span></label>
+                    <label class="checkbox-line"><input name="eventStackSheets" type="checkbox" checked><span>11 x 17 stack-cut sheets</span></label>
+                    <label class="checkbox-line"><input name="eventPdf" type="checkbox" checked><span>Build stack-cut PDF</span></label>
+                  </div>
+                </div>
                 <div class="unit-render-image-prep">
                   <button id="exportImagePrepButton" type="button">Export All Image Prep Items</button>
                 </div>

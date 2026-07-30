@@ -1207,6 +1207,22 @@ async function ensurePrototypeDatabaseShape() {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS job_milestones (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        milestone_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'not_started',
+        completed_at TEXT,
+        completed_by TEXT,
+        source TEXT NOT NULL DEFAULT 'manual',
+        notes TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(job_id, milestone_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_milestones_job_id
+      ON job_milestones(job_id, milestone_key);
+
       CREATE TABLE IF NOT EXISTS id_card_templates (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -1344,6 +1360,7 @@ async function ensurePrototypeDatabaseShape() {
     changed = ensureColumn(database, 'render_tasks', 'order_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'render_tasks', 'details_json', 'TEXT') || changed;
     changed = migrateExistingIdTemplateFiles(database) || changed;
+    changed = ensureEventPackageProducts(database) || changed;
 
     database.run(`
       CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
@@ -1706,7 +1723,7 @@ async function googleSheetBatchUpdate(settings, updates) {
     valueInputOption: 'USER_ENTERED',
     data: updates.map((update) => ({
       range: `${quoteSheetName(settings.sheetName)}!${update.range}`,
-      values: [[update.value]]
+      values: update.values || [[update.value]]
     }))
   });
   const response = await httpsJsonRequest(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}/values:batchUpdate`, {
@@ -1885,8 +1902,70 @@ async function productionSyncJobRows() {
   `);
 }
 
-function productionComputedValues(job) {
+const PRODUCTION_SYNC_COLUMNS = [
+  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
+  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
+  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
+  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
+  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
+  { key: 'render', label: 'RENDER', headers: ['RENDER'] },
+  { key: 'delivery', label: 'Delivery', headers: ['Delivery', 'Delivered'] },
+  { key: 'notes', label: 'Notes', headers: ['Notes'] },
+  { key: 'lastSync', label: 'Last TRECS Sync', headers: ['Last TRECS Sync', 'TRECS Sync'] }
+];
+
+const PRODUCTION_STATUS_SHEET_COLUMNS = [
+  { key: 'schoolName', label: 'School / Site' },
+  { key: 'jobType', label: 'Job TYPE' },
+  { key: 'jobName', label: 'Job Name' },
+  { key: 'subjects', label: 'Subjects' },
+  { key: 'photographed', label: 'Photographed' },
+  { key: 'orders', label: 'Orders' },
+  ...PRODUCTION_SYNC_COLUMNS.map((column) => ({ key: column.key, label: column.label }))
+];
+
+const PRODUCTION_MILESTONES = [
+  { key: 'schoolData', label: 'School Data', automatic: true },
+  { key: 'onsiteSetup', label: 'Onsite Setup', automatic: true },
+  { key: 'mergeData', label: 'EOD Loaded', automatic: true },
+  { key: 'adminDone', label: 'Admin Done', automatic: true },
+  { key: 'paperOrders', label: 'Paper Orders', automatic: true },
+  { key: 'onlineOrders', label: 'Online Orders', automatic: true },
+  { key: 'render', label: 'Render', automatic: true },
+  { key: 'delivery', label: 'Delivery', automatic: false }
+];
+
+const PRODUCTION_MILESTONE_STATUS = new Set(['not_started', 'in_progress', 'done', 'blocked']);
+
+function productionManualMilestoneValue(milestone) {
+  if (!milestone) return '';
+  if (milestone.status === 'done') return productionStatusValue(milestone.completedAt) || 'done';
+  if (milestone.status === 'in_progress') return 'started';
+  if (milestone.status === 'blocked') return 'blocked';
+  return '';
+}
+
+async function productionManualMilestones(jobIds = []) {
+  const ids = jobIds.map((id) => Number(id)).filter(Number.isFinite);
+  if (!ids.length) return new Map();
+  const rows = await querySql(`
+    SELECT job_id AS jobId, milestone_key AS milestoneKey, status, completed_at AS completedAt,
+           completed_by AS completedBy, source, notes, updated_at AS updatedAt
+    FROM job_milestones
+    WHERE job_id IN (${ids.join(',')});
+  `);
+  const byJob = new Map();
+  rows.forEach((row) => {
+    const jobKey = Number(row.jobId);
+    if (!byJob.has(jobKey)) byJob.set(jobKey, new Map());
+    byJob.get(jobKey).set(row.milestoneKey, row);
+  });
+  return byJob;
+}
+
+function productionComputedValues(job, manualMilestones = new Map()) {
   const values = {};
+  if (Number(job.subjects || 0) > 0) values.schoolData = 'done';
   if (job.onsiteSetupAt) values.onsiteSetup = 'done';
   if (Number(job.endOfDays || 0) > 0) values.mergeData = productionStatusValue(job.latestEndOfDayAt);
   if (job.adminDoneAt) values.adminDone = productionStatusValue(job.adminDoneAt);
@@ -1894,18 +1973,148 @@ function productionComputedValues(job) {
   if (Number(job.onlineOrders || 0) > 0) values.onlineOrders = productionStatusValue(job.latestOnlineOrderAt);
   if (Number(job.orders || 0) > 0 && Number(job.renderedOrders || 0) >= Number(job.orders || 0)) {
     values.render = productionStatusValue(job.latestRenderAt) || 'done';
+  } else if (Number(job.renderedOrders || 0) > 0) {
+    values.render = `${Number(job.renderedOrders || 0)}/${Number(job.orders || 0) || '?'} rendered`;
   }
+  values.delivery = productionManualMilestoneValue(manualMilestones.get('delivery'));
+  values.notes = optionalText(manualMilestones.get('notes')?.notes, 500) || '';
+  values.lastSync = shortSheetDate(new Date());
   return values;
 }
 
-const PRODUCTION_SYNC_COLUMNS = [
-  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
-  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
-  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
-  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
-  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
-  { key: 'render', label: 'RENDER', headers: ['RENDER'] }
-];
+function productionMilestoneStatus(job, key, values, manualMilestones = new Map()) {
+  const manual = manualMilestones.get(key);
+  if (manual) {
+    return {
+      key,
+      status: manual.status || 'not_started',
+      value: productionManualMilestoneValue(manual),
+      source: manual.source || 'manual',
+      completedAt: manual.completedAt || null,
+      notes: manual.notes || ''
+    };
+  }
+  const value = values[key] || '';
+  return {
+    key,
+    status: value ? 'done' : 'not_started',
+    value,
+    source: 'computed',
+    completedAt: null,
+    notes: ''
+  };
+}
+
+async function getProductionStatusDashboard() {
+  const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
+  const rows = jobs.map((job) => {
+    const manualMilestones = manualByJob.get(Number(job.id)) || new Map();
+    const computed = productionComputedValues(job, manualMilestones);
+    const milestones = PRODUCTION_MILESTONES.map((milestone) => ({
+      ...milestone,
+      ...productionMilestoneStatus(job, milestone.key, computed, manualMilestones)
+    }));
+    const completed = milestones.filter((milestone) => milestone.status === 'done').length;
+    return {
+      jobId: job.id,
+      schoolName: job.clientName || job.trecsName || '',
+      trecsName: job.trecsName || '',
+      jobName: job.jobName || '',
+      jobType: job.jobType || '',
+      subjects: Number(job.subjects || 0),
+      photographed: Number(job.photographed || 0),
+      orders: Number(job.orders || 0),
+      milestones,
+      completedMilestones: completed,
+      totalMilestones: milestones.length,
+      computedValues: computed
+    };
+  });
+  return {
+    rows,
+    milestones: PRODUCTION_MILESTONES,
+    totals: {
+      jobs: rows.length,
+      completeJobs: rows.filter((row) => row.completedMilestones === row.totalMilestones).length,
+      milestones: rows.reduce((sum, row) => sum + row.totalMilestones, 0),
+      completedMilestones: rows.reduce((sum, row) => sum + row.completedMilestones, 0)
+    }
+  };
+}
+
+async function saveProductionMilestone(_event, input = {}) {
+  const jobId = Number(input.jobId);
+  const milestoneKey = optionalText(input.milestoneKey, 80);
+  const status = optionalText(input.status, 40) || 'not_started';
+  if (!Number.isFinite(jobId) || jobId < 1) throw new Error('Choose a production job first');
+  if (!PRODUCTION_MILESTONES.some((milestone) => milestone.key === milestoneKey)) throw new Error('Unknown production milestone');
+  if (!PRODUCTION_MILESTONE_STATUS.has(status)) throw new Error('Unknown production status');
+  const completedAt = status === 'done'
+    ? (optionalText(input.completedAt, 80) || new Date().toISOString())
+    : null;
+  const completedBy = optionalText(input.completedBy, 120);
+  const notes = optionalText(input.notes, 1000);
+  await writeSql((database) => {
+    database.run(`
+      INSERT INTO job_milestones (job_id, milestone_key, status, completed_at, completed_by, source, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(job_id, milestone_key) DO UPDATE SET
+        status = excluded.status,
+        completed_at = excluded.completed_at,
+        completed_by = excluded.completed_by,
+        source = 'manual',
+        notes = excluded.notes,
+        updated_at = CURRENT_TIMESTAMP;
+    `, [jobId, milestoneKey, status, completedAt, completedBy, notes]);
+  });
+  return getProductionStatusDashboard();
+}
+
+async function buildProductionStatusSheet(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  if (!settings.credentialsPath || !settings.spreadsheetId || !settings.sheetName) {
+    throw new Error('Production sync needs credentials, spreadsheet ID, and sheet tab');
+  }
+  const dashboard = await getProductionStatusDashboard();
+  const headers = PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => column.label);
+  const rows = dashboard.rows.map((row) => {
+    const values = row.computedValues || {};
+    return PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => {
+      if (column.key === 'schoolName') return row.schoolName;
+      if (column.key === 'jobType') return row.jobType;
+      if (column.key === 'jobName') return row.jobName;
+      if (column.key === 'subjects') return row.subjects;
+      if (column.key === 'photographed') return row.photographed;
+      if (column.key === 'orders') return row.orders;
+      return values[column.key] || '';
+    });
+  });
+  const lastColumn = spreadsheetColumnName(headers.length - 1);
+  const titleRow = Array(headers.length).fill('');
+  titleRow[0] = 'TRECS Production Status';
+  const blankRows = Math.max(0, settings.headerRow - 2);
+  const dataBlankRows = Math.max(0, settings.firstDataRow - settings.headerRow - 1);
+  const values = [
+    titleRow,
+    ...Array.from({ length: blankRows }, () => Array(headers.length).fill('')),
+    headers,
+    ...Array.from({ length: dataBlankRows }, () => Array(headers.length).fill('')),
+    ...rows
+  ];
+  while (values.length < 500) values.push(Array(headers.length).fill(''));
+  const response = await googleSheetBatchUpdate(settings, [{
+    range: `A1:${lastColumn}${values.length}`,
+    values
+  }]);
+  return {
+    settings,
+    serviceAccountEmail: response.serviceAccountEmail,
+    updatedCells: Number(response.totalUpdatedCells || 0),
+    rows: rows.length,
+    columns: headers.length
+  };
+}
 
 async function previewProductionStatusSync(_event, input = {}) {
   const settings = normalizeProductionSyncSettings(input);
@@ -1922,6 +2131,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     columnIndexes[column.key] = productionHeaderIndex(headers, column.headers);
   });
   const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
   const jobsByName = new Map();
   jobs.forEach((job) => {
     const keys = [job.clientName, job.trecsName].map(productionJobNameKey).filter(Boolean);
@@ -1946,7 +2156,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     const job = candidates.find((candidate) => sheetJobType && sheetJobType.includes(String(candidate.jobType || '').toLowerCase()))
       || candidates.find((candidate) => /fall/i.test(candidate.jobName || ''))
       || candidates[0];
-    const computed = productionComputedValues(job);
+    const computed = productionComputedValues(job, manualByJob.get(Number(job.id)) || new Map());
     const rowUpdates = [];
     PRODUCTION_SYNC_COLUMNS.forEach((column) => {
       const columnIndex = columnIndexes[column.key];
@@ -2876,12 +3086,70 @@ function jobLockExpirySql() {
   return `datetime('now', '+${JOB_LOCK_TTL_SECONDS} seconds')`;
 }
 
+function localProcessIsRunning(pidValue) {
+  const pid = Number(pidValue);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  if (pid === process.pid) {
+    return true;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but this user cannot signal it.
+    return error && error.code === 'EPERM';
+  }
+}
+
+function expireAbandonedLocalJobSessions(database, jobId) {
+  const localWorkstation = systemInfo().computerName.trim().toLowerCase();
+  if (!localWorkstation) {
+    return 0;
+  }
+
+  const candidates = rowsFromDatabase(database, `
+    SELECT id, workstation_name AS workstationName, metadata_json AS metadataJson
+    FROM job_sessions
+    WHERE job_id = ${jobId}
+      AND session_status = 'open'
+      AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)};
+  `);
+  let expired = 0;
+  candidates.forEach((candidate) => {
+    if (String(candidate.workstationName || '').trim().toLowerCase() !== localWorkstation) {
+      return;
+    }
+    let metadata;
+    try {
+      metadata = JSON.parse(candidate.metadataJson || '{}');
+    } catch (_error) {
+      return;
+    }
+    // A different session cannot still own this process's PID. Windows may
+    // reuse a PID after the previous TRECS process exits.
+    const processIsRunning = Number(metadata.pid) === process.pid
+      ? false
+      : localProcessIsRunning(metadata.pid);
+    if (processIsRunning !== false) {
+      return;
+    }
+    database.run(`UPDATE job_sessions
+      SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
+      WHERE id = ${Number(candidate.id)} AND session_status = 'open';`);
+    expired += database.getRowsModified();
+  });
+  return expired;
+}
+
 async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
   const jobId = numericId(jobIdValue);
   const scope = ['job_write', 'batch_render'].includes(String(scopeValue)) ? String(scopeValue) : 'job_write';
   return writeSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP
       WHERE session_status = 'open' AND (expires_at IS NULL OR expires_at <= CURRENT_TIMESTAMP);`);
+    expireAbandonedLocalJobSessions(database, jobId);
     const job = rowsFromDatabase(database, `SELECT j.id, j.name, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId} LIMIT 1;`)[0];
     if (!job) throw new Error('Job not found');
     const conflict = rowsFromDatabase(database, `
@@ -3123,6 +3391,38 @@ function normalizeProductInput(input = {}) {
   };
 }
 
+function ensureEventPackageProducts(database) {
+  let changed = false;
+  const products = [
+    ['Event 5x7', 'event_item', '5x7', { event_render: '5x7', description: 'Event render card, separate from regular portrait units' }],
+    ['Event 4 Wallets', 'event_item', 'wallet', { event_render: 'wallets', description: 'Event render card with four wallets' }],
+    ['Event Digital Download', 'event_item', null, { event_render: 'digital_download', description: 'Event render card with digital download QR code' }]
+  ];
+  products.forEach(([name, category, size, metadata]) => {
+    const existing = rowsFromDatabase(database, `SELECT category, size, requires_image AS requiresImage, metadata_json AS metadataJson FROM products WHERE name = '${sqlQuote(name)}' LIMIT 1;`)[0];
+    const metadataJson = JSON.stringify(metadata);
+    if (existing
+      && existing.category === category
+      && String(existing.size || '') === String(size || '')
+      && Number(existing.requiresImage || 0) === 1
+      && String(existing.metadataJson || '') === metadataJson) {
+      return;
+    }
+    database.run(`
+      INSERT INTO products (name, category, size, requires_image, metadata_json, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(name) DO UPDATE SET
+        category = excluded.category,
+        size = excluded.size,
+        requires_image = excluded.requires_image,
+        metadata_json = excluded.metadata_json,
+        updated_at = datetime('now');
+    `, [name, category, size, metadataJson]);
+    changed = true;
+  });
+  return changed;
+}
+
 async function createProduct(_event, input = {}) {
   const normalized = normalizeProductInput(input);
   const productId = normalized.id;
@@ -3276,6 +3576,7 @@ async function seedDefaultProducts() {
       database.run(`INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES (?, 'image_prep', NULL, 1, ?);`,
         [name, JSON.stringify({ image_prep_folder: folder })]);
     });
+    ensureEventPackageProducts(database);
     const after = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
     return { seedPath, productCount: Number(after), added: Math.max(0, Number(after) - Number(before)) };
   });
@@ -3283,6 +3584,7 @@ async function seedDefaultProducts() {
 
 function productRenderSupport(product) {
   const category = String(product.category || '');
+  if (category === 'event_item') return 'event_item';
   if (category === 'image_prep') return 'image_prep';
   if (category === 'digital') return 'digital_download';
   if (category === 'specialty' || isPhotoshopHandoffProduct(product)) return 'photoshop_handoff';
@@ -4074,16 +4376,24 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
            j.package_plan_id AS packagePlanId, COALESCE(pp.name, '') AS packagePlan,
            COUNT(DISTINCT o.id) AS orders,
            COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' THEN o.id END) AS paidOrders,
-           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND s.primary_image_asset_id IS NOT NULL THEN o.id END) AS readyOrders
+           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND (s.primary_image_asset_id IS NOT NULL OR oi.image_asset_id IS NOT NULL) THEN o.id END) AS readyOrders,
+           COUNT(DISTINCT ee.id) AS eventImages
     FROM jobs j
     JOIN clients c ON c.id = j.client_id
     LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
     LEFT JOIN orders o ON o.job_id = j.id
     LEFT JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.event_job_id = j.id
     GROUP BY j.id
     ORDER BY c.display_name, j.name;
   `);
-  const jobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.readyOrders) > 0)?.id || jobs[0]?.id || null);
+  const jobId = jobIdValue
+    ? numericId(jobIdValue)
+    : (jobs.find((job) => Number(job.readyOrders) > 0 && !['event', 'qr_event'].includes(String(job.type || '').toLowerCase()))?.id
+      || jobs.find((job) => Number(job.readyOrders) > 0)?.id
+      || jobs[0]?.id
+      || null);
   if (!jobId) return { jobs, selectedJobId: null, filters: { grades: [], homerooms: [], orders: [] } };
   const filters = {
     grades: (await querySql(`SELECT DISTINCT COALESCE(s.grade, '') AS value FROM subjects s JOIN orders o ON o.subject_id = s.id WHERE o.job_id = ${jobId} AND o.paid_status = 'paid' ORDER BY value;`)).map((row) => row.value).filter(Boolean),
@@ -4092,7 +4402,7 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
       SELECT o.id, s.legacy_ref_num AS ref,
              COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName,
              GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
-             CASE WHEN s.primary_image_asset_id IS NULL THEN 0 ELSE 1 END AS hasPhoto
+             CASE WHEN s.primary_image_asset_id IS NULL AND MAX(oi.image_asset_id) IS NULL THEN 0 ELSE 1 END AS hasPhoto
       FROM orders o JOIN subjects s ON s.id = o.subject_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
       WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
@@ -4322,6 +4632,372 @@ function unitRenderOrderWhereClause(jobId, source, sourceValue) {
   if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
   if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
   return filters.join(' AND ');
+}
+
+function eventUnitRenderWhereClause(jobId, source, sourceValue) {
+  const filters = [`o.job_id = ${jobId}`, `o.paid_status = 'paid'`];
+  if (source === 'grade') filters.push(`s.grade = '${sqlQuote(sourceValue)}'`);
+  if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
+  if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
+  return filters.join(' AND ');
+}
+
+function eventUnitSortValue(order, sortBy) {
+  if (sortBy === 'ref') return `${order.ref || ''}_${order.lastName || ''}_${order.firstName || ''}`;
+  if (sortBy === 'homeroom') return `${order.homeroom || 'No Homeroom'}_${order.lastName || ''}_${order.firstName || ''}_${order.imageNumber || ''}`;
+  return `${String(order.imageNumber || '').padStart(12, '0')}_${order.lastName || ''}_${order.firstName || ''}`;
+}
+
+function eventProductKind(item) {
+  const metadata = parseProductMetadata(item.metadataJson);
+  const text = String(item.productName || item.rawValue || item.packageCodeName || item.packageCode || '').toLowerCase();
+  const category = String(item.category || '').toLowerCase();
+  if (category === 'event_item') {
+    const eventRender = String(metadata.event_render || '').toLowerCase();
+    if (eventRender === 'digital_download') return 'digital';
+    if (eventRender === 'wallets') return 'wallets';
+    if (eventRender === '5x7') return '5x7';
+  }
+  if (category === 'event_item' && /download/.test(text)) return 'digital';
+  if (category === 'event_item' && /wallet/.test(text)) return 'wallets';
+  if (category === 'event_item' && /5\s*x\s*7|5x7/.test(text)) return '5x7';
+  if (category === 'digital' || /digital|download|zipfile|zip\s*file/.test(text)) return 'digital';
+  if (/wallet/.test(text)) return 'wallets';
+  if (/5\s*x\s*7|5x7/.test(text)) return '5x7';
+  return '';
+}
+
+function numericOrderCodeCount(order) {
+  return String(order.packageCodes || '')
+    .split(/[.,\s]+/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .reduce((total, value) => total + value, 0);
+}
+
+function eventCardsForOrder(order, items, mode) {
+  const cards = [];
+  const count = numericOrderCodeCount(order);
+  if (mode === 'count_5x7') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: '5x7', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  if (mode === 'count_wallets') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: 'wallets', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  items.forEach((item) => {
+    const kind = eventProductKind(item);
+    if (!kind) return;
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    for (let copy = 0; copy < quantity; copy += 1) {
+      cards.push({ kind, label: item.productName || item.rawValue || item.packageCodeName || item.packageCode || kind });
+    }
+  });
+  return cards;
+}
+
+function eventOverlaySources(jobRootPath) {
+  const templateFolder = path.join(resolveProjectPath(jobRootPath) || projectRoot, 'Templates');
+  return {
+    horizontal: imageDataUrlFromPath(path.join(templateFolder, 'Horizontal.png')),
+    vertical: imageDataUrlFromPath(path.join(templateFolder, 'Vertical.png'))
+  };
+}
+
+function eventDownloadUrl(order) {
+  return `https://download.islandphotography.net/EVENT/${encodeURIComponent(order.jobName || 'EVENT')}/${encodeURIComponent(path.basename(order.imagePath || order.filename || 'image.jpg'))}`;
+}
+
+async function rasterizeEventCard(webContents, imageSource, overlaySources, cardData) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event render image.'));
+      image.src = source;
+    });
+    const drawCover = (context, image, x, y, width, height) => {
+      const scale = Math.max(width / image.width, height / image.height);
+      const scaledWidth = image.width * scale;
+      const scaledHeight = image.height * scale;
+      context.drawImage(image, x + (width - scaledWidth) / 2, y + (height - scaledHeight) / 2, scaledWidth, scaledHeight);
+    };
+    const rotatedImage = (image) => {
+      const temp = document.createElement('canvas');
+      temp.width = image.naturalHeight;
+      temp.height = image.naturalWidth;
+      const tempContext = temp.getContext('2d');
+      tempContext.translate(0, temp.height);
+      tempContext.rotate(-Math.PI / 2);
+      tempContext.drawImage(image, 0, 0);
+      return temp;
+    };
+    Promise.all([
+      load(${JSON.stringify(imageSource)}),
+      load(${JSON.stringify(overlaySources.horizontal || null)}),
+      load(${JSON.stringify(overlaySources.vertical || null)}),
+      load(${JSON.stringify(cardData.qrSource || null)})
+    ]).then(([sourceImage, horizontalOverlay, verticalOverlay, qrImage]) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1650;
+        canvas.height = 2400;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (sourceImage) {
+          const sourceWasHorizontal = sourceImage.naturalWidth > sourceImage.naturalHeight;
+          const photoImage = sourceWasHorizontal ? rotatedImage(sourceImage) : sourceImage;
+          if (${JSON.stringify(cardData.kind)} === 'wallets') {
+            const walletSlots = [
+              [38, 38, 750, 1087],
+              [826, 38, 750, 1087],
+              [38, 1126, 750, 1087],
+              [826, 1126, 750, 1087]
+            ];
+            walletSlots.forEach(([x, y, width, height]) => {
+              context.save();
+              context.beginPath();
+              context.rect(x, y, width, height);
+              context.clip();
+              drawCover(context, photoImage, x, y, width, height);
+              context.restore();
+            });
+          } else {
+            context.save();
+            context.beginPath();
+            context.rect(0, 0, 1650, 2250);
+            context.clip();
+            if (photoImage.width === 1650 && photoImage.height === 2250) {
+              context.drawImage(photoImage, 0, 0);
+            } else {
+              drawCover(context, photoImage, 75, 0, 1500, 2250);
+              const overlay = sourceWasHorizontal ? horizontalOverlay : verticalOverlay;
+              if (overlay) context.drawImage(overlay, 0, 0, 1650, 2250);
+            }
+            context.restore();
+          }
+        }
+        context.fillStyle = '#fff';
+        context.fillRect(0, 2175, 1650, 225);
+        context.fillStyle = '#111';
+        context.textBaseline = 'alphabetic';
+        context.font = '40px Arial';
+        context.textAlign = 'left';
+        context.fillText(${JSON.stringify(`${cardData.ref || ''}: ${cardData.imageNumber || ''}`)} + '   Count: ' + ${JSON.stringify(cardData.label || '')}, 150, 2225);
+        context.fillText(${JSON.stringify(`${cardData.homeroom || ''}: ${cardData.lastName || ''}, ${cardData.firstName || ''}`)}, 150, 2270);
+        context.font = '30px Arial';
+        context.fillText(${JSON.stringify(cardData.sequenceLabel || '')}, 60, 2380);
+        context.fillText(${JSON.stringify(cardData.studioLine || '')}, 150, 2305);
+        if (qrImage) {
+          context.fillStyle = '#fff';
+          context.fillRect(1140, 2180, 230, 210);
+          context.drawImage(qrImage, 1150, 2188, 190, 190);
+        }
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+async function rasterizeEventStackSheet(webContents, cardSources, pageNumber, totalPages) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event stack card.'));
+      image.src = source;
+    });
+    Promise.all(${JSON.stringify(cardSources)}.map(load)).then((images) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 3300;
+        canvas.height = 5100;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        const slots = [[0, 150], [1650, 150], [0, 2550], [1650, 2550]];
+        images.forEach((image, index) => {
+          if (image) context.drawImage(image, slots[index][0], slots[index][1], 1650, 2400);
+        });
+        context.fillStyle = '#111';
+        context.font = '38px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'alphabetic';
+        context.fillText('Page ' + ${Number(pageNumber)} + ' of ' + ${Number(totalPages)}, 1650, 5050);
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+function pdfEscape(value) {
+  return String(value || '').replace(/[\\()]/g, (character) => `\\${character}`);
+}
+
+function writeJpegImagesPdf(outputPath, imagePaths, pageWidthPoints = 792, pageHeightPoints = 1224) {
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'binary'));
+    return objects.length;
+  };
+  const catalogId = addObject('');
+  const pagesId = addObject('');
+  const pageIds = [];
+  imagePaths.forEach((imagePath, index) => {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageId = addObject(Buffer.concat([
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width 3300 /Height 5100 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imageBuffer.length} >>\nstream\n`, 'binary'),
+      imageBuffer,
+      Buffer.from('\nendstream', 'binary')
+    ]));
+    const content = `q\n${pageWidthPoints} 0 0 ${pageHeightPoints} 0 0 cm\n/Im${index + 1} Do\nQ`;
+    const contentId = addObject(`<< /Length ${Buffer.byteLength(content, 'binary')} >>\nstream\n${content}\nendstream`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidthPoints} ${pageHeightPoints}] /Resources << /XObject << /Im${index + 1} ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+    pageIds.push(pageId);
+  });
+  objects[catalogId - 1] = Buffer.from(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`, 'binary');
+  objects[pagesId - 1] = Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`, 'binary');
+  const chunks = [Buffer.from(`%PDF-1.4\n% TRECS ${pdfEscape(path.basename(outputPath))}\n`, 'binary')];
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets[index + 1] = Buffer.concat(chunks).length;
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`, 'binary'), object, Buffer.from('\nendobj\n', 'binary'));
+  });
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = [`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`];
+  for (let index = 1; index <= objects.length; index += 1) {
+    xref.push(`${String(offsets[index]).padStart(10, '0')} 00000 n \n`);
+  }
+  xref.push(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+  chunks.push(Buffer.from(xref.join(''), 'binary'));
+  fs.writeFileSync(outputPath, Buffer.concat(chunks));
+}
+
+async function runEventUnitRender(event, input, jobRow) {
+  const jobId = numericId(input.jobId);
+  const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
+  const source = String(input.source || 'all');
+  const sourceValue = optionalText(input.sourceValue, 255);
+  const sortBy = String(input.sortBy || 'imageNumber');
+  const eventPlanMode = String(input.eventPlanMode || 'package_plan');
+  const orders = await querySql(`
+    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId,
+           s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+           c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
+           j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
+           GROUP_CONCAT(DISTINCT oi.package_code) AS packageCodes,
+           ee.image_number AS imageNumber, ia.filename,
+           ia.current_path AS imagePath
+    FROM orders o
+    JOIN jobs j ON j.id = o.job_id
+    JOIN clients c ON c.id = j.client_id
+    JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_subject_links esl ON esl.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.id = esl.event_entry_id
+    LEFT JOIN image_assets ia ON ia.id = COALESCE(oi.image_asset_id, ee.event_image_asset_id)
+    WHERE ${eventUnitRenderWhereClause(jobId, source, sourceValue)}
+    GROUP BY o.id
+    ORDER BY ee.image_number COLLATE NOCASE, s.last_name, s.first_name, o.id;
+  `);
+  const selectedOrders = orders.sort((a, b) => eventUnitSortValue(a, sortBy).localeCompare(eventUnitSortValue(b, sortBy), undefined, { numeric: true, sensitivity: 'base' }));
+  const schoolName = selectedOrders[0]?.clientName || jobRow.clientName || 'School';
+  const runDate = new Date().toISOString().slice(0, 10);
+  const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`), 'Event Render');
+  const cardFolder = path.join(outputFolder, 'EventCards');
+  const sheetFolder = path.join(outputFolder, 'StackSheets');
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const itemRows = selectedOrders.length ? await querySql(`
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue,
+           p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id
+    LEFT JOIN products p ON p.id = pci.product_id
+    WHERE oi.order_id IN (${selectedOrders.map((order) => Number(order.id)).join(',')})
+    ORDER BY oi.order_id, oi.id, pci.sort_order;
+  `) : [];
+  const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []]));
+  itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
+  const overlaySources = eventOverlaySources(selectedOrders[0]?.rootPath || jobRow.rootPath);
+  const result = { eventRender: true, jobId, outputFolder, orders: selectedOrders.length, cards: 0, sheetPages: 0, pdfPath: '', missingPhotos: [], unsupportedItems: [], files: [] };
+  const cardSources = [];
+  const cardPaths = [];
+  let cardSequence = 1;
+  for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    const order = selectedOrders[orderIndex];
+    event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `Event ${order.imageNumber || order.ref || order.id}` });
+    const items = itemsByOrder.get(Number(order.id)) || [];
+    const cards = eventCardsForOrder(order, items, eventPlanMode);
+    if (!cards.length) {
+      result.unsupportedItems.push({ orderId: order.id, ref: order.ref, item: order.packageCodes || 'No event product mapping' });
+      continue;
+    }
+    const imageSource = imageDataUrlFromPath(order.imagePath);
+    if (!imageSource) {
+      result.missingPhotos.push({ orderId: order.id, ref: order.ref, imageNumber: order.imageNumber });
+      continue;
+    }
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
+      const card = cards[cardIndex];
+      const qrPath = card.kind === 'digital' ? path.join(os.tmpdir(), `trecs-event-qr-${APP_SESSION_ID}-${Date.now()}-${order.id}-${cardIndex}.png`) : '';
+      if (qrPath) await createQrCodePng(eventDownloadUrl(order), qrPath, 220);
+      const dataUrl = await rasterizeEventCard(event.sender, imageSource, overlaySources, {
+        ...card,
+        ref: order.ref,
+        imageNumber: order.imageNumber || path.basename(order.imagePath || ''),
+        firstName: order.firstName,
+        lastName: order.lastName,
+        homeroom: order.homeroom,
+        sequenceLabel: String(cardSequence),
+        studioLine: `Island Photography ${new Date().getFullYear()}-${new Date().getFullYear() + 1}: 559-456-1400`,
+        qrSource: qrPath ? imageDataUrlFromPath(qrPath) : ''
+      });
+      if (qrPath) fs.rmSync(qrPath, { force: true });
+      const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+      const fileName = `${String(cardSequence).padStart(5, '0')}_${safeFolderName(eventUnitSortValue(order, sortBy))}_${card.kind === 'wallets' ? '4Wallets' : card.kind === 'digital' ? 'DigitalDownload' : '5x7'}.jpg`;
+      if (input.eventIndividualCards !== false) {
+        fs.mkdirSync(cardFolder, { recursive: true });
+        const cardPath = path.join(cardFolder, fileName);
+        fs.writeFileSync(cardPath, jpeg);
+        cardPaths.push(cardPath);
+        result.files.push(cardPath);
+      }
+      cardSources.push(dataUrl);
+      result.cards += 1;
+      cardSequence += 1;
+    }
+  }
+  const sheetPaths = [];
+  if ((input.eventStackSheets !== false || input.eventPdf !== false) && cardSources.length) {
+    fs.mkdirSync(sheetFolder, { recursive: true });
+    const pages = Math.ceil(cardSources.length / 4);
+    for (let pageIndex = 0; pageIndex < pages; pageIndex += 1) {
+      const pageCards = [0, 1, 2, 3].map((slotIndex) => cardSources[slotIndex * pages + pageIndex] || null);
+      const dataUrl = await rasterizeEventStackSheet(event.sender, pageCards, pageIndex + 1, pages);
+      const sheetPath = path.join(sheetFolder, `${safeFolderName(schoolName)}_EventStack_${String(pageIndex + 1).padStart(4, '0')}.jpg`);
+      fs.writeFileSync(sheetPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+      sheetPaths.push(sheetPath);
+      result.sheetPages += 1;
+      result.files.push(sheetPath);
+    }
+  }
+  if (input.eventPdf !== false && sheetPaths.length) {
+    const pdfPath = path.join(outputFolder, `${safeFolderName(schoolName)}_Event_StackCut.pdf`);
+    writeJpegImagesPdf(pdfPath, sheetPaths);
+    result.pdfPath = pdfPath;
+    result.files.push(pdfPath);
+  }
+  fs.writeFileSync(path.join(outputFolder, 'event-unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  event.sender.send('unit-render:progress', { current: selectedOrders.length, total: selectedOrders.length, message: 'Event render complete' });
+  return result;
 }
 
 async function imagePrepExport(event, input = {}) {
@@ -4601,6 +5277,16 @@ async function runUnitRender(event, input = {}) {
   if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
+  const selectedJobRows = await querySql(`
+    SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    WHERE j.id = ${jobId}
+    LIMIT 1;
+  `);
+  const selectedJob = selectedJobRows[0] || null;
+  if (['event', 'qr_event'].includes(String(selectedJob?.type || '').toLowerCase())) {
+    return runEventUnitRender(event, input, selectedJob);
+  }
   const orders = await querySql(`
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
@@ -5242,7 +5928,6 @@ async function searchEventFallStudents(_event, input = {}) {
 async function saveEventMatch(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const entryId = numericId(input.entryId); const fallSubjectId = numericId(input.fallSubjectId);
   const orderText = optionalText(input.orderCodes, 500); const paidStatus = normalizePaidStatus(input.paidStatus || 'unknown'); const notes = optionalText(input.notes, 2000);
-  if (!input.confirmed) throw new Error('Confirm that the fall thumbnail matches the student in the event photo.');
   const result = await writeSql((database) => {
     const row = rowsFromDatabase(database, `SELECT ee.id, ee.event_image_asset_id AS eventImageId, ee.fall_job_id AS fallJobId, j.package_plan_id AS packagePlanId,
       s.id AS subjectId FROM event_entries ee JOIN jobs j ON j.id = ee.event_job_id JOIN subjects s ON s.id = ${fallSubjectId}
@@ -5932,6 +6617,9 @@ ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredent
 ipcMain.handle('production-sync:preview', previewProductionStatusSync);
 ipcMain.handle('production-sync:push', pushProductionStatusSync);
 ipcMain.handle('production-sync:test', testProductionStatusSync);
+ipcMain.handle('production-sync:dashboard', getProductionStatusDashboard);
+ipcMain.handle('production-sync:milestone-save', saveProductionMilestone);
+ipcMain.handle('production-sync:build-sheet', buildProductionStatusSheet);
 
 async function getJobsData() {
   const jobs = await querySql(`
@@ -7492,7 +8180,7 @@ function normalizeIdTemplateType(value) {
 
 async function listIdTemplates(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const { folder } = await idTemplateFolderForJob(jobId);
+  const { job, folder } = await idTemplateFolderForJob(jobId);
   const templateRows = await querySql(`
     SELECT
       id,
@@ -7523,6 +8211,8 @@ async function listIdTemplates(_event, jobIdValue) {
     .sort((first, second) => first.fileName.localeCompare(second.fileName, undefined, { sensitivity: 'base' }));
   return {
     folder: path.relative(projectRoot, folder),
+    studentIdTemplateId: job.studentIdTemplateId || null,
+    facultyIdTemplateId: job.facultyIdTemplateId || null,
     templates,
     backgrounds
   };

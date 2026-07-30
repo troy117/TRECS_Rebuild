@@ -15,6 +15,7 @@ const productsPageContent = document.getElementById('productsPageContent');
 const eventsView = document.getElementById('eventsView');
 const eventJobSelect = document.getElementById('eventJobSelect');
 const eventFallJobSelect = document.getElementById('eventFallJobSelect');
+const eventBackToJobsButton = document.getElementById('eventBackToJobsButton');
 const linkEventFallJobButton = document.getElementById('linkEventFallJobButton');
 const importEventImagesButton = document.getElementById('importEventImagesButton');
 const createEventJobButton = document.getElementById('createEventJobButton');
@@ -74,8 +75,10 @@ const productionSyncHeaderRow = document.getElementById('productionSyncHeaderRow
 const productionSyncFirstDataRow = document.getElementById('productionSyncFirstDataRow');
 const saveProductionSyncSettingsButton = document.getElementById('saveProductionSyncSettingsButton');
 const testProductionSyncButton = document.getElementById('testProductionSyncButton');
+const buildProductionSheetButton = document.getElementById('buildProductionSheetButton');
 const previewProductionSyncButton = document.getElementById('previewProductionSyncButton');
 const pushProductionSyncButton = document.getElementById('pushProductionSyncButton');
+const productionMilestoneGrid = document.getElementById('productionMilestoneGrid');
 const productionSyncSummary = document.getElementById('productionSyncSummary');
 const productionSyncPreviewBody = document.getElementById('productionSyncPreviewBody');
 const productionSyncStatus = document.getElementById('productionSyncStatus');
@@ -110,6 +113,7 @@ const unitRenderFilterLabel = document.getElementById('unitRenderFilterLabel');
 const unitRenderMetrics = document.getElementById('unitRenderMetrics');
 const unitRenderProgress = document.getElementById('unitRenderProgress');
 const unitRenderStatus = document.getElementById('unitRenderStatus');
+const unitRenderEventOptions = document.getElementById('unitRenderEventOptions');
 const exportImagePrepButton = document.getElementById('exportImagePrepButton');
 const browseUnitRenderOutputButton = document.getElementById('browseUnitRenderOutputButton');
 const startUnitRenderButton = document.getElementById('startUnitRenderButton');
@@ -391,6 +395,8 @@ let jobsState = {
   },
   idTemplateDesigner: {
     loaded: false,
+    loading: false,
+    jobId: null,
     folder: '',
     templates: [],
     backgrounds: [],
@@ -478,6 +484,7 @@ let jobsState = {
   batchRenderSetup: null,
   batchRenderRunning: false,
   eventSetup: null,
+  eventPinnedJobId: null,
   eventQueueFilter: 'all',
   eventCandidates: [],
   eventSelectedCandidateId: null,
@@ -802,7 +809,7 @@ function setView(view) {
     });
   }
   if (view === 'events') {
-    loadEventWorkflow().catch((error) => { eventSetupStatus.textContent = error.message || 'Could not load event workflow.'; });
+    loadEventWorkflow(jobsState.eventPinnedJobId || null).catch((error) => { eventSetupStatus.textContent = error.message || 'Could not load event workflow.'; });
   }
   if (view === 'unitRender') {
     loadUnitRenderSetup().catch((error) => {
@@ -988,6 +995,12 @@ function selectJobSummary(jobId) {
 
 async function openJob(jobId) {
   selectJobSummary(jobId);
+  const jobSummary = jobsState.jobs.find((job) => Number(job.id) === Number(jobId));
+  if (['event', 'qr_event'].includes(String(jobSummary?.type || '').toLowerCase())) {
+    jobsState.eventPinnedJobId = Number(jobId);
+    setView('events');
+    return;
+  }
   if (!(await acquireUiJobLock(jobId))) return;
   try {
     await loadJobDetail(jobId);
@@ -1051,18 +1064,8 @@ async function focusCaptureLoginPhotographer() {
     console.warn('Could not focus TRECS window', error);
   }
 
-  [0, 50, 150, 300, 600, 1000].forEach((delay) => {
-    setTimeout(() => {
-      if (captureLoginModal.hidden) {
-        return;
-      }
-      input.focus({ preventScroll: true });
-      input.select();
-    }, delay);
-  });
-
   requestAnimationFrame(() => {
-    if (!captureLoginModal.hidden) {
+    if (!captureLoginModal.hidden && !activeElementAcceptsTyping()) {
       input.focus({ preventScroll: true });
       input.select();
     }
@@ -2414,10 +2417,11 @@ function renderStudentWorkspace() {
   const unlinkedImageCount = Number(jobsState.detail.capture && jobsState.detail.capture.summary
     ? jobsState.detail.capture.summary.unlinkedImages
     : 0);
+  const isEventJob = ['event', 'qr_event'].includes(String(job.type || '').toLowerCase());
   workspaceJobMeta.innerHTML = `
     <span>${escapeHtml(formatType(job.type))} / ${escapeHtml(job.packagePlan || 'No package plan')} / ${formatNumber(job.subjects)} subjects</span>
     <span class="workspace-unlinked-count">${formatNumber(unlinkedImageCount)} unlinked image${unlinkedImageCount === 1 ? '' : 's'}</span>
-    ${unlinkedImageCount > 0 ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Review Images</button>' : ''}
+    ${isEventJob ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Open Event Workflow</button>' : unlinkedImageCount > 0 ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Review Images</button>' : ''}
   `;
   workspaceStudentCount.textContent = `${formatNumber(subjects.length)} shown`;
   workspaceStudentSearch.value = jobsState.workspaceStudentSearch;
@@ -2447,7 +2451,13 @@ function renderStudentWorkspace() {
   const imageReviewButton = document.getElementById('openImageReviewButton');
   if (imageReviewButton) {
     imageReviewButton.addEventListener('click', () => {
-      setWorkspaceMode('imageReview');
+      if (isEventJob) {
+        jobsState.eventPinnedJobId = Number(job.id);
+        closeJobWorkspace();
+        setView('events');
+      } else {
+        setWorkspaceMode('imageReview');
+      }
     });
   }
 }
@@ -5423,8 +5433,17 @@ function idTemplateBackgroundDataUrl(backgroundName) {
 
 function renderIdTemplateDesigner() {
   const designer = jobsState.idTemplateDesigner;
-  if (!designer.loaded) {
+  const currentJobId = Number(jobsState.selectedJobId);
+  if (!designer.loaded || Number(designer.jobId) !== currentJobId) {
+    if (designer.loading && Number(designer.loadingJobId) === currentJobId) {
+      return;
+    }
+    designer.loading = true;
+    designer.loadingJobId = currentJobId;
+    idTemplateList.innerHTML = '<div class="empty-state">Loading templates for this job...</div>';
+    idTemplateFolderLabel.textContent = '';
     loadIdTemplateDesigner().catch((error) => {
+      designer.loading = false;
       idTemplateStatus.textContent = error.message || 'Could not load ID templates';
       console.error(error);
     });
@@ -5515,13 +5534,28 @@ function renderIdTemplateProperties() {
   const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
   const key = jobsState.idTemplateDesigner.selectedElement;
   const element = template.elements && template.elements[key];
+  const restorableElements = ID_TEMPLATE_ELEMENT_DEFINITIONS.filter((definition) => {
+    const current = template.elements && template.elements[definition.key];
+    return !current || current.enabled === false;
+  });
+  const addFieldControls = `
+    <div class="id-template-add-field">
+      <select data-id-template-add-field aria-label="Field to add" ${restorableElements.length ? '' : 'disabled'}>
+        ${restorableElements.length
+          ? restorableElements.map((definition) => `<option value="${escapeHtml(definition.key)}">${escapeHtml(definition.label)}</option>`).join('')
+          : '<option>All fields are shown</option>'}
+      </select>
+      <button class="primary" data-id-template-add-field-button type="button" ${restorableElements.length ? '' : 'disabled'}>Add Field</button>
+    </div>
+  `;
   if (!element) {
-    idTemplateProperties.innerHTML = '<div class="empty-state">Select an element to edit its position and style.</div>';
+    idTemplateProperties.innerHTML = `${addFieldControls}<div class="empty-state">Select an element to edit its position and style.</div>`;
     return;
   }
   const isText = element.kind === 'text';
   const isBarcode = element.kind === 'barcode';
   idTemplateProperties.innerHTML = `
+    ${addFieldControls}
     <h3>${escapeHtml(element.label || key)}</h3>
     <label class="checkbox-label">
       <input data-id-template-property="enabled" type="checkbox" ${element.enabled !== false ? 'checked' : ''}>
@@ -5580,15 +5614,57 @@ function renderIdTemplateProperties() {
   `;
 }
 
+function addIdTemplateField(keyValue) {
+  const definition = ID_TEMPLATE_ELEMENT_DEFINITIONS.find((item) => item.key === String(keyValue || ''));
+  const template = jobsState.idTemplateDesigner.template;
+  if (!definition || !template) {
+    return;
+  }
+  template.elements = template.elements || {};
+  template.elements[definition.key] = {
+    ...definition,
+    ...(template.elements[definition.key] || {}),
+    enabled: true
+  };
+  jobsState.idTemplateDesigner.selectedElement = definition.key;
+  renderIdTemplateStage();
+  renderIdTemplateProperties();
+  idTemplateStatus.textContent = `${definition.label} added. Save the template to keep this change.`;
+}
+
 async function loadIdTemplateDesigner() {
-  const payload = await trecsApi('listIdTemplates').listIdTemplates(jobsState.selectedJobId);
+  const jobId = Number(jobsState.selectedJobId);
+  const previousDesigner = jobsState.idTemplateDesigner;
+  const sameJob = Number(previousDesigner.jobId) === jobId;
+  const payload = await trecsApi('listIdTemplates').listIdTemplates(jobId);
+  if (Number(jobsState.selectedJobId) !== jobId) {
+    return;
+  }
+  const preferredTemplateId = sameJob && previousDesigner.selectedTemplateId
+    ? Number(previousDesigner.selectedTemplateId)
+    : Number(payload.studentIdTemplateId || payload.facultyIdTemplateId || 0);
+  const preferredTemplate = preferredTemplateId
+    && payload.templates.some((item) => Number(item.id) === preferredTemplateId)
+    ? await trecsApi('loadIdTemplate').loadIdTemplate(jobId, String(preferredTemplateId))
+    : null;
+  if (Number(jobsState.selectedJobId) !== jobId) {
+    return;
+  }
   jobsState.idTemplateDesigner = {
-    ...jobsState.idTemplateDesigner,
+    ...previousDesigner,
     loaded: true,
+    loading: false,
+    loadingJobId: null,
+    jobId,
     folder: payload.folder || '',
     templates: payload.templates || [],
     backgrounds: payload.backgrounds || [],
-    template: jobsState.idTemplateDesigner.template || createDefaultIdTemplate()
+    selectedFileName: preferredTemplate ? preferredTemplate.fileName : '',
+    selectedTemplateId: preferredTemplate ? preferredTemplateId : null,
+    selectedElement: 'photo',
+    template: preferredTemplate
+      ? normalizeIdTemplateForDesigner(preferredTemplate.template)
+      : createDefaultIdTemplate()
   };
   renderIdTemplateDesigner();
 }
@@ -7136,6 +7212,7 @@ async function handleTrecsMenuAction(action) {
   }
 
   if (action === 'event-workflow') {
+    jobsState.eventPinnedJobId = jobsState.jobWorkspaceOpen ? Number(jobsState.detail?.summary?.id || jobsState.selectedJobId || 0) || null : null;
     if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
     setView('events');
     return;
@@ -8139,7 +8216,7 @@ async function acquireUiJobLock(jobId, scope = 'job_write') {
   const result = await trecsApi('acquireJobSession').acquireJobSession(Number(jobId), scope);
   if (!result.acquired) {
     const owner = [result.conflict?.userName, result.conflict?.workstationName].filter(Boolean).join(' on ');
-    window.alert(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nTRECS will release an abandoned lock automatically after two minutes.`);
+    window.alert(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nIf TRECS was closed normally, the lock is released immediately. After an unexpected shutdown on another workstation, the lock expires automatically after two minutes.`);
     return false;
   }
   activeJobLockIds.add(Number(jobId));
@@ -8277,6 +8354,67 @@ async function loadProductionSyncSettings() {
   const settings = await trecsApi('getProductionSyncSettings').getProductionSyncSettings();
   populateProductionSyncSettings(settings);
   productionSyncStatus.textContent = 'Preview sheet updates before pushing.';
+  await loadProductionStatusDashboard();
+}
+
+function productionMilestoneClass(status) {
+  if (status === 'done') return 'ready';
+  if (status === 'in_progress') return 'review';
+  if (status === 'blocked') return 'error';
+  return '';
+}
+
+function productionMilestoneLabel(status) {
+  return {
+    not_started: 'Not started',
+    in_progress: 'In progress',
+    done: 'Done',
+    blocked: 'Blocked'
+  }[status] || formatType(status || 'not_started');
+}
+
+function renderProductionStatusDashboard(dashboard) {
+  jobsState.productionStatusDashboard = dashboard;
+  if (!dashboard?.rows?.length) {
+    productionMilestoneGrid.innerHTML = '<div class="empty-state">No active jobs found for production tracking.</div>';
+    return;
+  }
+  productionMilestoneGrid.innerHTML = `
+    <div class="production-milestone-header">
+      <strong>${formatNumber(dashboard.totals?.jobs || 0)} jobs</strong>
+      <span>${formatNumber(dashboard.totals?.completedMilestones || 0)} of ${formatNumber(dashboard.totals?.milestones || 0)} milestones complete</span>
+    </div>
+    <div class="production-milestone-list">
+      ${dashboard.rows.map((row) => `
+        <article class="production-milestone-row">
+          <div class="production-milestone-school">
+            <strong>${escapeHtml(row.schoolName || '')}</strong>
+            <span>${escapeHtml([row.jobName, row.jobType].filter(Boolean).join(' / '))}</span>
+            <small>${formatNumber(row.photographed || 0)} photographed / ${formatNumber(row.subjects || 0)} subjects / ${formatNumber(row.orders || 0)} orders</small>
+          </div>
+          <div class="production-milestone-chips">
+            ${(row.milestones || []).map((milestone) => {
+              if (milestone.automatic) {
+                return `<span class="status ${productionMilestoneClass(milestone.status)}">${escapeHtml(milestone.label)}: ${escapeHtml(milestone.value || productionMilestoneLabel(milestone.status))}</span>`;
+              }
+              return `<label class="production-manual-milestone"><span>${escapeHtml(milestone.label)}</span><select data-production-milestone-job="${row.jobId}" data-production-milestone-key="${escapeHtml(milestone.key)}">
+                ${['not_started', 'in_progress', 'done', 'blocked'].map((status) => `<option value="${status}" ${milestone.status === status ? 'selected' : ''}>${productionMilestoneLabel(status)}</option>`).join('')}
+              </select></label>`;
+            }).join('')}
+          </div>
+        </article>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function loadProductionStatusDashboard() {
+  try {
+    const dashboard = await trecsApi('getProductionStatusDashboard').getProductionStatusDashboard();
+    renderProductionStatusDashboard(dashboard);
+  } catch (error) {
+    productionMilestoneGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load production milestones.')}</div>`;
+  }
 }
 
 function renderProductionSyncPreview(preview) {
@@ -8369,6 +8507,26 @@ async function testProductionSync() {
   }
 }
 
+async function buildProductionSheet() {
+  buildProductionSheetButton.disabled = true;
+  previewProductionSyncButton.disabled = true;
+  pushProductionSyncButton.disabled = true;
+  productionSyncStatus.textContent = 'Building production tracker sheet...';
+  try {
+    await saveProductionSyncSettings();
+    const result = await trecsApi('buildProductionStatusSheet').buildProductionStatusSheet(productionSyncInput());
+    productionSyncStatus.textContent = `Built ${result.settings?.sheetName || 'production tracker'} with ${formatNumber(result.rows || 0)} jobs and ${formatNumber(result.columns || 0)} columns as ${result.serviceAccountEmail || 'service account'}.`;
+    await loadProductionStatusDashboard();
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not build production tracker sheet.';
+    console.error(error);
+  } finally {
+    buildProductionSheetButton.disabled = false;
+    previewProductionSyncButton.disabled = false;
+    pushProductionSyncButton.disabled = !(jobsState.productionSyncPreview?.updates || []).length;
+  }
+}
+
 async function pushProductionSync() {
   pushProductionSyncButton.disabled = true;
   productionSyncStatus.textContent = 'Pushing production status updates...';
@@ -8379,6 +8537,29 @@ async function pushProductionSync() {
     productionSyncStatus.textContent = `Pushed ${formatNumber(result.pushed || 0)} cell update${Number(result.pushed || 0) === 1 ? '' : 's'} to ${result.settings?.sheetName || 'Google Sheets'}.`;
   } catch (error) {
     productionSyncStatus.textContent = error.message || 'Could not push production sync.';
+  }
+}
+
+async function saveProductionMilestoneFromSelect(select) {
+  const jobId = Number(select.dataset.productionMilestoneJob);
+  const milestoneKey = select.dataset.productionMilestoneKey;
+  const previousValue = jobsState.productionStatusDashboard?.rows
+    ?.find((row) => Number(row.jobId) === jobId)
+    ?.milestones?.find((milestone) => milestone.key === milestoneKey)?.status || 'not_started';
+  select.disabled = true;
+  productionSyncStatus.textContent = 'Saving production milestone...';
+  try {
+    const dashboard = await trecsApi('saveProductionMilestone').saveProductionMilestone({
+      jobId,
+      milestoneKey,
+      status: select.value
+    });
+    renderProductionStatusDashboard(dashboard);
+    productionSyncStatus.textContent = 'Production milestone saved.';
+  } catch (error) {
+    select.value = previousValue;
+    productionSyncStatus.textContent = error.message || 'Could not save production milestone.';
+    select.disabled = false;
   }
 }
 
@@ -8427,13 +8608,18 @@ async function loadEventImagePreview(imageAssetId, container, missingText) {
 
 function renderEventJobSetup() {
   const setup = jobsState.eventSetup;
+  const pinned = Boolean(jobsState.eventPinnedJobId);
+  const eventJobLabel = eventJobSelect.closest('label');
+  if (eventJobLabel) eventJobLabel.hidden = pinned;
   eventJobSelect.innerHTML = setup?.eventJobs?.length ? setup.eventJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedEventJobId) ? 'selected' : ''}>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</option>`).join('') : '<option value="">No event jobs yet</option>';
   eventFallJobSelect.innerHTML = setup?.fallJobs?.length ? `<option value="">Choose the matching fall job</option>${setup.fallJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.linkedFallJobId) ? 'selected' : ''}>${escapeHtml(job.jobName)} · ${formatNumber(job.subjects)} students · ${formatNumber(job.photographed)} photos</option>`).join('')}` : '<option value="">No fall jobs for this school</option>';
   const empty = !setup?.selectedEventJobId;
   eventWorkflowEmpty.hidden = !empty; eventWorkflowLayout.hidden = empty;
   linkEventFallJobButton.disabled = empty || !setup.fallJobs.length;
   importEventImagesButton.disabled = empty;
-  eventSetupStatus.textContent = empty ? 'Create an Event job to begin.' : setup.linkedFallJobId ? 'Fall student records linked. Ready for image matching.' : 'Choose and link the fall job before matching students.';
+  const currentJob = setup?.eventJobs?.find((job) => Number(job.id) === Number(setup.selectedEventJobId));
+  const currentJobText = pinned && currentJob ? `${currentJob.clientName} / ${currentJob.jobName}: ` : '';
+  eventSetupStatus.textContent = empty ? 'Create an Event job first.' : setup.linkedFallJobId ? `${currentJobText}Fall student records linked. Ready for image matching.` : `${currentJobText}Choose and link the fall job before matching students.`;
 }
 
 function filteredEventQueue() {
@@ -8447,7 +8633,13 @@ function renderEventQueue() {
   const setup = jobsState.eventSetup; if (!setup) return;
   const queue = filteredEventQueue();
   eventQueueCount.textContent = `${queue.length} of ${setup.queue.length}`;
-  eventImageQueue.innerHTML = queue.length ? queue.map((entry) => `<button class="event-image-card ${Number(entry.id) === Number(setup.selectedEntry?.id) ? 'active' : ''}" data-event-entry-id="${entry.id}" type="button"><span><strong>Image ${escapeHtml(entry.imageNumber)}</strong><small>${escapeHtml(entry.linkedNames || entry.filename)}</small></span><span class="status ${eventStatusClass(entry.status)}">${escapeHtml(eventStatusLabel(entry.status))}</span></button>`).join('') : '<div class="empty-state">No event images match this filter.</div>';
+  eventImageQueue.innerHTML = queue.length ? queue.map((entry) => {
+    const linkedNames = String(entry.linkedNames || '').split(' / ').map((name) => name.trim()).filter(Boolean);
+    const detail = linkedNames.length
+      ? `<span class="event-linked-name-list">${linkedNames.map((name) => `<small>${escapeHtml(name)}</small>`).join('')}</span>`
+      : `<small>${escapeHtml(entry.filename || '')}</small>`;
+    return `<button class="event-image-card ${Number(entry.id) === Number(setup.selectedEntry?.id) ? 'active' : ''}" data-event-entry-id="${entry.id}" type="button"><span><strong>Image ${escapeHtml(entry.imageNumber)}</strong>${detail}</span><span class="status ${eventStatusClass(entry.status)}">${escapeHtml(eventStatusLabel(entry.status))}</span></button>`;
+  }).join('') : '<div class="empty-state">No event images match this filter.</div>';
 }
 
 function renderEventExistingLinks() {
@@ -8460,12 +8652,10 @@ function renderEventSelectedCandidate() {
   if (!candidate) {
     eventSelectedStudent.innerHTML = '<span>No fall student selected.</span>';
     eventFallPreview.innerHTML = '<div class="empty-state">Select a fall student result.</div>';
-    eventOrderForm.elements.confirmed.checked = false;
     return;
   }
   const name = candidate.name || [candidate.firstName, candidate.lastName].filter(Boolean).join(' ') || `Ref ${candidate.ref}`;
   eventSelectedStudent.innerHTML = `<strong>${escapeHtml(name)}</strong><span>${escapeHtml([candidate.ref ? `Ref ${candidate.ref}` : '', candidate.grade ? `Grade ${candidate.grade}` : '', candidate.homeroom || ''].filter(Boolean).join(' · '))}</span>`;
-  eventOrderForm.elements.confirmed.checked = false;
   const existing = jobsState.eventSetup?.selectedEntry?.links?.find((link) => Number(link.subjectId) === Number(candidate.id || candidate.subjectId));
   eventOrderForm.elements.orderCodes.value = existing?.packageCodes || '';
   eventOrderForm.elements.paidStatus.value = existing?.paidStatus || 'paid';
@@ -8557,7 +8747,7 @@ async function saveEventOrder(goNext) {
   if (!(await acquireUiJobLock(setup.selectedEventJobId))) return;
   jobsState.eventSaving = true; eventSaveNextButton.disabled = true; eventSaveStayButton.disabled = true;
   try {
-    const result = await trecsApi('saveEventMatch').saveEventMatch({ eventJobId: setup.selectedEventJobId, entryId: setup.selectedEntry.id, fallSubjectId: candidate.id || candidate.subjectId, confirmed: eventOrderForm.elements.confirmed.checked, orderCodes: eventOrderForm.elements.orderCodes.value, paidStatus: eventOrderForm.elements.paidStatus.value, notes: eventOrderForm.elements.notes.value });
+    const result = await trecsApi('saveEventMatch').saveEventMatch({ eventJobId: setup.selectedEventJobId, entryId: setup.selectedEntry.id, fallSubjectId: candidate.id || candidate.subjectId, confirmed: true, orderCodes: eventOrderForm.elements.orderCodes.value, paidStatus: eventOrderForm.elements.paidStatus.value, notes: eventOrderForm.elements.notes.value });
     await loadEventWorkflow(setup.selectedEventJobId, goNext ? result.nextEntryId : result.entryId);
     eventOrderStatus.textContent = result.orderId ? 'Student linked and picture order saved.' : 'Student linked without an order.';
     if (goNext) { eventStudentSearch.focus(); eventStudentSearch.select(); } else { jobsState.eventSelectedCandidateId = null; renderEventSelectedCandidate(); eventStudentSearch.focus(); eventStudentSearch.select(); }
@@ -8586,6 +8776,7 @@ function productCategoryOptions(selected = '') {
     ['print_bundle', 'Print Bundle'],
     ['group_print', 'Group / Composite Print'],
     ['id_card', 'ID Card'],
+    ['event_item', 'Event Items'],
     ['image_prep', 'ImagePrep'],
     ['specialty', 'Photoshop Handoff / Specialty'],
     ['digital', 'Digital'],
@@ -9359,6 +9550,25 @@ function unitRenderSelectedJob() {
   return setup.jobs.find((job) => Number(job.id) === Number(unitRenderForm.elements.jobId.value)) || null;
 }
 
+function unitRenderJobIsEvent(job = unitRenderSelectedJob()) {
+  return ['event', 'qr_event'].includes(String(job?.type || '').toLowerCase());
+}
+
+function renderUnitRenderModeOptions() {
+  const isEvent = unitRenderJobIsEvent();
+  if (unitRenderEventOptions) unitRenderEventOptions.hidden = !isEvent;
+  exportImagePrepButton.hidden = isEvent;
+  unitRenderForm.elements.includeUnits.closest('.unit-render-checks').hidden = isEvent;
+  const sortSelect = unitRenderForm.elements.sortBy;
+  const previous = sortSelect.value;
+  sortSelect.innerHTML = isEvent
+    ? '<option value="imageNumber" selected>Image Number</option><option value="ref">Reference</option><option value="homeroom">Homeroom</option>'
+    : '<option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option>';
+  if ([...sortSelect.options].some((option) => option.value === previous)) {
+    sortSelect.value = previous;
+  }
+}
+
 function renderUnitRenderFilter() {
   const setup = jobsState.unitRenderSetup;
   if (!setup) return;
@@ -9378,6 +9588,14 @@ function renderUnitRenderSummary() {
     return;
   }
   unitRenderForm.elements.packagePlan.value = job.packagePlan || 'No package plan';
+  if (unitRenderJobIsEvent(job)) {
+    unitRenderMetrics.innerHTML = `
+      <article><span>Coded Event Orders</span><strong>${formatNumber(job.paidOrders)}</strong></article>
+      <article><span>Ready Event Images</span><strong>${formatNumber(job.readyOrders)}</strong></article>
+      <article><span>Event Images</span><strong>${formatNumber(job.eventImages || 0)}</strong></article>
+      <article><span>Package Plan</span><strong>${escapeHtml(job.packagePlan || 'None')}</strong></article>`;
+    return;
+  }
   unitRenderMetrics.innerHTML = `
     <article><span>Paid Orders</span><strong>${formatNumber(job.paidOrders)}</strong></article>
     <article><span>Ready With Photo</span><strong>${formatNumber(job.readyOrders)}</strong></article>
@@ -9392,6 +9610,7 @@ async function loadUnitRenderSetup(jobId = null) {
   jobsState.unitRenderSetup = await trecsApi('getUnitRenderSetup').getUnitRenderSetup(previousJobId);
   const setup = jobsState.unitRenderSetup;
   unitRenderForm.elements.jobId.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(`${job.clientName} — ${job.jobName}`)}</option>`).join('');
+  renderUnitRenderModeOptions();
   renderUnitRenderSummary();
   renderUnitRenderFilter();
   unitRenderStatus.textContent = setup.jobs.length ? 'Choose an output folder, then render.' : 'No jobs are available.';
@@ -9468,9 +9687,17 @@ async function submitUnitRender(event) {
       includeEnvelopes: unitRenderForm.elements.includeEnvelopes.checked,
       includeLabels: unitRenderForm.elements.includeLabels.checked,
       includeCompositeNotice: unitRenderForm.elements.includeCompositeNotice.checked,
+      eventPlanMode: unitRenderForm.elements.eventPlanMode?.value || 'package_plan',
+      eventIndividualCards: unitRenderForm.elements.eventIndividualCards?.checked !== false,
+      eventStackSheets: unitRenderForm.elements.eventStackSheets?.checked !== false,
+      eventPdf: unitRenderForm.elements.eventPdf?.checked !== false,
       outputFolder
     });
-    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.zipFiles || 0} zips, ${result.idCards || 0} ID cards, ${result.addons || 0} AddOns, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}. ${result.outputFolder || ''}`;
+    if (result.eventRender) {
+      unitRenderStatus.textContent = `Complete: ${result.cards || 0} event cards, ${result.sheetPages || 0} stack sheet${Number(result.sheetPages || 0) === 1 ? '' : 's'}, ${result.pdfPath ? 'PDF built' : 'no PDF'}, ${result.missingPhotos?.length || 0} missing photo(s), ${result.unsupportedItems?.length || 0} skipped item(s). ${result.outputFolder || ''}`;
+    } else {
+      unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.zipFiles || 0} zips, ${result.idCards || 0} ID cards, ${result.addons || 0} AddOns, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}. ${result.outputFolder || ''}`;
+    }
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'Render failed.';
     console.error(error);
@@ -10012,6 +10239,9 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'jobs') {
       jobsState.selectedTab = 'subjects';
     }
+    if (button.dataset.viewButton === 'events') {
+      jobsState.eventPinnedJobId = null;
+    }
     if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
     }
@@ -10028,6 +10258,10 @@ linkEventFallJobButton.addEventListener('click', configureSelectedEventFallJob);
 importEventImagesButton.addEventListener('click', importSelectedEventImages);
 createEventJobButton.addEventListener('click', () => {
   setView('jobs'); setNewJobFormVisible(true); newJobForm.elements.type.value = 'event'; newJobForm.elements.name.focus();
+});
+eventBackToJobsButton.addEventListener('click', () => {
+  jobsState.eventPinnedJobId = null;
+  setView('jobs');
 });
 eventImageQueue.addEventListener('click', (event) => { const button = event.target.closest('[data-event-entry-id]'); if (button) selectEventEntry(Number(button.dataset.eventEntryId)).catch((error) => { eventOrderStatus.textContent = error.message; }); });
 eventQueueFilters.addEventListener('click', (event) => { const button = event.target.closest('[data-event-queue-filter]'); if (!button) return; jobsState.eventQueueFilter = button.dataset.eventQueueFilter; eventQueueFilters.querySelectorAll('[data-event-queue-filter]').forEach((item) => item.classList.toggle('active', item === button)); renderEventQueue(); });
@@ -10074,8 +10308,13 @@ importOnlineOrdersButton.addEventListener('click', importReadyOnlineOrders);
 chooseProductionSyncCredentialsButton.addEventListener('click', chooseProductionSyncCredentials);
 saveProductionSyncSettingsButton.addEventListener('click', saveProductionSyncSettings);
 testProductionSyncButton.addEventListener('click', testProductionSync);
+buildProductionSheetButton.addEventListener('click', buildProductionSheet);
 previewProductionSyncButton.addEventListener('click', previewProductionSync);
 pushProductionSyncButton.addEventListener('click', pushProductionSync);
+productionMilestoneGrid.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-production-milestone-job]');
+  if (select) saveProductionMilestoneFromSelect(select);
+});
 browseBatchRenderOutputButton.addEventListener('click', browseBatchRenderOutput);
 refreshBatchRenderButton.addEventListener('click', () => loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message; }));
 batchRenderForm.addEventListener('submit', submitBatchRender);
@@ -10305,6 +10544,14 @@ if (idTemplateStage) {
 }
 
 if (idTemplateProperties) {
+  idTemplateProperties.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-id-template-add-field-button]');
+    if (!button) {
+      return;
+    }
+    const select = idTemplateProperties.querySelector('[data-id-template-add-field]');
+    addIdTemplateField(select && select.value);
+  });
   idTemplateProperties.addEventListener('change', (event) => {
     const control = event.target.closest('[data-id-template-property]');
     if (!control) {
@@ -10745,11 +10992,6 @@ cancelCaptureLoginButton.addEventListener('click', () => {
   const jobId = jobsState.pendingCaptureJobId;
   setCaptureLoginVisible(false);
   if (jobId && !jobsState.jobWorkspaceOpen) releaseUiJobLocks(jobId).catch((error) => console.error(error));
-});
-window.addEventListener('focus', () => {
-  if (!captureLoginModal.hidden) {
-    focusCaptureLoginPhotographer();
-  }
 });
 refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
 if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
