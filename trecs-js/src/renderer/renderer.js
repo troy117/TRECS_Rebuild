@@ -187,6 +187,25 @@ const captureCompareGrid = document.getElementById('captureCompareGrid');
 const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
 const capturePhotoCount = document.getElementById('capturePhotoCount');
+const captureComparisonModal = document.getElementById('captureComparisonModal');
+const captureComparisonSubject = document.getElementById('captureComparisonSubject');
+const captureComparisonStatus = document.getElementById('captureComparisonStatus');
+const captureComparisonScroller = document.getElementById('captureComparisonScroller');
+const closeCaptureComparisonButton = document.getElementById('closeCaptureComparisonButton');
+const captureImageActionForm = document.getElementById('captureImageActionForm');
+const captureImageActionTitle = document.getElementById('captureImageActionTitle');
+const captureImageActionFilename = document.getElementById('captureImageActionFilename');
+const cancelCaptureImageActionButton = document.getElementById('cancelCaptureImageActionButton');
+const captureActionStudentSearch = document.getElementById('captureActionStudentSearch');
+const captureActionReplacementField = document.getElementById('captureActionReplacementField');
+const captureActionStudentResults = document.getElementById('captureActionStudentResults');
+const captureActionSelectedStudent = document.getElementById('captureActionSelectedStudent');
+const captureActionStudentPreview = document.getElementById('captureActionStudentPreview');
+const captureActionStudentPhoto = document.getElementById('captureActionStudentPhoto');
+const captureActionStudentPreviewName = document.getElementById('captureActionStudentPreviewName');
+const captureActionStudentPreviewMeta = document.getElementById('captureActionStudentPreviewMeta');
+const captureImageActionStatus = document.getElementById('captureImageActionStatus');
+const confirmCaptureImageActionButton = document.getElementById('confirmCaptureImageActionButton');
 const captureBackToStudentsButton = document.getElementById('captureBackToStudentsButton');
 const captureSessionMeta = document.getElementById('captureSessionMeta');
 const captureFileModeControl = document.getElementById('captureFileModeControl');
@@ -352,6 +371,7 @@ let jobsState = {
   captureSubject: null,
   captureImages: [],
   captureCompareSlotIds: null,
+  captureImageActionId: null,
   captureSearchResults: [],
   captureSearchActiveIndex: -1,
   captureSearchTimer: null,
@@ -1378,6 +1398,30 @@ function renderEndOfDayCapturedImages(capturedImages) {
   `;
 }
 
+function renderEndOfDayWrongReferenceMoves(moves) {
+  if (!moves.length) {
+    return '<div class="empty-state">No images were moved between student references.</div>';
+  }
+  return `
+    <div class="end-of-day-warning">
+      Review each image photographed under the wrong reference before creating End of Day.
+    </div>
+    <ul class="end-of-day-list">
+      ${moves.map((move) => `
+        <li>
+          <strong>${escapeHtml(move.filename || `Image ${move.imageAssetId}`)}</strong>
+          <span>${escapeHtml(`${move.sourceRef || ''} ${move.sourceName || ''}`.trim())} &rarr; ${escapeHtml(`${move.targetRef || ''} ${move.targetName || ''}`.trim())}</span>
+          <em>${escapeHtml([move.photographerName, move.notes].filter(Boolean).join(' / '))}</em>
+        </li>
+      `).join('')}
+    </ul>
+    <label class="end-of-day-include">
+      <input type="checkbox" data-eod-confirm-wrong-reference>
+      <strong>I confirmed these images are assigned to the correct students.</strong>
+    </label>
+  `;
+}
+
 function renderEndOfDayNewSubjects(newSubjects) {
   if (!newSubjects.length) {
     return '<div class="empty-state">No new camera cards found.</div>';
@@ -1452,6 +1496,7 @@ function renderEndOfDayEditedSubjects(editedSubjects) {
 function renderEndOfDayReview(review) {
   const counts = review.counts || {};
   const changes = review.subjectChanges || {};
+  const wrongReferenceMoves = review.wrongReferenceMoves || [];
   const newSubjects = changes.newSubjects || [];
   const editedSubjects = changes.editedSubjects || [];
   const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
@@ -1461,12 +1506,16 @@ function renderEndOfDayReview(review) {
     <div class="end-of-day-summary">
       <article><span>Captured Images</span><strong>${formatNumber(counts.capturedImages || 0)}</strong></article>
       <article><span>CR3 Files</span><strong>${formatNumber(counts.capturedRawFiles || 0)}</strong></article>
+      <article><span>Wrong References</span><strong>${formatNumber(wrongReferenceMoves.length)}</strong></article>
       <article><span>New Cards Exported</span><strong>${formatNumber(includedNewSubjectCount)}</strong></article>
       <article><span>Student Edits Exported</span><strong>${formatNumber(includedEditedSubjectCount)}</strong></article>
     </div>
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
+    ${renderEndOfDaySection('wrongReferenceMoves', 'Images Photographed Under Wrong Reference', wrongReferenceMoves.length, renderEndOfDayWrongReferenceMoves(wrongReferenceMoves))}
     ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
   `;
+  confirmEndOfDayButton.disabled = wrongReferenceMoves.length > 0
+    && jobsState.endOfDayReview?.wrongReferenceConfirmed !== true;
   bindEndOfDayReviewControls(review);
 }
 
@@ -1475,6 +1524,16 @@ function updateEndOfDaySummaryOnly(review) {
 }
 
 function bindEndOfDayReviewControls(review) {
+  const wrongReferenceConfirmation = endOfDayReview.querySelector('[data-eod-confirm-wrong-reference]');
+  if (wrongReferenceConfirmation) {
+    wrongReferenceConfirmation.checked = jobsState.endOfDayReview?.wrongReferenceConfirmed === true;
+    wrongReferenceConfirmation.addEventListener('change', () => {
+      if (jobsState.endOfDayReview) {
+        jobsState.endOfDayReview.wrongReferenceConfirmed = wrongReferenceConfirmation.checked;
+      }
+      confirmEndOfDayButton.disabled = !wrongReferenceConfirmation.checked;
+    });
+  }
   endOfDayReview.querySelectorAll('[data-end-of-day-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
       const sectionId = button.dataset.endOfDayToggle;
@@ -1553,6 +1612,7 @@ async function openEndOfDayReview(jobId) {
   jobsState.endOfDayReview = { mode: 'create', jobId, loading: true };
   jobsState.endOfDayCollapsed = {
     capturedImages: true,
+    wrongReferenceMoves: false,
     newSubjects: false,
     editedSubjects: false
   };
@@ -1568,6 +1628,7 @@ async function openEndOfDayReview(jobId) {
       mode: 'create',
       jobId,
       review,
+      wrongReferenceConfirmed: false,
       adjustments: createEndOfDayAdjustments(review)
     };
     renderEndOfDayReview(review);
@@ -1591,6 +1652,7 @@ function reviewFromEndOfDayManifest(manifest) {
       currentPath: image.jpgPath,
       rawPath: image.rawPath || null
     })),
+    wrongReferenceMoves: manifest.wrongReferenceMoves || [],
     subjectChanges: manifest.subjectChanges || {
       newSubjects: [],
       editedSubjects: [],
@@ -1605,10 +1667,12 @@ function openEndOfDayPackageReview(choice) {
     mode: 'approve',
     packageFolder: choice.folderPath,
     review,
+    wrongReferenceConfirmed: false,
     adjustments: createEndOfDayAdjustments(review)
   };
   jobsState.endOfDayCollapsed = {
     capturedImages: true,
+    wrongReferenceMoves: false,
     newSubjects: false,
     editedSubjects: false
   };
@@ -1623,6 +1687,10 @@ function openEndOfDayPackageReview(choice) {
 async function confirmEndOfDayPackage() {
   const reviewState = jobsState.endOfDayReview;
   if (!reviewState) {
+    return;
+  }
+  if ((reviewState.review?.wrongReferenceMoves || []).length > 0 && reviewState.wrongReferenceConfirmed !== true) {
+    endOfDayStatus.textContent = 'Confirm the wrong-reference image assignments before continuing.';
     return;
   }
 
@@ -3884,8 +3952,9 @@ function renderCaptureSubject() {
 function renderCaptureCompare() {
   const images = jobsState.captureImages || [];
   capturePreviewMeta.textContent = jobsState.captureSubject
-    ? `${formatNumber(images.length)} comparison image${images.length === 1 ? '' : 's'}`
+    ? `Compare ${formatNumber(images.length)}`
     : '';
+  capturePreviewMeta.disabled = !jobsState.captureSubject || images.length === 0;
 
   if (!jobsState.captureSubject) {
     captureCompareGrid.innerHTML = '<div class="empty-state">Load a student, then capture images into CaptureHotFolder.</div>';
@@ -4242,8 +4311,29 @@ async function selectCaptureImage(imageId, control) {
       ...image,
       selected: Number(image.id) === Number(imageId)
     }));
+    const slots = jobsState.captureCompareSlotIds;
+    const selectedAlreadyVisible = slots && [slots.previousId, slots.recentId]
+      .some((slotId) => Number(slotId) === Number(imageId));
+    if (slots && !selectedAlreadyVisible) {
+      jobsState.captureCompareSlotIds = {
+        previousId: Number(imageId),
+        recentId: Number(slots.recentId) === Number(imageId) ? slots.previousId : slots.recentId
+      };
+    }
+    jobsState.captureSubject = {
+      ...jobsState.captureSubject,
+      imageAssetId: Number(imageId)
+    };
+    const detailSubject = findById(jobsState.detail?.subjects || [], jobsState.captureSubject.id);
+    if (detailSubject) {
+      detailSubject.imageAssetId = Number(imageId);
+      detailSubject.photographedStatus = 'photographed';
+    }
+    renderCaptureSubject();
     renderCaptureCompare();
-    focusCaptureBarcode(true);
+    if (!captureComparisonModal || captureComparisonModal.hidden) {
+      focusCaptureBarcode(true);
+    }
   } catch (error) {
     captureEntryStatus.textContent = error.message || 'Could not select image';
     console.error(error);
@@ -4986,6 +5076,275 @@ function bindDirectoryOptions() {
       renderAdminItemsWorkspace();
     });
   });
+}
+
+function closeCaptureImageAction() {
+  jobsState.captureImageActionId = null;
+  captureImageActionForm.hidden = true;
+  captureImageActionForm.reset();
+  captureImageActionStatus.textContent = '';
+  captureActionStudentResults.hidden = true;
+  captureActionStudentResults.innerHTML = '';
+  captureActionSelectedStudent.hidden = false;
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureActionStudentPreview.hidden = true;
+  captureActionStudentPhoto.innerHTML = '';
+}
+
+function closeCaptureComparison() {
+  closeCaptureImageAction();
+  captureComparisonModal.hidden = true;
+  appShell.inert = false;
+  focusCaptureBarcode(true);
+}
+
+function captureComparisonCardHtml(image) {
+  return `
+    <article class="capture-comparison-card-item ${image.selected ? 'selected' : ''}" data-capture-comparison-image="${image.id}">
+      <div class="capture-comparison-badges">
+        ${image.selected ? '<span class="status ready">Selected</span>' : '<span class="status">Comparison</span>'}
+        ${image.rawPath ? '<span class="status">JPG + CR3</span>' : '<span class="status">JPG</span>'}
+      </div>
+      <div class="capture-comparison-image">
+        ${image.dataUrl ? `<img data-capture-comparison-orient src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}">` : '<div class="empty-state">Preview unavailable.</div>'}
+      </div>
+      <div class="capture-comparison-meta">
+        <strong>${escapeHtml(image.filename || '')}</strong>
+        <span>${escapeHtml(image.capturedAt ? formatShortDateTime(image.capturedAt) : '')}</span>
+      </div>
+      <div class="capture-comparison-actions">
+        <button class="primary" data-capture-comparison-select="${image.id}" type="button" ${image.selected ? 'disabled' : ''}>${image.selected ? 'Selected' : 'Set Selected'}</button>
+        <button data-capture-comparison-move="${image.id}" type="button">Move to Student</button>
+        <button class="danger-button" data-capture-comparison-remove="${image.id}" type="button">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderCaptureComparison() {
+  const subject = jobsState.captureSubject;
+  const images = jobsState.captureImages || [];
+  captureComparisonSubject.textContent = subject
+    ? `${subject.ref || ''} ${subject.name || 'Unnamed student'}`
+    : 'No student selected';
+  captureComparisonStatus.textContent = images.length
+    ? `${formatNumber(images.length)} image${images.length === 1 ? '' : 's'} captured for this student`
+    : 'No comparison images are available.';
+  captureComparisonScroller.innerHTML = images.length
+    ? images.map(captureComparisonCardHtml).join('')
+    : '<div class="empty-state">Capture an image to begin comparing.</div>';
+
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-orient]').forEach((image) => {
+    const orient = () => image.classList.toggle('rotate-ccw', image.naturalWidth > image.naturalHeight);
+    if (image.complete) orient();
+    else image.addEventListener('load', orient, { once: true });
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-select]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await selectCaptureImage(Number(button.dataset.captureComparisonSelect), button);
+      renderCaptureComparison();
+    });
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-move]').forEach((button) => {
+    button.addEventListener('click', () => openCaptureImageAction(Number(button.dataset.captureComparisonMove), 'wrong_student'));
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-remove]').forEach((button) => {
+    button.addEventListener('click', () => openCaptureImageAction(Number(button.dataset.captureComparisonRemove), 'keep_review'));
+  });
+}
+
+function openCaptureComparison() {
+  if (!jobsState.captureSubject || !(jobsState.captureImages || []).length) {
+    return;
+  }
+  closeCaptureImageAction();
+  renderCaptureComparison();
+  captureComparisonModal.hidden = false;
+  appShell.inert = true;
+  restoreElectronFocus(closeCaptureComparisonButton).catch((error) => console.error(error));
+}
+
+function updateCaptureImageActionForm() {
+  const reason = captureImageActionForm.elements.reason.value;
+  const needsStudent = reason === 'wrong_student';
+  const image = (jobsState.captureImages || []).find((item) => Number(item.id) === Number(jobsState.captureImageActionId));
+  const replacementImages = (jobsState.captureImages || []).filter((item) => Number(item.id) !== Number(jobsState.captureImageActionId));
+  const needsReplacement = !needsStudent && Boolean(image && image.selected) && replacementImages.length > 0;
+  captureActionStudentSearch.hidden = !needsStudent;
+  if (!needsStudent) {
+    captureActionStudentPreview.hidden = true;
+  }
+  captureActionReplacementField.hidden = !needsReplacement;
+  captureImageActionForm.elements.replacementImageId.innerHTML = replacementImages.map((item) => `
+    <option value="${item.id}">${escapeHtml(item.filename || `Image ${item.id}`)}</option>
+  `).join('');
+  confirmCaptureImageActionButton.textContent = needsStudent
+    ? 'Move Image'
+    : ['duplicate_test', 'poor_image'].includes(reason)
+      ? 'Reject Image'
+      : 'Send to Review';
+  if (!needsStudent) {
+    captureImageActionForm.elements.targetSubjectId.value = '';
+    captureImageActionForm.elements.studentSearch.value = '';
+    captureActionStudentResults.hidden = true;
+  }
+  captureImageActionForm.elements.notes.required = reason === 'other';
+}
+
+function openCaptureImageAction(imageId, reason) {
+  const image = (jobsState.captureImages || []).find((item) => Number(item.id) === Number(imageId));
+  if (!image) {
+    return;
+  }
+  jobsState.captureImageActionId = image.id;
+  captureImageActionForm.reset();
+  captureImageActionForm.elements.reason.value = reason;
+  captureImageActionFilename.textContent = image.filename || '';
+  captureImageActionTitle.textContent = reason === 'wrong_student' ? 'Move Image to Correct Student' : 'Remove Image from Student';
+  captureImageActionStatus.textContent = '';
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureImageActionForm.hidden = false;
+  updateCaptureImageActionForm();
+  const focusTarget = reason === 'wrong_student'
+    ? captureImageActionForm.elements.studentSearch
+    : captureImageActionForm.elements.reason;
+  restoreElectronFocus(focusTarget).catch((error) => console.error(error));
+}
+
+function captureActionMatchingStudents() {
+  const search = captureImageActionForm.elements.studentSearch.value.trim().toLowerCase();
+  if (search.length < 2) {
+    return [];
+  }
+  return (jobsState.detail && jobsState.detail.subjects ? jobsState.detail.subjects : [])
+    .filter((subject) => Number(subject.id) !== Number(jobsState.captureSubject && jobsState.captureSubject.id))
+    .filter((subject) => [subject.ref, subject.name, subject.externalId, subject.grade, subject.homeroom]
+      .some((value) => String(value || '').toLowerCase().includes(search)))
+    .slice(0, 12);
+}
+
+function renderCaptureActionStudentResults() {
+  const subjects = captureActionMatchingStudents();
+  captureActionStudentResults.innerHTML = subjects.map((subject) => `
+    <button data-capture-action-subject="${subject.id}" type="button">
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</span>
+    </button>
+  `).join('');
+  captureActionStudentResults.hidden = !subjects.length;
+  captureActionStudentResults.querySelectorAll('[data-capture-action-subject]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', () => {
+      const subject = findById(jobsState.detail.subjects || [], Number(button.dataset.captureActionSubject));
+      if (!subject) return;
+      captureImageActionForm.elements.targetSubjectId.value = subject.id;
+      captureImageActionForm.elements.studentSearch.value = `${subject.ref || ''} ${subject.name || ''}`.trim();
+      captureActionSelectedStudent.textContent = `Move to ${subject.ref || ''} ${subject.name || 'Unnamed student'}`;
+      captureActionStudentResults.hidden = true;
+      showCaptureActionSelectedStudent(subject).catch((error) => console.error(error));
+    });
+  });
+}
+
+async function showCaptureActionSelectedStudent(subject) {
+  const subjectId = Number(subject && subject.id);
+  if (!subjectId) {
+    captureActionStudentPreview.hidden = true;
+    captureActionStudentPhoto.innerHTML = '';
+    return;
+  }
+  captureActionStudentPreviewName.textContent = `${subject.ref || ''} ${subject.name || 'Unnamed student'}`.trim();
+  captureActionStudentPreviewMeta.textContent = [subject.grade, subject.homeroom].filter(Boolean).join(' / ') || 'No grade or homeroom';
+  captureActionStudentPhoto.innerHTML = '<div class="empty-state">Loading...</div>';
+  captureActionSelectedStudent.hidden = true;
+  captureActionStudentPreview.hidden = false;
+
+  if (!subject.imageAssetId) {
+    captureActionStudentPhoto.innerHTML = '<div class="empty-state">No current photo</div>';
+    return;
+  }
+  const preview = await trecsApi('getImagePreview').getImagePreview(subject.imageAssetId);
+  if (Number(captureImageActionForm.elements.targetSubjectId.value) !== subjectId) {
+    return;
+  }
+  if (!preview || preview.missing || !preview.dataUrl) {
+    captureActionStudentPhoto.innerHTML = '<div class="empty-state">No current photo</div>';
+    return;
+  }
+  captureActionStudentPhoto.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Current student photo')}">`;
+  setLandscapeRotation(captureActionStudentPhoto.querySelector('img'));
+}
+
+async function submitCaptureImageAction(event) {
+  event.preventDefault();
+  const imageId = Number(jobsState.captureImageActionId);
+  const subject = jobsState.captureSubject;
+  if (!imageId || !subject) {
+    return;
+  }
+  const reason = captureImageActionForm.elements.reason.value;
+  const targetSubjectId = Number(captureImageActionForm.elements.targetSubjectId.value || 0) || null;
+  if (reason === 'wrong_student' && !targetSubjectId) {
+    captureImageActionStatus.textContent = 'Choose the correct student.';
+    captureImageActionForm.elements.studentSearch.focus();
+    return;
+  }
+  if (reason === 'other' && !captureImageActionForm.elements.notes.value.trim()) {
+    captureImageActionStatus.textContent = 'Add a note explaining this action.';
+    captureImageActionForm.elements.notes.focus();
+    return;
+  }
+  if (reason !== 'wrong_student' && (jobsState.captureImages || []).length === 1) {
+    const proceed = await confirmAction({
+      type: 'warning',
+      title: 'Remove Only Image',
+      message: 'This is the student’s only usable image.',
+      detail: 'Removing it will leave the student without a selected photo.',
+      confirmLabel: 'Remove Image'
+    });
+    if (!proceed) {
+      return;
+    }
+  }
+
+  confirmCaptureImageActionButton.disabled = true;
+  captureImageActionStatus.textContent = 'Saving...';
+  try {
+    const result = await trecsApi('resolveCaptureImage').resolveCaptureImage({
+      sourceSubjectId: subject.id,
+      targetSubjectId,
+      imageId,
+      reason,
+      notes: captureImageActionForm.elements.notes.value,
+      replacementImageId: Number(captureImageActionForm.elements.replacementImageId.value || 0) || null,
+      photographerName: jobsState.captureSession && jobsState.captureSession.photographerName,
+      workstationName: jobsState.captureSession && jobsState.captureSession.workstationName
+    });
+    jobsState.detail = await trecsApi('getJobDetail').getJobDetail(jobsState.selectedJobId);
+    const refreshedSubject = findById(jobsState.detail.subjects || [], subject.id);
+    jobsState.captureSubject = refreshedSubject
+      ? { ...subject, ...refreshedSubject }
+      : {
+          ...subject,
+          imageAssetId: result.sourceReplacementId || null,
+          photographedStatus: result.sourceReplacementId ? 'photographed' : 'unknown'
+        };
+    renderCapturePhotoCount();
+    closeCaptureImageAction();
+    await loadCaptureImages();
+    renderCaptureSubject();
+    renderCaptureComparison();
+    captureComparisonStatus.textContent = result.actionType === 'move'
+      ? 'Image moved to the selected student.'
+      : result.actionType === 'reject'
+        ? 'Image rejected and removed from this student.'
+        : 'Image removed and sent to Review Images.';
+  } catch (error) {
+    captureImageActionStatus.textContent = error.message || 'Could not update image.';
+    console.error(error);
+  } finally {
+    confirmCaptureImageActionButton.disabled = false;
+  }
 }
 
 function renderStickerOptions(listNames) {
@@ -11041,7 +11400,13 @@ applyStudentFieldsToAllButton.addEventListener('click', async () => {
   }
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
+  if (event.key === 'Escape' && captureComparisonModal && !captureComparisonModal.hidden) {
+    if (!captureImageActionForm.hidden) {
+      closeCaptureImageAction();
+    } else {
+      closeCaptureComparison();
+    }
+  } else if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
     closeImageLightbox();
   } else if (event.key === 'ArrowLeft' && imageLightboxModal && !imageLightboxModal.hidden) {
     moveLightboxImage(-1);
@@ -11123,6 +11488,24 @@ if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
 if (window.trecs && typeof window.trecs.onCaptureImageImported === 'function') {
   window.trecs.onCaptureImageImported(handleCaptureImageImported);
 }
+capturePreviewMeta.addEventListener('click', openCaptureComparison);
+closeCaptureComparisonButton.addEventListener('click', closeCaptureComparison);
+cancelCaptureImageActionButton.addEventListener('click', closeCaptureImageAction);
+captureImageActionForm.elements.reason.addEventListener('change', updateCaptureImageActionForm);
+captureImageActionForm.elements.studentSearch.addEventListener('input', () => {
+  captureImageActionForm.elements.targetSubjectId.value = '';
+  captureActionSelectedStudent.hidden = false;
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureActionStudentPreview.hidden = true;
+  captureActionStudentPhoto.innerHTML = '';
+  renderCaptureActionStudentResults();
+});
+captureImageActionForm.addEventListener('submit', submitCaptureImageAction);
+captureComparisonModal.addEventListener('click', (event) => {
+  if (event.target === captureComparisonModal) {
+    closeCaptureComparison();
+  }
+});
 
 if (newSchoolButton) {
   newSchoolButton.addEventListener('click', () => {

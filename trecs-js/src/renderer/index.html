@@ -787,7 +787,7 @@
                   <div class="capture-heading-status">
                     <span id="capturePairStatus" class="capture-pair-status ready"><i></i>Ready</span>
                     <span id="capturePhotoCount" class="capture-photo-count"></span>
-                    <span id="capturePreviewMeta"></span>
+                    <button id="capturePreviewMeta" class="secondary small capture-compare-button" type="button" disabled></button>
                   </div>
                 </div>
                 <div id="captureCompareGrid" class="capture-compare-grid">
@@ -1277,6 +1277,67 @@
           <button class="primary" type="submit">Start Capture</button>
         </div>
       </form>
+    </div>
+
+    <div class="modal-backdrop capture-comparison-backdrop" id="captureComparisonModal" hidden>
+      <section class="modal-card capture-comparison-card" aria-labelledby="captureComparisonTitle">
+        <div class="modal-heading">
+          <div>
+            <h2 id="captureComparisonTitle">Compare Captured Images</h2>
+            <p id="captureComparisonSubject"></p>
+          </div>
+          <button id="closeCaptureComparisonButton" type="button">Close</button>
+        </div>
+        <p id="captureComparisonStatus"></p>
+        <div id="captureComparisonScroller" class="capture-comparison-scroller"></div>
+        <form id="captureImageActionForm" class="capture-image-action-form" hidden>
+          <div class="modal-heading">
+            <div>
+              <h3 id="captureImageActionTitle">Resolve Image</h3>
+              <p id="captureImageActionFilename"></p>
+            </div>
+            <button id="cancelCaptureImageActionButton" type="button">Cancel</button>
+          </div>
+          <label>
+            <span>Reason</span>
+            <select name="reason">
+              <option value="wrong_student">Wrong student</option>
+              <option value="duplicate_test">Duplicate or test capture</option>
+              <option value="poor_image">Poor image</option>
+              <option value="keep_review">Keep for later review</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label class="capture-action-student-search" id="captureActionStudentSearch">
+            <span>Correct Student</span>
+            <input name="studentSearch" type="search" autocomplete="off" placeholder="Reference, name, ID, grade">
+            <input name="targetSubjectId" type="hidden">
+            <div id="captureActionStudentResults" class="student-search-results" hidden></div>
+            <small id="captureActionSelectedStudent">Choose the student this image belongs to.</small>
+            <div id="captureActionStudentPreview" class="capture-action-student-preview" hidden>
+              <div id="captureActionStudentPhoto" class="capture-action-student-photo"></div>
+              <div>
+                <strong id="captureActionStudentPreviewName"></strong>
+                <span id="captureActionStudentPreviewMeta"></span>
+                <small>Current student photo</small>
+              </div>
+            </div>
+          </label>
+          <label id="captureActionReplacementField" hidden>
+            <span>New Selected Image</span>
+            <select name="replacementImageId"></select>
+            <small>This image is currently selected. Choose its replacement.</small>
+          </label>
+          <label>
+            <span>Notes</span>
+            <textarea name="notes" rows="2" placeholder="Optional details"></textarea>
+          </label>
+          <div class="form-actions">
+            <span id="captureImageActionStatus"></span>
+            <button class="primary" id="confirmCaptureImageActionButton" type="submit">Move Image</button>
+          </div>
+        </form>
+      </section>
     </div>
 
     <script src="./renderer.js"></script>

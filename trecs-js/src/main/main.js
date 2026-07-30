@@ -32,7 +32,18 @@ function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackR
   return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(fallbackRoot, configuredPath);
 }
 
-const projectRoot = configuredPathFromFile('path.txt', defaultProjectRoot);
+const projectRoot = process.env.TRECS_DATA_ROOT
+  ? path.resolve(process.env.TRECS_DATA_ROOT)
+  : configuredPathFromFile('path.txt', defaultProjectRoot);
+const legacyElectronUserDataPath = app.getPath('userData');
+const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() || 'workstation')
+  .trim()
+  .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  .replace(/[. ]+$/g, '')
+  || 'workstation';
+const configuredElectronUserDataPath = path.join(projectRoot, 'TRECS-AppData', workstationStorageName);
+fs.mkdirSync(configuredElectronUserDataPath, { recursive: true });
+app.setPath('userData', configuredElectronUserDataPath);
 const captureConfigName = 'capture.txt';
 const captureConfigPath = path.join(defaultProjectRoot, captureConfigName);
 const captureStationMode = fs.existsSync(captureConfigPath) && fs.statSync(captureConfigPath).isFile();
@@ -105,6 +116,7 @@ function systemInfo() {
     userName: process.env.USERNAME || os.userInfo().username || '',
     dataRoot: projectRoot,
     defaultDataRoot: defaultProjectRoot,
+    appDataRoot: configuredElectronUserDataPath,
     pathFile: path.join(defaultProjectRoot, 'path.txt'),
     captureFile: captureConfigPath,
     captureHotFolder,
@@ -242,11 +254,61 @@ function insertRows(database, tableName, columns, rows) {
 }
 
 function captureSessionRoot() {
-  return path.join(app.getPath('userData'), 'CaptureSessions');
+  return path.join(configuredElectronUserDataPath, 'CaptureSessions');
 }
 
 function localCaptureDatabasePath(jobId) {
-  return path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const targetPath = path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const legacyPath = path.join(legacyElectronUserDataPath, 'CaptureSessions', `job-${jobId}`, 'capture.db');
+  if (!fs.existsSync(targetPath) && path.resolve(legacyPath) !== path.resolve(targetPath) && fs.existsSync(legacyPath)) {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(legacyPath, targetPath);
+  }
+  return targetPath;
+}
+
+function ensureCaptureImageActionsSchema(database) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS capture_image_actions (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      image_asset_id INTEGER NOT NULL,
+      source_subject_id INTEGER,
+      target_subject_id INTEGER,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+    ON capture_image_actions(image_asset_id, created_at);
+  `);
+}
+
+function repairMovedCaptureImageLinks(database) {
+  const staleLinks = rowsFromDatabase(database, `
+    SELECT DISTINCT
+      cia.source_subject_id AS sourceSubjectId,
+      cia.image_asset_id AS imageId
+    FROM capture_image_actions cia
+    JOIN subject_images si
+      ON si.subject_id = cia.source_subject_id
+      AND si.image_asset_id = cia.image_asset_id
+    WHERE cia.action_type = 'move'
+      AND cia.target_subject_id IS NOT NULL;
+  `);
+  staleLinks.forEach((link) => {
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [link.sourceSubjectId, link.imageId]);
+    chooseReplacementCaptureImage(database, link.sourceSubjectId);
+  });
+  return staleLinks.length;
 }
 
 function createLocalCaptureSchema(database) {
@@ -268,7 +330,9 @@ function createLocalCaptureSchema(database) {
       sync_status TEXT NOT NULL DEFAULT 'pending_sync',
       notes TEXT
     );
+
   `);
+  ensureCaptureImageActionsSchema(database);
   ensureColumn(database, 'capture_events', 'capture_session_id', 'INTEGER');
   ensureColumn(database, 'capture_events', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
   ensureColumn(database, 'capture_events', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
@@ -960,6 +1024,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
 
   try {
     ensureCompositeGradeTitleTable(sourceDatabase);
+    ensureCaptureImageActionsSchema(sourceDatabase);
     sourceDatabase.run(`
       CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
         id INTEGER PRIMARY KEY,
@@ -986,6 +1051,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     const jobDatabasePath = path.join(databaseFolder, 'job.db');
 
     createJobDatabaseSchema(jobDatabase);
+    ensureCaptureImageActionsSchema(jobDatabase);
     jobDatabase.run('PRAGMA foreign_keys = OFF;');
     jobDatabase.run('BEGIN TRANSACTION;');
 
@@ -1042,6 +1108,10 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'subject_group_members', Object.keys(subjectGroupMemberRows[0] || {}), subjectGroupMemberRows);
     insertRows(jobDatabase, 'image_assets', Object.keys(imageRows[0] || {}), imageRows);
     insertRows(jobDatabase, 'capture_sessions', Object.keys(captureSessionRows[0] || {}), captureSessionRows);
+    const captureImageActionRows = croppedMediumOnly
+      ? []
+      : rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_image_actions WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'capture_image_actions', Object.keys(captureImageActionRows[0] || {}), captureImageActionRows);
     const imageVersionRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
       FROM image_versions
@@ -1171,6 +1241,11 @@ async function ensurePrototypeDatabaseShape() {
       changed = true;
     }
 
+    const hadCaptureImageActions = rowsFromDatabase(database, `
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'capture_image_actions';
+    `).length > 0;
+
     database.run(`
       CREATE TABLE IF NOT EXISTS capture_sessions (
         id INTEGER PRIMARY KEY,
@@ -1198,6 +1273,23 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status
       ON capture_sessions(status, sync_status);
+
+      CREATE TABLE IF NOT EXISTS capture_image_actions (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        image_asset_id INTEGER NOT NULL,
+        source_subject_id INTEGER,
+        target_subject_id INTEGER,
+        action_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        notes TEXT,
+        photographer_name TEXT,
+        workstation_name TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+      ON capture_image_actions(image_asset_id, created_at);
 
       CREATE TABLE IF NOT EXISTS admin_item_batches (
         id INTEGER PRIMARY KEY,
@@ -1400,6 +1492,12 @@ async function ensurePrototypeDatabaseShape() {
         UNIQUE(job_id, name_key, subject_ids_key)
       );
     `);
+    if (!hadCaptureImageActions) {
+      changed = true;
+    }
+    if (repairMovedCaptureImageLinks(database) > 0) {
+      changed = true;
+    }
     changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
@@ -2776,6 +2874,33 @@ async function buildEndOfDayPreview(jobId) {
         rawPath: metadata.rawPath || localRow.cr3_path || null
       };
     });
+    const wrongReferenceMoves = localCaptureImageIds.length
+      ? rowsFromDatabase(sourceDatabase, `
+          SELECT
+            cia.id,
+            cia.image_asset_id AS imageAssetId,
+            ia.filename,
+            cia.source_subject_id AS sourceSubjectId,
+            source.legacy_ref_num AS sourceRef,
+            COALESCE(source.display_name, TRIM(COALESCE(source.first_name, '') || ' ' || COALESCE(source.last_name, ''))) AS sourceName,
+            cia.target_subject_id AS targetSubjectId,
+            target.legacy_ref_num AS targetRef,
+            COALESCE(target.display_name, TRIM(COALESCE(target.first_name, '') || ' ' || COALESCE(target.last_name, ''))) AS targetName,
+            cia.notes,
+            cia.photographer_name AS photographerName,
+            cia.workstation_name AS workstationName,
+            cia.created_at AS movedAt
+          FROM capture_image_actions cia
+          JOIN image_assets ia ON ia.id = cia.image_asset_id
+          LEFT JOIN subjects source ON source.id = cia.source_subject_id
+          LEFT JOIN subjects target ON target.id = cia.target_subject_id
+          WHERE cia.job_id = ${jobId}
+            AND cia.action_type = 'move'
+            AND cia.reason = 'wrong_student'
+            AND cia.image_asset_id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})
+          ORDER BY cia.created_at, cia.id;
+        `)
+      : [];
 
     const baselinePath = endOfDayBaselinePath(job.rootPath);
     let baselineRows = [];
@@ -2811,11 +2936,13 @@ async function buildEndOfDayPreview(jobId) {
         capturedImages: capturedImages.length,
         capturedRawFiles: capturedImages.filter((image) => image.rawPath).length,
         localCaptureEvents: localCapture.rows.length,
+        wrongReferenceMoves: wrongReferenceMoves.length,
         newSubjects: subjectChanges.newSubjects.length,
         editedSubjects: subjectChanges.editedSubjects.length,
         deletedSubjects: subjectChanges.deletedSubjects.length
       },
       capturedImages,
+      wrongReferenceMoves,
       localCaptureEvents: localCapture.rows,
       subjectChanges
     };
@@ -3081,6 +3208,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     job: preview.job,
     counts: adjustedCounts,
     copiedImages,
+    wrongReferenceMoves: preview.wrongReferenceMoves || [],
     subjectChanges,
     reviewAdjustments: adjustments || {},
     paths: {
@@ -10322,7 +10450,6 @@ async function loadOnsiteSetup(_event, input = {}) {
       const refreshedExistingJob = existingJobRows.length > 0;
       if (refreshedExistingJob) {
         clearImportedJobRows(database, sourceJob.id);
-        clearLocalCaptureDatabase(sourceJob.id);
       }
 
       let clientRows = rowsFromDatabase(database, `
@@ -10421,6 +10548,10 @@ async function loadOnsiteSetup(_event, input = {}) {
     setupDatabase.close();
   }
 
+  // Loading an onsite setup starts a fresh onsite capture state. Clear the
+  // workstation's local capture history after the main import succeeds, even
+  // when the old main job was deleted before reloading the setup.
+  clearLocalCaptureDatabase(result.id);
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
@@ -12368,18 +12499,11 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 100;
   `);
 
-  const localCapture = await readLocalCaptureRows(jobId);
-  const activeCaptureImageIds = new Set(localCapture.rows.map((row) => Number(row.image_asset_id)).filter(Boolean));
-  const activeCaptureSubjectIds = new Set(localCapture.rows.map((row) => Number(row.subject_id)).filter(Boolean));
   if (summary[0]) {
-    summary[0].activeCaptureImages = activeCaptureImageIds.size;
-    summary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    summary[0].activeCaptureEvents = localCapture.rows.length;
+    summary[0].activeCaptureEvents = Number(summary[0].activeCaptureImages || 0);
   }
   if (captureSummary[0]) {
-    captureSummary[0].activeCaptureImages = activeCaptureImageIds.size;
-    captureSummary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    captureSummary[0].activeCaptureEvents = localCapture.rows.length;
+    captureSummary[0].activeCaptureEvents = Number(captureSummary[0].activeCaptureImages || 0);
   }
 
   const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
@@ -14603,28 +14727,20 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
+      JOIN subject_images si
+        ON si.subject_id = s.id
+        AND si.image_asset_id = ${imageId}
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
         AND s.job_id = ia.job_id;
     `);
 
     if (!match.length || !match[0].values.length) {
-      throw new Error('Student and image must belong to the same job');
+      throw new Error('That image is no longer linked to this student');
     }
     if (match[0].values[0][4] === 'rejected') {
       throw new Error('Rejected images cannot be selected');
     }
-
-    database.run(`
-      INSERT OR IGNORE INTO subject_images (
-        subject_id,
-        image_asset_id,
-        role,
-        selected,
-        sort_order
-      )
-      VALUES (?, ?, 'capture', 0, 0);
-    `, [subjectId, imageId]);
 
     database.run(`
       UPDATE subject_images
@@ -14662,10 +14778,236 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
   return result;
 }
 
+function chooseReplacementCaptureImage(database, subjectId, preferredImageId = null) {
+  const replacementRows = rowsFromDatabase(database, `
+    SELECT si.image_asset_id AS imageId
+    FROM subject_images si
+    JOIN image_assets ia ON ia.id = si.image_asset_id
+    WHERE si.subject_id = ${numericId(subjectId)}
+      AND ia.status NOT IN ('rejected', 'packaged')
+    ORDER BY
+      CASE WHEN si.image_asset_id = ${preferredImageId ? numericId(preferredImageId) : 0} THEN 0 ELSE 1 END,
+      si.selected DESC,
+      si.sort_order,
+      ia.id DESC
+    LIMIT 1;
+  `);
+  const replacementId = replacementRows.length ? Number(replacementRows[0].imageId) : null;
+  database.run(`
+    UPDATE subject_images
+    SET selected = CASE WHEN image_asset_id = ? THEN 1 ELSE 0 END,
+        sort_order = CASE WHEN image_asset_id = ? THEN 0 ELSE sort_order END
+    WHERE subject_id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  database.run(`
+    UPDATE subjects
+    SET primary_image_asset_id = ?,
+        photographed_status = CASE WHEN ? IS NULL THEN 'unknown' ELSE 'photographed' END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  return replacementId;
+}
+
+async function updateLocalCaptureResolution(input) {
+  const dbPath = localCaptureDatabasePath(input.jobId);
+  if (!fs.existsSync(dbPath)) {
+    return null;
+  }
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    createLocalCaptureSchema(database);
+    if (input.actionType === 'move') {
+      database.run(`
+        UPDATE capture_events
+        SET subject_id = ?,
+            ref = ?,
+            selected = 1,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.targetSubjectId, input.targetRef, input.auditNotes, input.imageId]);
+    } else {
+      database.run(`
+        UPDATE capture_events
+        SET selected = 0,
+            sync_status = CASE WHEN ? = 'reject' THEN 'not_needed' ELSE sync_status END,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.actionType, input.auditNotes, input.imageId]);
+    }
+    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    return dbPath;
+  } finally {
+    database.close();
+  }
+}
+
+async function resolveCaptureImage(_event, input = {}) {
+  const sourceSubjectId = numericId(input.sourceSubjectId);
+  const imageId = numericId(input.imageId);
+  const reason = String(input.reason || '').trim();
+  const notes = optionalText(input.notes, 1000);
+  const photographerName = optionalText(input.photographerName, 255);
+  const workstationName = optionalText(input.workstationName, 255);
+  const allowedReasons = new Set(['wrong_student', 'duplicate_test', 'poor_image', 'keep_review', 'other']);
+  if (!allowedReasons.has(reason)) {
+    throw new Error('Choose a valid image resolution reason');
+  }
+  if (reason === 'other' && !notes) {
+    throw new Error('Add a note explaining why this image is being removed');
+  }
+  const targetSubjectId = reason === 'wrong_student' ? numericId(input.targetSubjectId) : null;
+  const replacementImageId = input.replacementImageId ? numericId(input.replacementImageId) : null;
+  if (reason === 'wrong_student' && targetSubjectId === sourceSubjectId) {
+    throw new Error('Choose a different student');
+  }
+
+  const result = await writeSql((database) => {
+    // Capture stations can open databases created by older TRECS builds, or a
+    // shared database can be replaced by an older station after startup.
+    // Repair this feature's schema in the same transaction as the action.
+    ensureCaptureImageActionsSchema(database);
+    const sourceRows = rowsFromDatabase(database, `
+      SELECT
+        s.job_id AS jobId,
+        s.legacy_ref_num AS sourceRef,
+        ia.filename,
+        ia.status
+      FROM subjects s
+      JOIN subject_images si ON si.subject_id = s.id
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      WHERE s.id = ${sourceSubjectId}
+        AND ia.id = ${imageId}
+      LIMIT 1;
+    `);
+    if (!sourceRows.length) {
+      throw new Error('That image is no longer linked to this student');
+    }
+    const source = sourceRows[0];
+    let target = null;
+    if (targetSubjectId) {
+      const targetRows = rowsFromDatabase(database, `
+        SELECT id, job_id AS jobId, legacy_ref_num AS ref
+        FROM subjects
+        WHERE id = ${targetSubjectId}
+        LIMIT 1;
+      `);
+      if (!targetRows.length || Number(targetRows[0].jobId) !== Number(source.jobId)) {
+        throw new Error('The selected student must belong to the same job');
+      }
+      target = targetRows[0];
+    }
+
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+    const sourceReplacementId = chooseReplacementCaptureImage(database, sourceSubjectId, replacementImageId);
+    const unlinkedRename = renameUnlinkedCaptureImage(database, {
+      imageId,
+      ref: source.sourceRef
+    });
+
+    let actionType = 'review';
+    let targetRef = null;
+    let linkedRename = null;
+    if (target) {
+      actionType = 'move';
+      targetRef = target.ref;
+      database.run('UPDATE subject_images SET selected = 0 WHERE subject_id = ?;', [targetSubjectId]);
+      database.run(`
+        INSERT OR IGNORE INTO subject_images (
+          subject_id, image_asset_id, role, selected, sort_order
+        ) VALUES (?, ?, 'capture', 1, 0);
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subject_images
+        SET selected = 1, sort_order = 0
+        WHERE subject_id = ? AND image_asset_id = ?;
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subjects
+        SET primary_image_asset_id = ?,
+            photographed_status = 'photographed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?;
+      `, [imageId, targetSubjectId]);
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+      linkedRename = renameLinkedCaptureImage(database, { imageId, ref: target.ref });
+    } else if (['duplicate_test', 'poor_image'].includes(reason)) {
+      actionType = 'reject';
+      database.run(`
+        UPDATE image_assets
+        SET status = 'rejected',
+            rejected_at = CURRENT_TIMESTAMP,
+            rejected_reason = ?
+        WHERE id = ?;
+      `, [reason === 'duplicate_test' ? 'Duplicate or test capture' : 'Poor image', imageId]);
+    } else {
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+    }
+
+    // A stale capture view must never be able to leave or recreate the source
+    // link after an image has been moved to another student.
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+
+    const auditNotes = [reason.replaceAll('_', ' '), notes].filter(Boolean).join(': ');
+    database.run(`
+      INSERT INTO capture_image_actions (
+        job_id, image_asset_id, source_subject_id, target_subject_id,
+        action_type, reason, notes, photographer_name, workstation_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `, [
+      source.jobId,
+      imageId,
+      sourceSubjectId,
+      targetSubjectId,
+      actionType,
+      reason,
+      notes,
+      photographerName,
+      workstationName
+    ]);
+
+    return {
+      jobId: source.jobId,
+      imageId,
+      sourceSubjectId,
+      sourceReplacementId,
+      targetSubjectId,
+      targetRef,
+      actionType,
+      reason,
+      auditNotes,
+      unlinkedRename,
+      linkedRename
+    };
+  });
+
+  result.localCaptureDatabasePath = await updateLocalCaptureResolution(result);
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  return result;
+}
+
 ipcMain.handle('capture:start-watcher', startCaptureWatcher);
 ipcMain.handle('capture:stop-watcher', stopCaptureWatcher);
 ipcMain.handle('capture:subject-images', getCaptureSubjectImages);
 ipcMain.handle('capture:select-image', selectCaptureImage);
+ipcMain.handle('capture:resolve-image', resolveCaptureImage);
 
 async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue = null) {
   const imageId = numericId(imageIdValue);

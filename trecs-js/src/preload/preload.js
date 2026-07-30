@@ -133,6 +133,7 @@ contextBridge.exposeInMainWorld('trecs', {
   stopCaptureWatcher: () => ipcRenderer.invoke('capture:stop-watcher'),
   getCaptureSubjectImages: (subjectId) => ipcRenderer.invoke('capture:subject-images', subjectId),
   selectCaptureImage: (subjectId, imageId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId),
+  resolveCaptureImage: (input) => ipcRenderer.invoke('capture:resolve-image', input),
   onCaptureImageImported: (callback) => {
     ipcRenderer.removeAllListeners('capture:image-imported');
     ipcRenderer.on('capture:image-imported', (_event, payload) => callback(payload));

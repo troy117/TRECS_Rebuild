@@ -100,8 +100,17 @@ function main() {
   compileIdCardSheetRenderer();
   compileCameraCardSheetRenderer();
   const builderCli = path.join(appRoot, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-  run(process.execPath, [builderCli, '--win', 'portable', '--x64'], { cwd: appRoot });
-  console.log(`Single EXE created at ${path.join(repoRoot, 'build', 'single', 'TRECS-Portable.exe')}`);
+  const configuredOutput = process.env.TRECS_BUILD_OUTPUT
+    ? path.resolve(appRoot, process.env.TRECS_BUILD_OUTPUT)
+    : path.join(repoRoot, 'build', 'single');
+  run(process.execPath, [
+    builderCli,
+    '--win',
+    'portable',
+    '--x64',
+    `--config.directories.output=${configuredOutput}`
+  ], { cwd: appRoot });
+  console.log(`Single EXE created at ${path.join(configuredOutput, 'TRECS-Portable.exe')}`);
 }
 
 main();

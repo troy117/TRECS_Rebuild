@@ -65,6 +65,7 @@
     "check": "node scripts/check-files.js",
     "check:db": "node scripts/check-db.js",
     "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1",
+    "check:capture-compare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-capture-comparison-ui.ps1",
     "check:ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-package-editor-ui.ps1",
     "check:units": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-picture-units.ps1",
     "check:render-ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-unit-render-ui.ps1",

@@ -2496,6 +2496,231 @@ dd {
   padding-left: 12px;
 }
 
+.capture-compare-button {
+  white-space: nowrap;
+}
+
+.capture-comparison-backdrop {
+  z-index: 120;
+}
+
+.capture-comparison-card {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: min(92vh, 900px);
+  max-width: none;
+  overflow: hidden;
+  width: min(96vw, 1600px);
+}
+
+.capture-comparison-card > .modal-heading p,
+.capture-comparison-card > p {
+  color: #617488;
+  margin: 3px 0 0;
+}
+
+.capture-comparison-scroller {
+  align-items: stretch;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 4px 14px;
+  scroll-snap-type: x proximity;
+}
+
+.capture-comparison-card-item {
+  background: #f8fafc;
+  border: 3px solid #cbd5df;
+  border-radius: 10px;
+  display: grid;
+  flex: 0 0 min(460px, 78vw);
+  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  min-height: 0;
+  padding: 12px;
+  scroll-snap-align: start;
+}
+
+.capture-comparison-card-item.selected {
+  border-color: #17803d;
+  box-shadow: 0 0 0 3px rgba(23, 128, 61, 0.14);
+}
+
+.capture-comparison-badges,
+.capture-comparison-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capture-comparison-image {
+  align-items: center;
+  background: #e8edf2;
+  border: 1px solid #d1dae3;
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.capture-comparison-image img {
+  display: block;
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.capture-comparison-image img.rotate-ccw {
+  transform: rotate(-90deg) scale(0.72);
+}
+
+.capture-comparison-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.capture-comparison-meta span {
+  color: #617488;
+  font-size: 12px;
+}
+
+.capture-comparison-actions button {
+  flex: 1 1 auto;
+}
+
+.capture-comparison-actions .danger-button {
+  border-color: #d9a2a2;
+  color: #9f1d1d;
+}
+
+.capture-image-action-form {
+  background: #fff;
+  border: 1px solid #cbd5df;
+  border-radius: 8px;
+  box-shadow: 0 -8px 24px rgba(20, 32, 45, 0.12);
+  display: grid;
+  gap: 16px 20px;
+  grid-template-columns: minmax(240px, 0.7fr) minmax(420px, 1.3fr);
+  padding: 18px;
+}
+
+.capture-image-action-form[hidden] {
+  display: none;
+}
+
+.capture-image-action-form .modal-heading,
+.capture-image-action-form .form-actions {
+  grid-column: 1 / -1;
+}
+
+.capture-image-action-form > label {
+  align-content: start;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.capture-image-action-form > label > select,
+.capture-image-action-form > label > input,
+.capture-image-action-form > label > textarea {
+  min-width: 0;
+  width: 100%;
+}
+
+.capture-image-action-form textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.capture-image-action-form .form-actions {
+  border-top: 1px solid #e6ebf0;
+  margin-top: 2px;
+  padding-top: 14px;
+}
+
+.capture-action-student-search {
+  position: relative;
+}
+
+.capture-action-student-search .student-search-results {
+  max-height: 220px;
+  top: calc(100% - 18px);
+  z-index: 4;
+}
+
+.capture-action-student-preview {
+  align-items: center;
+  background: #f7fafc;
+  border: 1px solid #d7e1e9;
+  border-radius: 7px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 86px minmax(0, 1fr);
+  margin-top: 4px;
+  padding: 10px;
+}
+
+.capture-action-student-photo {
+  align-items: center;
+  background: #e9eff4;
+  border: 1px solid #d2dce5;
+  border-radius: 5px;
+  display: flex;
+  height: 92px;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.capture-action-student-photo img {
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.capture-action-student-photo img.rotate-ccw {
+  height: 86px;
+  transform: rotate(-90deg);
+  width: 92px;
+}
+
+.capture-action-student-photo .empty-state {
+  border: 0;
+  font-size: 12px;
+  min-height: 0;
+  padding: 8px;
+  text-align: center;
+}
+
+.capture-action-student-preview > div:last-child {
+  display: grid;
+  gap: 4px;
+}
+
+.capture-action-student-preview strong {
+  color: #1f2933;
+  font-size: 15px;
+}
+
+.capture-action-student-preview span,
+.capture-action-student-preview small {
+  color: #647789;
+}
+
+@media (max-width: 900px) {
+  .capture-image-action-form {
+    grid-template-columns: 1fr;
+    max-height: 45vh;
+    overflow-y: auto;
+  }
+
+  .capture-image-action-form > * {
+    grid-column: 1;
+  }
+}
+
 .id-template-properties h3 {
   margin: 4px 0 0;
 }
