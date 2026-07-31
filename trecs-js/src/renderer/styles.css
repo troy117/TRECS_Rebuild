@@ -1083,7 +1083,7 @@ dd {
   gap: 14px;
   min-height: 0;
   overscroll-behavior: contain;
-  overflow: hidden;
+  overflow-y: auto;
   padding-right: 4px;
   scrollbar-gutter: stable;
 }
@@ -1144,6 +1144,10 @@ dd {
   flex-direction: column;
 }
 
+.end-of-day-section[data-end-of-day-section="wrongReferenceMoves"] {
+  flex: 0 0 auto;
+}
+
 .end-of-day-section-heading {
   align-items: center;
   background: #f7fafc;
@@ -1192,6 +1196,35 @@ dd {
 .end-of-day-section.database-edits .end-of-day-section-body {
   flex: 1 1 auto;
   max-height: none;
+}
+
+.end-of-day-section[data-end-of-day-section="wrongReferenceMoves"] .end-of-day-section-body {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  resize: none;
+}
+
+.end-of-day-section[data-end-of-day-section="wrongReferenceMoves"] .end-of-day-list {
+  height: auto;
+  overflow: visible;
+  padding-bottom: 10px;
+}
+
+.end-of-day-wrong-reference-confirmation {
+  align-items: center;
+  background: #f7fafc;
+  border: 1px solid #d7e0e8;
+  border-radius: 7px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 9px;
+  min-height: 42px;
+  padding: 9px 10px;
+}
+
+.end-of-day-wrong-reference-confirmation input {
+  flex: 0 0 auto;
 }
 
 .end-of-day-list,

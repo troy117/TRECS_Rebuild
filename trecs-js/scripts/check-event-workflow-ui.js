@@ -16,7 +16,7 @@ function dataRootFromPathFile() {
   return path.isAbsolute(configured) ? configured : path.resolve(workspaceRoot, configured);
 }
 const dataRoot = dataRootFromPathFile();
-const databasePath = path.join(dataRoot, 'database', 'migration_prototype.db');
+const databasePath = path.join(dataRoot, 'database', 'ProgramData.db');
 const programDatabasePath = path.join(dataRoot, 'database', 'program.db');
 const outputFolder = path.join(workspaceRoot, 'exports', 'ui-tests');
 const temporaryRoot = path.join(workspaceRoot, 'exports', '_event-workflow-smoke-temp');

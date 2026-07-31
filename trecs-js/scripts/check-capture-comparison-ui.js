@@ -38,6 +38,7 @@ async function run() {
   });
 
   await window.loadFile(path.join(__dirname, '../src/renderer/index.html'));
+  window.showInactive();
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   const result = await window.webContents.executeJavaScript(`
@@ -94,15 +95,15 @@ async function run() {
       const endOfDayFixture = {
         hasBaseline: true,
         counts: { capturedImages: 2, capturedRawFiles: 2 },
-        wrongReferenceMoves: [{
-          imageAssetId: 11,
-          filename: '10009_MG_0414.JPG',
+        wrongReferenceMoves: Array.from({ length: 20 }, (_item, index) => ({
+          imageAssetId: 11 + index,
+          filename: '10009_MG_' + String(414 + index).padStart(4, '0') + '.JPG',
           sourceRef: '10010',
           sourceName: 'Test Student',
           targetRef: '10009',
           targetName: 'Correct Student',
           photographerName: 'Capture Test'
-        }],
+        })),
         subjectChanges: { newSubjects: [], editedSubjects: [], deletedSubjects: [] }
       };
       jobsState.endOfDayReview = {
@@ -111,10 +112,35 @@ async function run() {
         adjustments: createEndOfDayAdjustments(endOfDayFixture),
         wrongReferenceConfirmed: false
       };
+      jobsState.endOfDayCollapsed = { wrongReferenceMoves: false, editedSubjects: true };
+      jobsView.classList.add('active-view');
+      endOfDayModal.hidden = false;
       renderEndOfDayReview(endOfDayFixture);
       const endOfDayInitiallyDisabled = confirmEndOfDayButton.disabled;
       const wrongReferenceCheckbox = endOfDayReview.querySelector('[data-eod-confirm-wrong-reference]');
+      const wrongReferenceBody = endOfDayReview.querySelector('[data-end-of-day-section="wrongReferenceMoves"] .end-of-day-section-body');
+      const wrongReferenceSection = wrongReferenceBody.closest('[data-end-of-day-section="wrongReferenceMoves"]');
+      const wrongReferenceList = wrongReferenceBody.querySelector('.end-of-day-list');
+      const sectionRect = wrongReferenceSection.getBoundingClientRect();
+      const checkboxRect = wrongReferenceCheckbox.getBoundingClientRect();
+      wrongReferenceList.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 10000 }));
+      const lastWrongReferenceRect = wrongReferenceList.lastElementChild.getBoundingClientRect();
+      const reviewRectAfterScroll = endOfDayReview.getBoundingClientRect();
+      const wrongReferenceLayout = {
+        bodyHeight: wrongReferenceBody.clientHeight,
+        listHeight: wrongReferenceList.clientHeight,
+        listContentHeight: wrongReferenceList.scrollHeight,
+        listNotClipped: wrongReferenceList.scrollHeight === wrongReferenceList.clientHeight,
+        wheelScrolledReview: endOfDayReview.scrollTop > 0,
+        lastItemVisible: lastWrongReferenceRect.top >= reviewRectAfterScroll.top
+          && lastWrongReferenceRect.bottom <= reviewRectAfterScroll.bottom,
+        confirmationBelowPanel: checkboxRect.top >= sectionRect.bottom
+      };
+      const wrongReferenceRows = wrongReferenceSection.querySelectorAll('li').length;
       wrongReferenceCheckbox.click();
+      renderEndOfDayReview({ ...endOfDayFixture, wrongReferenceMoves: [] });
+      const confirmationHiddenWhenEmpty = !endOfDayReview.querySelector('[data-eod-confirm-wrong-reference]');
+      endOfDayModal.hidden = true;
       jobsState.detail.summary = {
         activeCaptureImages: 5,
         activeCaptureSubjects: 2,
@@ -131,7 +157,9 @@ async function run() {
         previewIds,
         selectedPreviewIds,
         selectedStudentPreview,
-        wrongReferenceRows: endOfDayReview.querySelectorAll('[data-end-of-day-section="wrongReferenceMoves"] li').length,
+        wrongReferenceRows,
+        wrongReferenceLayout,
+        confirmationHiddenWhenEmpty,
         endOfDayInitiallyDisabled,
         endOfDayEnabledAfterConfirmation: !confirmEndOfDayButton.disabled,
         capturePhotoCount: document.getElementById('capturePhotoCount').textContent
@@ -155,7 +183,12 @@ async function run() {
     && result.selectedStudentPreview.name === '10009 Correct Student'
     && result.selectedStudentPreview.meta === '4 / Smith'
     && result.selectedStudentPreview.hasThumbnail
-    && result.wrongReferenceRows === 1
+    && result.wrongReferenceRows === 20
+    && result.wrongReferenceLayout.listNotClipped
+    && result.wrongReferenceLayout.wheelScrolledReview
+    && result.wrongReferenceLayout.lastItemVisible
+    && result.wrongReferenceLayout.confirmationBelowPanel
+    && result.confirmationHiddenWhenEmpty
     && result.endOfDayInitiallyDisabled
     && result.endOfDayEnabledAfterConfirmation
     && result.capturePhotoCount === '5 JPG / 2 students / 2 photo / 786 records'

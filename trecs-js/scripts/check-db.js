@@ -14,7 +14,7 @@ function dataRootFromPathFile() {
   return path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured);
 }
 const dataRoot = dataRootFromPathFile();
-const databasePath = path.join(dataRoot, 'database', 'migration_prototype.db');
+const databasePath = path.join(dataRoot, 'database', 'ProgramData.db');
 const sqlWasmPath = path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist');
 
 async function main() {

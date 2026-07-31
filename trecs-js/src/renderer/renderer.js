@@ -1415,7 +1415,15 @@ function renderEndOfDayWrongReferenceMoves(moves) {
         </li>
       `).join('')}
     </ul>
-    <label class="end-of-day-include">
+  `;
+}
+
+function renderEndOfDayWrongReferenceConfirmation(moves) {
+  if (!moves.length) {
+    return '';
+  }
+  return `
+    <label class="end-of-day-include end-of-day-wrong-reference-confirmation">
       <input type="checkbox" data-eod-confirm-wrong-reference>
       <strong>I confirmed these images are assigned to the correct students.</strong>
     </label>
@@ -1512,6 +1520,7 @@ function renderEndOfDayReview(review) {
     </div>
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
     ${renderEndOfDaySection('wrongReferenceMoves', 'Images Photographed Under Wrong Reference', wrongReferenceMoves.length, renderEndOfDayWrongReferenceMoves(wrongReferenceMoves))}
+    ${renderEndOfDayWrongReferenceConfirmation(wrongReferenceMoves)}
     ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
   `;
   confirmEndOfDayButton.disabled = wrongReferenceMoves.length > 0
@@ -11444,10 +11453,11 @@ endOfDayModal.addEventListener('wheel', (event) => {
   }
 
   const target = event.target instanceof Element ? event.target : event.target.parentElement;
+  const scrollableSelector = '.end-of-day-list, .end-of-day-section-body, .end-of-day-review';
   const candidates = target
-    ? Array.from(target.closest('.end-of-day-card')?.querySelectorAll('.end-of-day-section-body, .end-of-day-review') || [])
+    ? Array.from(target.closest('.end-of-day-card')?.querySelectorAll(scrollableSelector) || [])
     : [];
-  const nearestScrollable = target ? target.closest('.end-of-day-section-body, .end-of-day-review') : null;
+  const nearestScrollable = target ? target.closest(scrollableSelector) : null;
   const scrollTarget = [nearestScrollable, ...candidates]
     .filter(Boolean)
     .find((candidate) => {

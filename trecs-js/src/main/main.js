@@ -53,7 +53,13 @@ const captureHotFolder = configuredPathFromFile(
   path.join(projectRoot, 'CaptureHotFolder')
 );
 const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : defaultProjectRoot;
-const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
+const databaseFolderPath = path.join(projectRoot, 'database');
+const legacyPrototypeDatabasePath = path.join(databaseFolderPath, 'migration_prototype.db');
+const prototypeDatabasePath = path.join(databaseFolderPath, 'ProgramData.db');
+if (!fs.existsSync(prototypeDatabasePath) && fs.existsSync(legacyPrototypeDatabasePath)) {
+  fs.mkdirSync(databaseFolderPath, { recursive: true });
+  fs.renameSync(legacyPrototypeDatabasePath, prototypeDatabasePath);
+}
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
@@ -681,24 +687,6 @@ function createJobDatabaseSchema(database) {
       notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS capture_events (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      image_asset_id INTEGER,
-      capture_session_id INTEGER,
-      shoot_stage TEXT NOT NULL DEFAULT 'main',
-      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
-      ref TEXT,
-      jpg_path TEXT,
-      cr3_path TEXT,
-      filename TEXT,
-      selected INTEGER NOT NULL DEFAULT 1,
-      captured_at TEXT,
-      sync_status TEXT NOT NULL DEFAULT 'pending_sync',
-      notes TEXT
-    );
-
     CREATE TABLE IF NOT EXISTS admin_item_batches (
       id INTEGER PRIMARY KEY,
       job_id INTEGER NOT NULL,
@@ -711,25 +699,6 @@ function createJobDatabaseSchema(database) {
       created_at TEXT,
       completed_at TEXT,
       error_message TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS end_of_day_imports (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      package_name TEXT,
-      package_folder TEXT NOT NULL,
-      photographer_name TEXT,
-      workstation_name TEXT,
-      shoot_stage TEXT,
-      captured_images INTEGER NOT NULL DEFAULT 0,
-      raw_files INTEGER NOT NULL DEFAULT 0,
-      new_subjects INTEGER NOT NULL DEFAULT 0,
-      edited_subjects INTEGER NOT NULL DEFAULT 0,
-      copied_files INTEGER NOT NULL DEFAULT 0,
-      imported_by TEXT,
-      imported_at TEXT,
-      manifest_json TEXT,
-      UNIQUE(job_id, package_folder)
     );
 
     CREATE TABLE IF NOT EXISTS event_entries (
@@ -876,41 +845,6 @@ function createProgramDatabaseSchema(database) {
       legacy_code_name TEXT,
       metadata_json TEXT,
       UNIQUE(package_plan_id, code)
-    );
-
-    CREATE TABLE IF NOT EXISTS staff_assignments (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      role TEXT NOT NULL,
-      homeroom TEXT,
-      class_description TEXT,
-      include_in_composites INTEGER NOT NULL DEFAULT 1,
-      include_in_exports INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, subject_id, role, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS composite_grade_titles (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      homeroom TEXT NOT NULL,
-      grade_title TEXT NOT NULL,
-      reviewed INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      name_key TEXT NOT NULL,
-      subject_ids_key TEXT NOT NULL,
-      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      notes TEXT,
-      UNIQUE(job_id, name_key, subject_ids_key)
     );
 
     CREATE TABLE IF NOT EXISTS package_code_items (
@@ -11223,6 +11157,15 @@ function importRowValue(row, mapping, key) {
   return normalizeImportCell(row[Number(columnIndex)]);
 }
 
+function uppercaseImportValue(value, maxLength) {
+  const uppercaseValue = normalizeImportCell(value).toUpperCase();
+  return optionalText(uppercaseValue, maxLength);
+}
+
+function uppercaseMappedImportValue(row, mapping, key, maxLength) {
+  return uppercaseImportValue(importRowValue(row, mapping, key), maxLength);
+}
+
 function normalizedImportSubjectType(value) {
   const text = String(value || '').trim().toLowerCase();
   if (!text) {
@@ -11361,16 +11304,16 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 
     try {
       dataRows.forEach((row, index) => {
-        const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-        const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-        const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
-        const externalId = optionalText(importRowValue(row, mapping, 'externalId'), 255);
+        const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+        const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+        const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
+        const externalId = uppercaseMappedImportValue(row, mapping, 'externalId', 255);
         const grade = normalizeTrecsGrade(importRowValue(row, mapping, 'grade'));
-        const homeroom = optionalText(importRowValue(row, mapping, 'homeroom'), 100);
-        const track = optionalText(importRowValue(row, mapping, 'track'), 100);
-        const team = optionalText(importRowValue(row, mapping, 'team'), 100);
-        const field1 = optionalText(importRowValue(row, mapping, 'field1'), 255);
-        const field2 = optionalText(importRowValue(row, mapping, 'field2'), 255);
+        const homeroom = uppercaseMappedImportValue(row, mapping, 'homeroom', 100);
+        const track = uppercaseMappedImportValue(row, mapping, 'track', 100);
+        const team = uppercaseMappedImportValue(row, mapping, 'team', 100);
+        const field1 = uppercaseMappedImportValue(row, mapping, 'field1', 255);
+        const field2 = uppercaseMappedImportValue(row, mapping, 'field2', 255);
         const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
         const rawEnrollmentStatus = mapping.enrollmentStatus !== null && mapping.enrollmentStatus !== undefined && mapping.enrollmentStatus !== ''
           ? importRowValue(row, mapping, 'enrollmentStatus')
@@ -11378,8 +11321,8 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         const enrollmentStatus = rawEnrollmentStatus
           ? normalizeEnrollmentStatus(rawEnrollmentStatus)
           : 'active';
-        const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
-        const mappedRef = importRowValue(row, mapping, 'ref');
+        const notes = uppercaseMappedImportValue(row, mapping, 'notes', 5000);
+        const mappedRef = uppercaseMappedImportValue(row, mapping, 'ref', 100);
         const hasImportedData = Boolean(
           mappedRef ||
           firstName ||
@@ -11729,25 +11672,25 @@ function schoolDataImportRowsFromInput(input = {}) {
   const allRows = nonEmptySchoolDataRows(readSchoolDataRowsSync(input.filePath));
   const dataRows = input.hasHeader ? allRows.slice(1) : allRows;
   return dataRows.map((row, index) => {
-    const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-    const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-    const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
+    const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+    const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+    const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
     return {
       rowNumber: index + (input.hasHeader ? 2 : 1),
-      ref: optionalText(importRowValue(row, mapping, 'ref'), 100),
+      ref: uppercaseMappedImportValue(row, mapping, 'ref', 100),
       firstName,
       lastName,
       displayName,
-      externalId: optionalText(importRowValue(row, mapping, 'externalId'), 255),
+      externalId: uppercaseMappedImportValue(row, mapping, 'externalId', 255),
       grade: normalizeTrecsGrade(importRowValue(row, mapping, 'grade')),
-      homeroom: optionalText(importRowValue(row, mapping, 'homeroom'), 100),
-      track: optionalText(importRowValue(row, mapping, 'track'), 100),
-      team: optionalText(importRowValue(row, mapping, 'team'), 100),
-      field1: optionalText(importRowValue(row, mapping, 'field1'), 255),
-      field2: optionalText(importRowValue(row, mapping, 'field2'), 255),
+      homeroom: uppercaseMappedImportValue(row, mapping, 'homeroom', 100),
+      track: uppercaseMappedImportValue(row, mapping, 'track', 100),
+      team: uppercaseMappedImportValue(row, mapping, 'team', 100),
+      field1: uppercaseMappedImportValue(row, mapping, 'field1', 255),
+      field2: uppercaseMappedImportValue(row, mapping, 'field2', 255),
       subjectType: normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType')),
       enrollmentStatus: enrollmentStatusMapped ? normalizeEnrollmentStatus(importRowValue(row, mapping, 'enrollmentStatus')) : '',
-      notes: optionalText(importRowValue(row, mapping, 'notes'), 5000)
+      notes: uppercaseMappedImportValue(row, mapping, 'notes', 5000)
     };
   }).filter((row) => row.ref || row.firstName || row.lastName || row.displayName || row.externalId || row.grade || row.homeroom || row.field1 || row.field2);
 }
