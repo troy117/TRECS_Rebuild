@@ -71,6 +71,9 @@ contextBridge.exposeInMainWorld('trecs', {
   previewProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:preview', input),
   pushProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:push', input),
   testProductionStatusSync: (input) => ipcRenderer.invoke('production-sync:test', input),
+  getProductionStatusDashboard: () => ipcRenderer.invoke('production-sync:dashboard'),
+  saveProductionMilestone: (input) => ipcRenderer.invoke('production-sync:milestone-save', input),
+  buildProductionStatusSheet: (input) => ipcRenderer.invoke('production-sync:build-sheet', input),
   createClient: (input) => ipcRenderer.invoke('client:create', input),
   createJob: (input) => ipcRenderer.invoke('job:create', input),
   updateJob: (jobId, input) => ipcRenderer.invoke('job:update', jobId, input),
@@ -81,6 +84,9 @@ contextBridge.exposeInMainWorld('trecs', {
   loadOnsiteSetups: (input) => ipcRenderer.invoke('job:load-onsite-setups', input),
   getSystemInfo: () => ipcRenderer.invoke('app:system-info'),
   focusWindow: () => ipcRenderer.invoke('app:focus-window'),
+  confirmImageUnlink: (label) => ipcRenderer.invoke('app:confirm-image-unlink', label),
+  confirmAction: (input) => ipcRenderer.invoke('app:confirm-action', input),
+  showMessage: (input) => ipcRenderer.invoke('app:show-message', input),
   chooseEndOfDayPackageFolder: () => ipcRenderer.invoke('end-of-day:choose-package-folder'),
   approveEndOfDayPackage: (input) => ipcRenderer.invoke('end-of-day:approve-package', input),
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
@@ -127,6 +133,7 @@ contextBridge.exposeInMainWorld('trecs', {
   stopCaptureWatcher: () => ipcRenderer.invoke('capture:stop-watcher'),
   getCaptureSubjectImages: (subjectId) => ipcRenderer.invoke('capture:subject-images', subjectId),
   selectCaptureImage: (subjectId, imageId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId),
+  resolveCaptureImage: (input) => ipcRenderer.invoke('capture:resolve-image', input),
   onCaptureImageImported: (callback) => {
     ipcRenderer.removeAllListeners('capture:image-imported');
     ipcRenderer.on('capture:image-imported', (_event, payload) => callback(payload));

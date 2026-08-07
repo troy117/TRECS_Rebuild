@@ -15,26 +15,51 @@ const portableMode = app.isPackaged || runningFromPortableFolder;
 const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
 const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
 const defaultProjectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
-function dataRootFromPathFile() {
-  const pathFile = path.join(defaultProjectRoot, 'path.txt');
-  if (!fs.existsSync(pathFile) || !fs.statSync(pathFile).isFile()) {
-    return defaultProjectRoot;
+function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackRoot) {
+  const configFile = path.join(defaultProjectRoot, fileName);
+  if (!fs.existsSync(configFile) || !fs.statSync(configFile).isFile()) {
+    return fallbackPath;
   }
 
-  const configuredPath = fs.readFileSync(pathFile, 'utf8')
+  const configuredPath = fs.readFileSync(configFile, 'utf8')
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/^["']|["']$/g, ''))
     .find((line) => line && !line.startsWith('#'));
   if (!configuredPath) {
-    return defaultProjectRoot;
+    return fallbackPath;
   }
 
-  return path.resolve(defaultProjectRoot, configuredPath);
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(fallbackRoot, configuredPath);
 }
 
-const projectRoot = dataRootFromPathFile();
+const projectRoot = process.env.TRECS_DATA_ROOT
+  ? path.resolve(process.env.TRECS_DATA_ROOT)
+  : configuredPathFromFile('path.txt', defaultProjectRoot);
+const legacyElectronUserDataPath = app.getPath('userData');
+const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() || 'workstation')
+  .trim()
+  .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  .replace(/[. ]+$/g, '')
+  || 'workstation';
+const configuredElectronUserDataPath = path.join(projectRoot, 'TRECS-AppData', workstationStorageName);
+fs.mkdirSync(configuredElectronUserDataPath, { recursive: true });
+app.setPath('userData', configuredElectronUserDataPath);
+const captureConfigName = 'capture.txt';
+const captureConfigPath = path.join(defaultProjectRoot, captureConfigName);
+const captureStationMode = fs.existsSync(captureConfigPath) && fs.statSync(captureConfigPath).isFile();
+const captureHotFolder = configuredPathFromFile(
+  captureConfigName,
+  defaultProjectRoot,
+  path.join(projectRoot, 'CaptureHotFolder')
+);
 const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : defaultProjectRoot;
-const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
+const databaseFolderPath = path.join(projectRoot, 'database');
+const legacyPrototypeDatabasePath = path.join(databaseFolderPath, 'migration_prototype.db');
+const prototypeDatabasePath = path.join(databaseFolderPath, 'ProgramData.db');
+if (!fs.existsSync(prototypeDatabasePath) && fs.existsSync(legacyPrototypeDatabasePath)) {
+  fs.mkdirSync(databaseFolderPath, { recursive: true });
+  fs.renameSync(legacyPrototypeDatabasePath, prototypeDatabasePath);
+}
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
@@ -97,7 +122,11 @@ function systemInfo() {
     userName: process.env.USERNAME || os.userInfo().username || '',
     dataRoot: projectRoot,
     defaultDataRoot: defaultProjectRoot,
-    pathFile: path.join(defaultProjectRoot, 'path.txt')
+    appDataRoot: configuredElectronUserDataPath,
+    pathFile: path.join(defaultProjectRoot, 'path.txt'),
+    captureFile: captureConfigPath,
+    captureHotFolder,
+    captureStationMode
   };
 }
 
@@ -115,6 +144,52 @@ function focusWindow(event) {
     window.webContents.focus();
   }
   return { focused: Boolean(window) };
+}
+
+async function confirmImageUnlink(event, labelValue) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const label = String(labelValue || 'this image');
+  const result = await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'Unlink Image',
+    message: `Unlink ${label} from this student?`,
+    detail: 'If this image has no other student links, the reference prefix will be removed from the JPG and RAW filenames.',
+    buttons: ['Unlink', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function confirmAction(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showMessageBox(window, {
+    type: input.type === 'warning' ? 'warning' : 'question',
+    title: String(input.title || 'Confirm'),
+    message: String(input.message || 'Continue?'),
+    detail: String(input.detail || ''),
+    buttons: [String(input.confirmLabel || 'Continue'), 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function showMessage(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  await dialog.showMessageBox(window, {
+    type: input.type === 'error' ? 'error' : input.type === 'warning' ? 'warning' : 'info',
+    title: String(input.title || 'TRECS'),
+    message: String(input.message || ''),
+    detail: String(input.detail || ''),
+    buttons: ['OK'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  return { shown: true };
 }
 
 function logStartup(message, error = null) {
@@ -185,11 +260,61 @@ function insertRows(database, tableName, columns, rows) {
 }
 
 function captureSessionRoot() {
-  return path.join(app.getPath('userData'), 'CaptureSessions');
+  return path.join(configuredElectronUserDataPath, 'CaptureSessions');
 }
 
 function localCaptureDatabasePath(jobId) {
-  return path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const targetPath = path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const legacyPath = path.join(legacyElectronUserDataPath, 'CaptureSessions', `job-${jobId}`, 'capture.db');
+  if (!fs.existsSync(targetPath) && path.resolve(legacyPath) !== path.resolve(targetPath) && fs.existsSync(legacyPath)) {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(legacyPath, targetPath);
+  }
+  return targetPath;
+}
+
+function ensureCaptureImageActionsSchema(database) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS capture_image_actions (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      image_asset_id INTEGER NOT NULL,
+      source_subject_id INTEGER,
+      target_subject_id INTEGER,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+    ON capture_image_actions(image_asset_id, created_at);
+  `);
+}
+
+function repairMovedCaptureImageLinks(database) {
+  const staleLinks = rowsFromDatabase(database, `
+    SELECT DISTINCT
+      cia.source_subject_id AS sourceSubjectId,
+      cia.image_asset_id AS imageId
+    FROM capture_image_actions cia
+    JOIN subject_images si
+      ON si.subject_id = cia.source_subject_id
+      AND si.image_asset_id = cia.image_asset_id
+    WHERE cia.action_type = 'move'
+      AND cia.target_subject_id IS NOT NULL;
+  `);
+  staleLinks.forEach((link) => {
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [link.sourceSubjectId, link.imageId]);
+    chooseReplacementCaptureImage(database, link.sourceSubjectId);
+  });
+  return staleLinks.length;
 }
 
 function createLocalCaptureSchema(database) {
@@ -211,7 +336,9 @@ function createLocalCaptureSchema(database) {
       sync_status TEXT NOT NULL DEFAULT 'pending_sync',
       notes TEXT
     );
+
   `);
+  ensureCaptureImageActionsSchema(database);
   ensureColumn(database, 'capture_events', 'capture_session_id', 'INTEGER');
   ensureColumn(database, 'capture_events', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
   ensureColumn(database, 'capture_events', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
@@ -560,24 +687,6 @@ function createJobDatabaseSchema(database) {
       notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS capture_events (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      image_asset_id INTEGER,
-      capture_session_id INTEGER,
-      shoot_stage TEXT NOT NULL DEFAULT 'main',
-      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
-      ref TEXT,
-      jpg_path TEXT,
-      cr3_path TEXT,
-      filename TEXT,
-      selected INTEGER NOT NULL DEFAULT 1,
-      captured_at TEXT,
-      sync_status TEXT NOT NULL DEFAULT 'pending_sync',
-      notes TEXT
-    );
-
     CREATE TABLE IF NOT EXISTS admin_item_batches (
       id INTEGER PRIMARY KEY,
       job_id INTEGER NOT NULL,
@@ -590,25 +699,6 @@ function createJobDatabaseSchema(database) {
       created_at TEXT,
       completed_at TEXT,
       error_message TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS end_of_day_imports (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      package_name TEXT,
-      package_folder TEXT NOT NULL,
-      photographer_name TEXT,
-      workstation_name TEXT,
-      shoot_stage TEXT,
-      captured_images INTEGER NOT NULL DEFAULT 0,
-      raw_files INTEGER NOT NULL DEFAULT 0,
-      new_subjects INTEGER NOT NULL DEFAULT 0,
-      edited_subjects INTEGER NOT NULL DEFAULT 0,
-      copied_files INTEGER NOT NULL DEFAULT 0,
-      imported_by TEXT,
-      imported_at TEXT,
-      manifest_json TEXT,
-      UNIQUE(job_id, package_folder)
     );
 
     CREATE TABLE IF NOT EXISTS event_entries (
@@ -757,41 +847,6 @@ function createProgramDatabaseSchema(database) {
       UNIQUE(package_plan_id, code)
     );
 
-    CREATE TABLE IF NOT EXISTS staff_assignments (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      role TEXT NOT NULL,
-      homeroom TEXT,
-      class_description TEXT,
-      include_in_composites INTEGER NOT NULL DEFAULT 1,
-      include_in_exports INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, subject_id, role, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS composite_grade_titles (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      homeroom TEXT NOT NULL,
-      grade_title TEXT NOT NULL,
-      reviewed INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      name_key TEXT NOT NULL,
-      subject_ids_key TEXT NOT NULL,
-      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      notes TEXT,
-      UNIQUE(job_id, name_key, subject_ids_key)
-    );
-
     CREATE TABLE IF NOT EXISTS package_code_items (
       id INTEGER PRIMARY KEY,
       package_code_id INTEGER NOT NULL,
@@ -903,6 +958,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
 
   try {
     ensureCompositeGradeTitleTable(sourceDatabase);
+    ensureCaptureImageActionsSchema(sourceDatabase);
     sourceDatabase.run(`
       CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
         id INTEGER PRIMARY KEY,
@@ -929,6 +985,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     const jobDatabasePath = path.join(databaseFolder, 'job.db');
 
     createJobDatabaseSchema(jobDatabase);
+    ensureCaptureImageActionsSchema(jobDatabase);
     jobDatabase.run('PRAGMA foreign_keys = OFF;');
     jobDatabase.run('BEGIN TRANSACTION;');
 
@@ -985,6 +1042,10 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'subject_group_members', Object.keys(subjectGroupMemberRows[0] || {}), subjectGroupMemberRows);
     insertRows(jobDatabase, 'image_assets', Object.keys(imageRows[0] || {}), imageRows);
     insertRows(jobDatabase, 'capture_sessions', Object.keys(captureSessionRows[0] || {}), captureSessionRows);
+    const captureImageActionRows = croppedMediumOnly
+      ? []
+      : rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_image_actions WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'capture_image_actions', Object.keys(captureImageActionRows[0] || {}), captureImageActionRows);
     const imageVersionRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
       FROM image_versions
@@ -1087,7 +1148,7 @@ async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
   fs.mkdirSync(path.join(projectRoot, 'database'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
-  fs.mkdirSync(path.join(projectRoot, 'CaptureHotFolder'), { recursive: true });
+  fs.mkdirSync(captureHotFolder, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
 
@@ -1113,6 +1174,11 @@ async function ensurePrototypeDatabaseShape() {
       database.run('ALTER TABLE jobs ADD COLUMN retake_date TEXT;');
       changed = true;
     }
+
+    const hadCaptureImageActions = rowsFromDatabase(database, `
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'capture_image_actions';
+    `).length > 0;
 
     database.run(`
       CREATE TABLE IF NOT EXISTS capture_sessions (
@@ -1141,6 +1207,23 @@ async function ensurePrototypeDatabaseShape() {
 
       CREATE INDEX IF NOT EXISTS idx_capture_sessions_status
       ON capture_sessions(status, sync_status);
+
+      CREATE TABLE IF NOT EXISTS capture_image_actions (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        image_asset_id INTEGER NOT NULL,
+        source_subject_id INTEGER,
+        target_subject_id INTEGER,
+        action_type TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        notes TEXT,
+        photographer_name TEXT,
+        workstation_name TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+      ON capture_image_actions(image_asset_id, created_at);
 
       CREATE TABLE IF NOT EXISTS admin_item_batches (
         id INTEGER PRIMARY KEY,
@@ -1206,6 +1289,22 @@ async function ensurePrototypeDatabaseShape() {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS job_milestones (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        milestone_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'not_started',
+        completed_at TEXT,
+        completed_by TEXT,
+        source TEXT NOT NULL DEFAULT 'manual',
+        notes TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(job_id, milestone_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_milestones_job_id
+      ON job_milestones(job_id, milestone_key);
 
       CREATE TABLE IF NOT EXISTS id_card_templates (
         id INTEGER PRIMARY KEY,
@@ -1327,6 +1426,12 @@ async function ensurePrototypeDatabaseShape() {
         UNIQUE(job_id, name_key, subject_ids_key)
       );
     `);
+    if (!hadCaptureImageActions) {
+      changed = true;
+    }
+    if (repairMovedCaptureImageLinks(database) > 0) {
+      changed = true;
+    }
     changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
     changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
@@ -1344,6 +1449,7 @@ async function ensurePrototypeDatabaseShape() {
     changed = ensureColumn(database, 'render_tasks', 'order_id', 'INTEGER') || changed;
     changed = ensureColumn(database, 'render_tasks', 'details_json', 'TEXT') || changed;
     changed = migrateExistingIdTemplateFiles(database) || changed;
+    changed = ensureEventPackageProducts(database) || changed;
 
     database.run(`
       CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
@@ -1706,7 +1812,7 @@ async function googleSheetBatchUpdate(settings, updates) {
     valueInputOption: 'USER_ENTERED',
     data: updates.map((update) => ({
       range: `${quoteSheetName(settings.sheetName)}!${update.range}`,
-      values: [[update.value]]
+      values: update.values || [[update.value]]
     }))
   });
   const response = await httpsJsonRequest(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}/values:batchUpdate`, {
@@ -1885,8 +1991,70 @@ async function productionSyncJobRows() {
   `);
 }
 
-function productionComputedValues(job) {
+const PRODUCTION_SYNC_COLUMNS = [
+  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
+  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
+  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
+  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
+  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
+  { key: 'render', label: 'RENDER', headers: ['RENDER'] },
+  { key: 'delivery', label: 'Delivery', headers: ['Delivery', 'Delivered'] },
+  { key: 'notes', label: 'Notes', headers: ['Notes'] },
+  { key: 'lastSync', label: 'Last TRECS Sync', headers: ['Last TRECS Sync', 'TRECS Sync'] }
+];
+
+const PRODUCTION_STATUS_SHEET_COLUMNS = [
+  { key: 'schoolName', label: 'School / Site' },
+  { key: 'jobType', label: 'Job TYPE' },
+  { key: 'jobName', label: 'Job Name' },
+  { key: 'subjects', label: 'Subjects' },
+  { key: 'photographed', label: 'Photographed' },
+  { key: 'orders', label: 'Orders' },
+  ...PRODUCTION_SYNC_COLUMNS.map((column) => ({ key: column.key, label: column.label }))
+];
+
+const PRODUCTION_MILESTONES = [
+  { key: 'schoolData', label: 'School Data', automatic: true },
+  { key: 'onsiteSetup', label: 'Onsite Setup', automatic: true },
+  { key: 'mergeData', label: 'EOD Loaded', automatic: true },
+  { key: 'adminDone', label: 'Admin Done', automatic: true },
+  { key: 'paperOrders', label: 'Paper Orders', automatic: true },
+  { key: 'onlineOrders', label: 'Online Orders', automatic: true },
+  { key: 'render', label: 'Render', automatic: true },
+  { key: 'delivery', label: 'Delivery', automatic: false }
+];
+
+const PRODUCTION_MILESTONE_STATUS = new Set(['not_started', 'in_progress', 'done', 'blocked']);
+
+function productionManualMilestoneValue(milestone) {
+  if (!milestone) return '';
+  if (milestone.status === 'done') return productionStatusValue(milestone.completedAt) || 'done';
+  if (milestone.status === 'in_progress') return 'started';
+  if (milestone.status === 'blocked') return 'blocked';
+  return '';
+}
+
+async function productionManualMilestones(jobIds = []) {
+  const ids = jobIds.map((id) => Number(id)).filter(Number.isFinite);
+  if (!ids.length) return new Map();
+  const rows = await querySql(`
+    SELECT job_id AS jobId, milestone_key AS milestoneKey, status, completed_at AS completedAt,
+           completed_by AS completedBy, source, notes, updated_at AS updatedAt
+    FROM job_milestones
+    WHERE job_id IN (${ids.join(',')});
+  `);
+  const byJob = new Map();
+  rows.forEach((row) => {
+    const jobKey = Number(row.jobId);
+    if (!byJob.has(jobKey)) byJob.set(jobKey, new Map());
+    byJob.get(jobKey).set(row.milestoneKey, row);
+  });
+  return byJob;
+}
+
+function productionComputedValues(job, manualMilestones = new Map()) {
   const values = {};
+  if (Number(job.subjects || 0) > 0) values.schoolData = 'done';
   if (job.onsiteSetupAt) values.onsiteSetup = 'done';
   if (Number(job.endOfDays || 0) > 0) values.mergeData = productionStatusValue(job.latestEndOfDayAt);
   if (job.adminDoneAt) values.adminDone = productionStatusValue(job.adminDoneAt);
@@ -1894,18 +2062,148 @@ function productionComputedValues(job) {
   if (Number(job.onlineOrders || 0) > 0) values.onlineOrders = productionStatusValue(job.latestOnlineOrderAt);
   if (Number(job.orders || 0) > 0 && Number(job.renderedOrders || 0) >= Number(job.orders || 0)) {
     values.render = productionStatusValue(job.latestRenderAt) || 'done';
+  } else if (Number(job.renderedOrders || 0) > 0) {
+    values.render = `${Number(job.renderedOrders || 0)}/${Number(job.orders || 0) || '?'} rendered`;
   }
+  values.delivery = productionManualMilestoneValue(manualMilestones.get('delivery'));
+  values.notes = optionalText(manualMilestones.get('notes')?.notes, 500) || '';
+  values.lastSync = shortSheetDate(new Date());
   return values;
 }
 
-const PRODUCTION_SYNC_COLUMNS = [
-  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
-  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
-  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
-  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
-  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
-  { key: 'render', label: 'RENDER', headers: ['RENDER'] }
-];
+function productionMilestoneStatus(job, key, values, manualMilestones = new Map()) {
+  const manual = manualMilestones.get(key);
+  if (manual) {
+    return {
+      key,
+      status: manual.status || 'not_started',
+      value: productionManualMilestoneValue(manual),
+      source: manual.source || 'manual',
+      completedAt: manual.completedAt || null,
+      notes: manual.notes || ''
+    };
+  }
+  const value = values[key] || '';
+  return {
+    key,
+    status: value ? 'done' : 'not_started',
+    value,
+    source: 'computed',
+    completedAt: null,
+    notes: ''
+  };
+}
+
+async function getProductionStatusDashboard() {
+  const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
+  const rows = jobs.map((job) => {
+    const manualMilestones = manualByJob.get(Number(job.id)) || new Map();
+    const computed = productionComputedValues(job, manualMilestones);
+    const milestones = PRODUCTION_MILESTONES.map((milestone) => ({
+      ...milestone,
+      ...productionMilestoneStatus(job, milestone.key, computed, manualMilestones)
+    }));
+    const completed = milestones.filter((milestone) => milestone.status === 'done').length;
+    return {
+      jobId: job.id,
+      schoolName: job.clientName || job.trecsName || '',
+      trecsName: job.trecsName || '',
+      jobName: job.jobName || '',
+      jobType: job.jobType || '',
+      subjects: Number(job.subjects || 0),
+      photographed: Number(job.photographed || 0),
+      orders: Number(job.orders || 0),
+      milestones,
+      completedMilestones: completed,
+      totalMilestones: milestones.length,
+      computedValues: computed
+    };
+  });
+  return {
+    rows,
+    milestones: PRODUCTION_MILESTONES,
+    totals: {
+      jobs: rows.length,
+      completeJobs: rows.filter((row) => row.completedMilestones === row.totalMilestones).length,
+      milestones: rows.reduce((sum, row) => sum + row.totalMilestones, 0),
+      completedMilestones: rows.reduce((sum, row) => sum + row.completedMilestones, 0)
+    }
+  };
+}
+
+async function saveProductionMilestone(_event, input = {}) {
+  const jobId = Number(input.jobId);
+  const milestoneKey = optionalText(input.milestoneKey, 80);
+  const status = optionalText(input.status, 40) || 'not_started';
+  if (!Number.isFinite(jobId) || jobId < 1) throw new Error('Choose a production job first');
+  if (!PRODUCTION_MILESTONES.some((milestone) => milestone.key === milestoneKey)) throw new Error('Unknown production milestone');
+  if (!PRODUCTION_MILESTONE_STATUS.has(status)) throw new Error('Unknown production status');
+  const completedAt = status === 'done'
+    ? (optionalText(input.completedAt, 80) || new Date().toISOString())
+    : null;
+  const completedBy = optionalText(input.completedBy, 120);
+  const notes = optionalText(input.notes, 1000);
+  await writeSql((database) => {
+    database.run(`
+      INSERT INTO job_milestones (job_id, milestone_key, status, completed_at, completed_by, source, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(job_id, milestone_key) DO UPDATE SET
+        status = excluded.status,
+        completed_at = excluded.completed_at,
+        completed_by = excluded.completed_by,
+        source = 'manual',
+        notes = excluded.notes,
+        updated_at = CURRENT_TIMESTAMP;
+    `, [jobId, milestoneKey, status, completedAt, completedBy, notes]);
+  });
+  return getProductionStatusDashboard();
+}
+
+async function buildProductionStatusSheet(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  if (!settings.credentialsPath || !settings.spreadsheetId || !settings.sheetName) {
+    throw new Error('Production sync needs credentials, spreadsheet ID, and sheet tab');
+  }
+  const dashboard = await getProductionStatusDashboard();
+  const headers = PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => column.label);
+  const rows = dashboard.rows.map((row) => {
+    const values = row.computedValues || {};
+    return PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => {
+      if (column.key === 'schoolName') return row.schoolName;
+      if (column.key === 'jobType') return row.jobType;
+      if (column.key === 'jobName') return row.jobName;
+      if (column.key === 'subjects') return row.subjects;
+      if (column.key === 'photographed') return row.photographed;
+      if (column.key === 'orders') return row.orders;
+      return values[column.key] || '';
+    });
+  });
+  const lastColumn = spreadsheetColumnName(headers.length - 1);
+  const titleRow = Array(headers.length).fill('');
+  titleRow[0] = 'TRECS Production Status';
+  const blankRows = Math.max(0, settings.headerRow - 2);
+  const dataBlankRows = Math.max(0, settings.firstDataRow - settings.headerRow - 1);
+  const values = [
+    titleRow,
+    ...Array.from({ length: blankRows }, () => Array(headers.length).fill('')),
+    headers,
+    ...Array.from({ length: dataBlankRows }, () => Array(headers.length).fill('')),
+    ...rows
+  ];
+  while (values.length < 500) values.push(Array(headers.length).fill(''));
+  const response = await googleSheetBatchUpdate(settings, [{
+    range: `A1:${lastColumn}${values.length}`,
+    values
+  }]);
+  return {
+    settings,
+    serviceAccountEmail: response.serviceAccountEmail,
+    updatedCells: Number(response.totalUpdatedCells || 0),
+    rows: rows.length,
+    columns: headers.length
+  };
+}
 
 async function previewProductionStatusSync(_event, input = {}) {
   const settings = normalizeProductionSyncSettings(input);
@@ -1922,6 +2220,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     columnIndexes[column.key] = productionHeaderIndex(headers, column.headers);
   });
   const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
   const jobsByName = new Map();
   jobs.forEach((job) => {
     const keys = [job.clientName, job.trecsName].map(productionJobNameKey).filter(Boolean);
@@ -1946,7 +2245,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     const job = candidates.find((candidate) => sheetJobType && sheetJobType.includes(String(candidate.jobType || '').toLowerCase()))
       || candidates.find((candidate) => /fall/i.test(candidate.jobName || ''))
       || candidates[0];
-    const computed = productionComputedValues(job);
+    const computed = productionComputedValues(job, manualByJob.get(Number(job.id)) || new Map());
     const rowUpdates = [];
     PRODUCTION_SYNC_COLUMNS.forEach((column) => {
       const columnIndex = columnIndexes[column.key];
@@ -2509,6 +2808,33 @@ async function buildEndOfDayPreview(jobId) {
         rawPath: metadata.rawPath || localRow.cr3_path || null
       };
     });
+    const wrongReferenceMoves = localCaptureImageIds.length
+      ? rowsFromDatabase(sourceDatabase, `
+          SELECT
+            cia.id,
+            cia.image_asset_id AS imageAssetId,
+            ia.filename,
+            cia.source_subject_id AS sourceSubjectId,
+            source.legacy_ref_num AS sourceRef,
+            COALESCE(source.display_name, TRIM(COALESCE(source.first_name, '') || ' ' || COALESCE(source.last_name, ''))) AS sourceName,
+            cia.target_subject_id AS targetSubjectId,
+            target.legacy_ref_num AS targetRef,
+            COALESCE(target.display_name, TRIM(COALESCE(target.first_name, '') || ' ' || COALESCE(target.last_name, ''))) AS targetName,
+            cia.notes,
+            cia.photographer_name AS photographerName,
+            cia.workstation_name AS workstationName,
+            cia.created_at AS movedAt
+          FROM capture_image_actions cia
+          JOIN image_assets ia ON ia.id = cia.image_asset_id
+          LEFT JOIN subjects source ON source.id = cia.source_subject_id
+          LEFT JOIN subjects target ON target.id = cia.target_subject_id
+          WHERE cia.job_id = ${jobId}
+            AND cia.action_type = 'move'
+            AND cia.reason = 'wrong_student'
+            AND cia.image_asset_id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})
+          ORDER BY cia.created_at, cia.id;
+        `)
+      : [];
 
     const baselinePath = endOfDayBaselinePath(job.rootPath);
     let baselineRows = [];
@@ -2544,11 +2870,13 @@ async function buildEndOfDayPreview(jobId) {
         capturedImages: capturedImages.length,
         capturedRawFiles: capturedImages.filter((image) => image.rawPath).length,
         localCaptureEvents: localCapture.rows.length,
+        wrongReferenceMoves: wrongReferenceMoves.length,
         newSubjects: subjectChanges.newSubjects.length,
         editedSubjects: subjectChanges.editedSubjects.length,
         deletedSubjects: subjectChanges.deletedSubjects.length
       },
       capturedImages,
+      wrongReferenceMoves,
       localCaptureEvents: localCapture.rows,
       subjectChanges
     };
@@ -2579,6 +2907,9 @@ function movePackageFile(sourcePathValue, destinationFolder, fallbackName = null
 
 function endOfDayPackageDisplayName(preview, createdAt) {
   const timestamp = endOfDayTimestampForFolder(createdAt);
+  const school = preview.job && (preview.job.trecsName || preview.job.clientName || preview.job.name)
+    ? preview.job.trecsName || preview.job.clientName || preview.job.name
+    : 'School';
   const workstation = (preview.workstationNames && preview.workstationNames.length === 1)
     ? preview.workstationNames[0]
     : preview.workstationNames && preview.workstationNames.length > 1
@@ -2589,7 +2920,9 @@ function endOfDayPackageDisplayName(preview, createdAt) {
     : preview.photographerNames && preview.photographerNames.length > 1
       ? 'Multiple Photographers'
       : process.env.USERNAME || os.userInfo().username || 'Photographer';
-  return safeFolderName(`EOD - ${timestamp} - ${workstation} - ${photographer}`);
+  return safeFolderName(
+    `EOD-${safeFileToken(school)}_${timestamp}_${safeFileToken(workstation)}_${safeFileToken(photographer)}`
+  );
 }
 
 function clearPackagedCaptureLinks(database, jobId, copiedImages) {
@@ -2729,7 +3062,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const packagePath = uniquePath(path.join(projectRoot, 'exports', 'end-of-day'), packageName);
   const databaseFolder = path.join(packagePath, 'Database');
   const jpgFolder = path.join(packagePath, 'JPG');
-  const rawFolder = path.join(packagePath, 'CR3');
+  const rawFolder = path.join(packagePath, 'RAW');
   fs.mkdirSync(databaseFolder, { recursive: true });
   fs.mkdirSync(jpgFolder, { recursive: true });
   fs.mkdirSync(rawFolder, { recursive: true });
@@ -2814,6 +3147,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     job: preview.job,
     counts: adjustedCounts,
     copiedImages,
+    wrongReferenceMoves: preview.wrongReferenceMoves || [],
     subjectChanges,
     reviewAdjustments: adjustments || {},
     paths: {
@@ -2821,7 +3155,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
       onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
       images: 'JPG',
-      rawImages: 'CR3'
+      rawImages: 'RAW'
     }
   };
 
@@ -2876,12 +3210,70 @@ function jobLockExpirySql() {
   return `datetime('now', '+${JOB_LOCK_TTL_SECONDS} seconds')`;
 }
 
+function localProcessIsRunning(pidValue) {
+  const pid = Number(pidValue);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  if (pid === process.pid) {
+    return true;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but this user cannot signal it.
+    return error && error.code === 'EPERM';
+  }
+}
+
+function expireAbandonedLocalJobSessions(database, jobId) {
+  const localWorkstation = systemInfo().computerName.trim().toLowerCase();
+  if (!localWorkstation) {
+    return 0;
+  }
+
+  const candidates = rowsFromDatabase(database, `
+    SELECT id, workstation_name AS workstationName, metadata_json AS metadataJson
+    FROM job_sessions
+    WHERE job_id = ${jobId}
+      AND session_status = 'open'
+      AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)};
+  `);
+  let expired = 0;
+  candidates.forEach((candidate) => {
+    if (String(candidate.workstationName || '').trim().toLowerCase() !== localWorkstation) {
+      return;
+    }
+    let metadata;
+    try {
+      metadata = JSON.parse(candidate.metadataJson || '{}');
+    } catch (_error) {
+      return;
+    }
+    // A different session cannot still own this process's PID. Windows may
+    // reuse a PID after the previous TRECS process exits.
+    const processIsRunning = Number(metadata.pid) === process.pid
+      ? false
+      : localProcessIsRunning(metadata.pid);
+    if (processIsRunning !== false) {
+      return;
+    }
+    database.run(`UPDATE job_sessions
+      SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
+      WHERE id = ${Number(candidate.id)} AND session_status = 'open';`);
+    expired += database.getRowsModified();
+  });
+  return expired;
+}
+
 async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
   const jobId = numericId(jobIdValue);
   const scope = ['job_write', 'batch_render'].includes(String(scopeValue)) ? String(scopeValue) : 'job_write';
   return writeSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP
       WHERE session_status = 'open' AND (expires_at IS NULL OR expires_at <= CURRENT_TIMESTAMP);`);
+    expireAbandonedLocalJobSessions(database, jobId);
     const job = rowsFromDatabase(database, `SELECT j.id, j.name, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId} LIMIT 1;`)[0];
     if (!job) throw new Error('Job not found');
     const conflict = rowsFromDatabase(database, `
@@ -3123,6 +3515,38 @@ function normalizeProductInput(input = {}) {
   };
 }
 
+function ensureEventPackageProducts(database) {
+  let changed = false;
+  const products = [
+    ['Event 5x7', 'event_item', '5x7', { event_render: '5x7', description: 'Event render card, separate from regular portrait units' }],
+    ['Event 4 Wallets', 'event_item', 'wallet', { event_render: 'wallets', description: 'Event render card with four wallets' }],
+    ['Event Digital Download', 'event_item', null, { event_render: 'digital_download', description: 'Event render card with digital download QR code' }]
+  ];
+  products.forEach(([name, category, size, metadata]) => {
+    const existing = rowsFromDatabase(database, `SELECT category, size, requires_image AS requiresImage, metadata_json AS metadataJson FROM products WHERE name = '${sqlQuote(name)}' LIMIT 1;`)[0];
+    const metadataJson = JSON.stringify(metadata);
+    if (existing
+      && existing.category === category
+      && String(existing.size || '') === String(size || '')
+      && Number(existing.requiresImage || 0) === 1
+      && String(existing.metadataJson || '') === metadataJson) {
+      return;
+    }
+    database.run(`
+      INSERT INTO products (name, category, size, requires_image, metadata_json, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(name) DO UPDATE SET
+        category = excluded.category,
+        size = excluded.size,
+        requires_image = excluded.requires_image,
+        metadata_json = excluded.metadata_json,
+        updated_at = datetime('now');
+    `, [name, category, size, metadataJson]);
+    changed = true;
+  });
+  return changed;
+}
+
 async function createProduct(_event, input = {}) {
   const normalized = normalizeProductInput(input);
   const productId = normalized.id;
@@ -3276,6 +3700,7 @@ async function seedDefaultProducts() {
       database.run(`INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES (?, 'image_prep', NULL, 1, ?);`,
         [name, JSON.stringify({ image_prep_folder: folder })]);
     });
+    ensureEventPackageProducts(database);
     const after = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
     return { seedPath, productCount: Number(after), added: Math.max(0, Number(after) - Number(before)) };
   });
@@ -3283,6 +3708,7 @@ async function seedDefaultProducts() {
 
 function productRenderSupport(product) {
   const category = String(product.category || '');
+  if (category === 'event_item') return 'event_item';
   if (category === 'image_prep') return 'image_prep';
   if (category === 'digital') return 'digital_download';
   if (category === 'specialty' || isPhotoshopHandoffProduct(product)) return 'photoshop_handoff';
@@ -4074,16 +4500,24 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
            j.package_plan_id AS packagePlanId, COALESCE(pp.name, '') AS packagePlan,
            COUNT(DISTINCT o.id) AS orders,
            COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' THEN o.id END) AS paidOrders,
-           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND s.primary_image_asset_id IS NOT NULL THEN o.id END) AS readyOrders
+           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND (s.primary_image_asset_id IS NOT NULL OR oi.image_asset_id IS NOT NULL) THEN o.id END) AS readyOrders,
+           COUNT(DISTINCT ee.id) AS eventImages
     FROM jobs j
     JOIN clients c ON c.id = j.client_id
     LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
     LEFT JOIN orders o ON o.job_id = j.id
     LEFT JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.event_job_id = j.id
     GROUP BY j.id
     ORDER BY c.display_name, j.name;
   `);
-  const jobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.readyOrders) > 0)?.id || jobs[0]?.id || null);
+  const jobId = jobIdValue
+    ? numericId(jobIdValue)
+    : (jobs.find((job) => Number(job.readyOrders) > 0 && !['event', 'qr_event'].includes(String(job.type || '').toLowerCase()))?.id
+      || jobs.find((job) => Number(job.readyOrders) > 0)?.id
+      || jobs[0]?.id
+      || null);
   if (!jobId) return { jobs, selectedJobId: null, filters: { grades: [], homerooms: [], orders: [] } };
   const filters = {
     grades: (await querySql(`SELECT DISTINCT COALESCE(s.grade, '') AS value FROM subjects s JOIN orders o ON o.subject_id = s.id WHERE o.job_id = ${jobId} AND o.paid_status = 'paid' ORDER BY value;`)).map((row) => row.value).filter(Boolean),
@@ -4092,7 +4526,7 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
       SELECT o.id, s.legacy_ref_num AS ref,
              COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName,
              GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
-             CASE WHEN s.primary_image_asset_id IS NULL THEN 0 ELSE 1 END AS hasPhoto
+             CASE WHEN s.primary_image_asset_id IS NULL AND MAX(oi.image_asset_id) IS NULL THEN 0 ELSE 1 END AS hasPhoto
       FROM orders o JOIN subjects s ON s.id = o.subject_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
       WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
@@ -4102,8 +4536,8 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
   return { jobs, selectedJobId: jobId, filters };
 }
 
-async function chooseUnitRenderOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseUnitRenderOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -4322,6 +4756,372 @@ function unitRenderOrderWhereClause(jobId, source, sourceValue) {
   if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
   if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
   return filters.join(' AND ');
+}
+
+function eventUnitRenderWhereClause(jobId, source, sourceValue) {
+  const filters = [`o.job_id = ${jobId}`, `o.paid_status = 'paid'`];
+  if (source === 'grade') filters.push(`s.grade = '${sqlQuote(sourceValue)}'`);
+  if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
+  if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
+  return filters.join(' AND ');
+}
+
+function eventUnitSortValue(order, sortBy) {
+  if (sortBy === 'ref') return `${order.ref || ''}_${order.lastName || ''}_${order.firstName || ''}`;
+  if (sortBy === 'homeroom') return `${order.homeroom || 'No Homeroom'}_${order.lastName || ''}_${order.firstName || ''}_${order.imageNumber || ''}`;
+  return `${String(order.imageNumber || '').padStart(12, '0')}_${order.lastName || ''}_${order.firstName || ''}`;
+}
+
+function eventProductKind(item) {
+  const metadata = parseProductMetadata(item.metadataJson);
+  const text = String(item.productName || item.rawValue || item.packageCodeName || item.packageCode || '').toLowerCase();
+  const category = String(item.category || '').toLowerCase();
+  if (category === 'event_item') {
+    const eventRender = String(metadata.event_render || '').toLowerCase();
+    if (eventRender === 'digital_download') return 'digital';
+    if (eventRender === 'wallets') return 'wallets';
+    if (eventRender === '5x7') return '5x7';
+  }
+  if (category === 'event_item' && /download/.test(text)) return 'digital';
+  if (category === 'event_item' && /wallet/.test(text)) return 'wallets';
+  if (category === 'event_item' && /5\s*x\s*7|5x7/.test(text)) return '5x7';
+  if (category === 'digital' || /digital|download|zipfile|zip\s*file/.test(text)) return 'digital';
+  if (/wallet/.test(text)) return 'wallets';
+  if (/5\s*x\s*7|5x7/.test(text)) return '5x7';
+  return '';
+}
+
+function numericOrderCodeCount(order) {
+  return String(order.packageCodes || '')
+    .split(/[.,\s]+/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .reduce((total, value) => total + value, 0);
+}
+
+function eventCardsForOrder(order, items, mode) {
+  const cards = [];
+  const count = numericOrderCodeCount(order);
+  if (mode === 'count_5x7') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: '5x7', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  if (mode === 'count_wallets') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: 'wallets', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  items.forEach((item) => {
+    const kind = eventProductKind(item);
+    if (!kind) return;
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    for (let copy = 0; copy < quantity; copy += 1) {
+      cards.push({ kind, label: item.productName || item.rawValue || item.packageCodeName || item.packageCode || kind });
+    }
+  });
+  return cards;
+}
+
+function eventOverlaySources(jobRootPath) {
+  const templateFolder = path.join(resolveProjectPath(jobRootPath) || projectRoot, 'Templates');
+  return {
+    horizontal: imageDataUrlFromPath(path.join(templateFolder, 'Horizontal.png')),
+    vertical: imageDataUrlFromPath(path.join(templateFolder, 'Vertical.png'))
+  };
+}
+
+function eventDownloadUrl(order) {
+  return `https://download.islandphotography.net/EVENT/${encodeURIComponent(order.jobName || 'EVENT')}/${encodeURIComponent(path.basename(order.imagePath || order.filename || 'image.jpg'))}`;
+}
+
+async function rasterizeEventCard(webContents, imageSource, overlaySources, cardData) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event render image.'));
+      image.src = source;
+    });
+    const drawCover = (context, image, x, y, width, height) => {
+      const scale = Math.max(width / image.width, height / image.height);
+      const scaledWidth = image.width * scale;
+      const scaledHeight = image.height * scale;
+      context.drawImage(image, x + (width - scaledWidth) / 2, y + (height - scaledHeight) / 2, scaledWidth, scaledHeight);
+    };
+    const rotatedImage = (image) => {
+      const temp = document.createElement('canvas');
+      temp.width = image.naturalHeight;
+      temp.height = image.naturalWidth;
+      const tempContext = temp.getContext('2d');
+      tempContext.translate(0, temp.height);
+      tempContext.rotate(-Math.PI / 2);
+      tempContext.drawImage(image, 0, 0);
+      return temp;
+    };
+    Promise.all([
+      load(${JSON.stringify(imageSource)}),
+      load(${JSON.stringify(overlaySources.horizontal || null)}),
+      load(${JSON.stringify(overlaySources.vertical || null)}),
+      load(${JSON.stringify(cardData.qrSource || null)})
+    ]).then(([sourceImage, horizontalOverlay, verticalOverlay, qrImage]) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1650;
+        canvas.height = 2400;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (sourceImage) {
+          const sourceWasHorizontal = sourceImage.naturalWidth > sourceImage.naturalHeight;
+          const photoImage = sourceWasHorizontal ? rotatedImage(sourceImage) : sourceImage;
+          if (${JSON.stringify(cardData.kind)} === 'wallets') {
+            const walletSlots = [
+              [38, 38, 750, 1087],
+              [826, 38, 750, 1087],
+              [38, 1126, 750, 1087],
+              [826, 1126, 750, 1087]
+            ];
+            walletSlots.forEach(([x, y, width, height]) => {
+              context.save();
+              context.beginPath();
+              context.rect(x, y, width, height);
+              context.clip();
+              drawCover(context, photoImage, x, y, width, height);
+              context.restore();
+            });
+          } else {
+            context.save();
+            context.beginPath();
+            context.rect(0, 0, 1650, 2250);
+            context.clip();
+            if (photoImage.width === 1650 && photoImage.height === 2250) {
+              context.drawImage(photoImage, 0, 0);
+            } else {
+              drawCover(context, photoImage, 75, 0, 1500, 2250);
+              const overlay = sourceWasHorizontal ? horizontalOverlay : verticalOverlay;
+              if (overlay) context.drawImage(overlay, 0, 0, 1650, 2250);
+            }
+            context.restore();
+          }
+        }
+        context.fillStyle = '#fff';
+        context.fillRect(0, 2175, 1650, 225);
+        context.fillStyle = '#111';
+        context.textBaseline = 'alphabetic';
+        context.font = '40px Arial';
+        context.textAlign = 'left';
+        context.fillText(${JSON.stringify(`${cardData.ref || ''}: ${cardData.imageNumber || ''}`)} + '   Count: ' + ${JSON.stringify(cardData.label || '')}, 150, 2225);
+        context.fillText(${JSON.stringify(`${cardData.homeroom || ''}: ${cardData.lastName || ''}, ${cardData.firstName || ''}`)}, 150, 2270);
+        context.font = '30px Arial';
+        context.fillText(${JSON.stringify(cardData.sequenceLabel || '')}, 60, 2380);
+        context.fillText(${JSON.stringify(cardData.studioLine || '')}, 150, 2305);
+        if (qrImage) {
+          context.fillStyle = '#fff';
+          context.fillRect(1140, 2180, 230, 210);
+          context.drawImage(qrImage, 1150, 2188, 190, 190);
+        }
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+async function rasterizeEventStackSheet(webContents, cardSources, pageNumber, totalPages) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event stack card.'));
+      image.src = source;
+    });
+    Promise.all(${JSON.stringify(cardSources)}.map(load)).then((images) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 3300;
+        canvas.height = 5100;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        const slots = [[0, 150], [1650, 150], [0, 2550], [1650, 2550]];
+        images.forEach((image, index) => {
+          if (image) context.drawImage(image, slots[index][0], slots[index][1], 1650, 2400);
+        });
+        context.fillStyle = '#111';
+        context.font = '38px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'alphabetic';
+        context.fillText('Page ' + ${Number(pageNumber)} + ' of ' + ${Number(totalPages)}, 1650, 5050);
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+function pdfEscape(value) {
+  return String(value || '').replace(/[\\()]/g, (character) => `\\${character}`);
+}
+
+function writeJpegImagesPdf(outputPath, imagePaths, pageWidthPoints = 792, pageHeightPoints = 1224) {
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'binary'));
+    return objects.length;
+  };
+  const catalogId = addObject('');
+  const pagesId = addObject('');
+  const pageIds = [];
+  imagePaths.forEach((imagePath, index) => {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageId = addObject(Buffer.concat([
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width 3300 /Height 5100 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imageBuffer.length} >>\nstream\n`, 'binary'),
+      imageBuffer,
+      Buffer.from('\nendstream', 'binary')
+    ]));
+    const content = `q\n${pageWidthPoints} 0 0 ${pageHeightPoints} 0 0 cm\n/Im${index + 1} Do\nQ`;
+    const contentId = addObject(`<< /Length ${Buffer.byteLength(content, 'binary')} >>\nstream\n${content}\nendstream`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidthPoints} ${pageHeightPoints}] /Resources << /XObject << /Im${index + 1} ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+    pageIds.push(pageId);
+  });
+  objects[catalogId - 1] = Buffer.from(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`, 'binary');
+  objects[pagesId - 1] = Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`, 'binary');
+  const chunks = [Buffer.from(`%PDF-1.4\n% TRECS ${pdfEscape(path.basename(outputPath))}\n`, 'binary')];
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets[index + 1] = Buffer.concat(chunks).length;
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`, 'binary'), object, Buffer.from('\nendobj\n', 'binary'));
+  });
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = [`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`];
+  for (let index = 1; index <= objects.length; index += 1) {
+    xref.push(`${String(offsets[index]).padStart(10, '0')} 00000 n \n`);
+  }
+  xref.push(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+  chunks.push(Buffer.from(xref.join(''), 'binary'));
+  fs.writeFileSync(outputPath, Buffer.concat(chunks));
+}
+
+async function runEventUnitRender(event, input, jobRow) {
+  const jobId = numericId(input.jobId);
+  const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
+  const source = String(input.source || 'all');
+  const sourceValue = optionalText(input.sourceValue, 255);
+  const sortBy = String(input.sortBy || 'imageNumber');
+  const eventPlanMode = String(input.eventPlanMode || 'package_plan');
+  const orders = await querySql(`
+    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId,
+           s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+           c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
+           j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
+           GROUP_CONCAT(DISTINCT oi.package_code) AS packageCodes,
+           ee.image_number AS imageNumber, ia.filename,
+           ia.current_path AS imagePath
+    FROM orders o
+    JOIN jobs j ON j.id = o.job_id
+    JOIN clients c ON c.id = j.client_id
+    JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_subject_links esl ON esl.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.id = esl.event_entry_id
+    LEFT JOIN image_assets ia ON ia.id = COALESCE(oi.image_asset_id, ee.event_image_asset_id)
+    WHERE ${eventUnitRenderWhereClause(jobId, source, sourceValue)}
+    GROUP BY o.id
+    ORDER BY ee.image_number COLLATE NOCASE, s.last_name, s.first_name, o.id;
+  `);
+  const selectedOrders = orders.sort((a, b) => eventUnitSortValue(a, sortBy).localeCompare(eventUnitSortValue(b, sortBy), undefined, { numeric: true, sensitivity: 'base' }));
+  const schoolName = selectedOrders[0]?.clientName || jobRow.clientName || 'School';
+  const runDate = new Date().toISOString().slice(0, 10);
+  const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`), 'Event Render');
+  const cardFolder = path.join(outputFolder, 'EventCards');
+  const sheetFolder = path.join(outputFolder, 'StackSheets');
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const itemRows = selectedOrders.length ? await querySql(`
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue,
+           p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id
+    LEFT JOIN products p ON p.id = pci.product_id
+    WHERE oi.order_id IN (${selectedOrders.map((order) => Number(order.id)).join(',')})
+    ORDER BY oi.order_id, oi.id, pci.sort_order;
+  `) : [];
+  const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []]));
+  itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
+  const overlaySources = eventOverlaySources(selectedOrders[0]?.rootPath || jobRow.rootPath);
+  const result = { eventRender: true, jobId, outputFolder, orders: selectedOrders.length, cards: 0, sheetPages: 0, pdfPath: '', missingPhotos: [], unsupportedItems: [], files: [] };
+  const cardSources = [];
+  const cardPaths = [];
+  let cardSequence = 1;
+  for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    const order = selectedOrders[orderIndex];
+    event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `Event ${order.imageNumber || order.ref || order.id}` });
+    const items = itemsByOrder.get(Number(order.id)) || [];
+    const cards = eventCardsForOrder(order, items, eventPlanMode);
+    if (!cards.length) {
+      result.unsupportedItems.push({ orderId: order.id, ref: order.ref, item: order.packageCodes || 'No event product mapping' });
+      continue;
+    }
+    const imageSource = imageDataUrlFromPath(order.imagePath);
+    if (!imageSource) {
+      result.missingPhotos.push({ orderId: order.id, ref: order.ref, imageNumber: order.imageNumber });
+      continue;
+    }
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
+      const card = cards[cardIndex];
+      const qrPath = card.kind === 'digital' ? path.join(os.tmpdir(), `trecs-event-qr-${APP_SESSION_ID}-${Date.now()}-${order.id}-${cardIndex}.png`) : '';
+      if (qrPath) await createQrCodePng(eventDownloadUrl(order), qrPath, 220);
+      const dataUrl = await rasterizeEventCard(event.sender, imageSource, overlaySources, {
+        ...card,
+        ref: order.ref,
+        imageNumber: order.imageNumber || path.basename(order.imagePath || ''),
+        firstName: order.firstName,
+        lastName: order.lastName,
+        homeroom: order.homeroom,
+        sequenceLabel: String(cardSequence),
+        studioLine: `Island Photography ${new Date().getFullYear()}-${new Date().getFullYear() + 1}: 559-456-1400`,
+        qrSource: qrPath ? imageDataUrlFromPath(qrPath) : ''
+      });
+      if (qrPath) fs.rmSync(qrPath, { force: true });
+      const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+      const fileName = `${String(cardSequence).padStart(5, '0')}_${safeFolderName(eventUnitSortValue(order, sortBy))}_${card.kind === 'wallets' ? '4Wallets' : card.kind === 'digital' ? 'DigitalDownload' : '5x7'}.jpg`;
+      if (input.eventIndividualCards !== false) {
+        fs.mkdirSync(cardFolder, { recursive: true });
+        const cardPath = path.join(cardFolder, fileName);
+        fs.writeFileSync(cardPath, jpeg);
+        cardPaths.push(cardPath);
+        result.files.push(cardPath);
+      }
+      cardSources.push(dataUrl);
+      result.cards += 1;
+      cardSequence += 1;
+    }
+  }
+  const sheetPaths = [];
+  if ((input.eventStackSheets !== false || input.eventPdf !== false) && cardSources.length) {
+    fs.mkdirSync(sheetFolder, { recursive: true });
+    const pages = Math.ceil(cardSources.length / 4);
+    for (let pageIndex = 0; pageIndex < pages; pageIndex += 1) {
+      const pageCards = [0, 1, 2, 3].map((slotIndex) => cardSources[slotIndex * pages + pageIndex] || null);
+      const dataUrl = await rasterizeEventStackSheet(event.sender, pageCards, pageIndex + 1, pages);
+      const sheetPath = path.join(sheetFolder, `${safeFolderName(schoolName)}_EventStack_${String(pageIndex + 1).padStart(4, '0')}.jpg`);
+      fs.writeFileSync(sheetPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+      sheetPaths.push(sheetPath);
+      result.sheetPages += 1;
+      result.files.push(sheetPath);
+    }
+  }
+  if (input.eventPdf !== false && sheetPaths.length) {
+    const pdfPath = path.join(outputFolder, `${safeFolderName(schoolName)}_Event_StackCut.pdf`);
+    writeJpegImagesPdf(pdfPath, sheetPaths);
+    result.pdfPath = pdfPath;
+    result.files.push(pdfPath);
+  }
+  fs.writeFileSync(path.join(outputFolder, 'event-unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  event.sender.send('unit-render:progress', { current: selectedOrders.length, total: selectedOrders.length, message: 'Event render complete' });
+  return result;
 }
 
 async function imagePrepExport(event, input = {}) {
@@ -4601,6 +5401,16 @@ async function runUnitRender(event, input = {}) {
   if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
+  const selectedJobRows = await querySql(`
+    SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    WHERE j.id = ${jobId}
+    LIMIT 1;
+  `);
+  const selectedJob = selectedJobRows[0] || null;
+  if (['event', 'qr_event'].includes(String(selectedJob?.type || '').toLowerCase())) {
+    return runEventUnitRender(event, input, selectedJob);
+  }
   const orders = await querySql(`
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
@@ -5242,7 +6052,6 @@ async function searchEventFallStudents(_event, input = {}) {
 async function saveEventMatch(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const entryId = numericId(input.entryId); const fallSubjectId = numericId(input.fallSubjectId);
   const orderText = optionalText(input.orderCodes, 500); const paidStatus = normalizePaidStatus(input.paidStatus || 'unknown'); const notes = optionalText(input.notes, 2000);
-  if (!input.confirmed) throw new Error('Confirm that the fall thumbnail matches the student in the event photo.');
   const result = await writeSql((database) => {
     const row = rowsFromDatabase(database, `SELECT ee.id, ee.event_image_asset_id AS eventImageId, ee.fall_job_id AS fallJobId, j.package_plan_id AS packagePlanId,
       s.id AS subjectId FROM event_entries ee JOIN jobs j ON j.id = ee.event_job_id JOIN subjects s ON s.id = ${fallSubjectId}
@@ -5726,8 +6535,8 @@ async function previewComposite(event, input = {}) {
   return { dataUrl, width: previewWidth, height: previewHeight, fullWidth: 3000, fullHeight: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
 }
 
-async function chooseCompositeOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseCompositeOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -5932,6 +6741,9 @@ ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredent
 ipcMain.handle('production-sync:preview', previewProductionStatusSync);
 ipcMain.handle('production-sync:push', pushProductionStatusSync);
 ipcMain.handle('production-sync:test', testProductionStatusSync);
+ipcMain.handle('production-sync:dashboard', getProductionStatusDashboard);
+ipcMain.handle('production-sync:milestone-save', saveProductionMilestone);
+ipcMain.handle('production-sync:build-sheet', buildProductionStatusSheet);
 
 async function getJobsData() {
   const jobs = await querySql(`
@@ -6284,6 +7096,17 @@ function normalizeIdCardSortMethod(value) {
     throw new Error('Invalid ID card sort method');
   }
   return sort;
+}
+
+function normalizeIdCardBackgroundOverride(value) {
+  const fileName = optionalText(value, 255) || '';
+  if (!fileName) {
+    return '';
+  }
+  if (path.basename(fileName) !== fileName || !/\.(bmp|jpe?g|png)$/i.test(fileName)) {
+    throw new Error('Invalid ID card background override');
+  }
+  return fileName;
 }
 
 function normalizeCameraCardSource(value) {
@@ -7144,6 +7967,33 @@ async function activeIdCardTemplate(templateType, preferredId = null) {
   };
 }
 
+async function activeIdCardTemplateById(templateId) {
+  const id = normalizeNullableId(templateId, 'ID card template');
+  if (!id) {
+    return null;
+  }
+  const rows = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      template_json AS templateJson
+    FROM id_card_templates
+    WHERE id = ${id}
+      AND active = 1
+    LIMIT 1;
+  `);
+  if (!rows.length) {
+    throw new Error('The selected ID card template is no longer available');
+  }
+  return {
+    id: Number(rows[0].id),
+    name: rows[0].name,
+    templateType: rows[0].templateType,
+    template: JSON.parse(rows[0].templateJson)
+  };
+}
+
 function idCardSchoolYear(value) {
   return String(value || '2025-2026')
     .replace(/^school year:\s*/i, '')
@@ -7311,11 +8161,20 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
   if (!idCardSubjects.length) {
     throw new Error('No students matched the ID card render options');
   }
+  if (options.idCardBackgroundOverride) {
+    const backgroundPath = path.join(resolveProjectPath(job.rootPath), 'ID_Templates', options.idCardBackgroundOverride);
+    if (!fs.existsSync(backgroundPath)) {
+      throw new Error('The selected ID card background is no longer available');
+    }
+  }
 
-  const [studentTemplate, staffTemplate] = await Promise.all([
+  const overrideTemplate = await activeIdCardTemplateById(options.idCardTemplateOverrideId);
+  const [defaultStudentTemplate, defaultStaffTemplate] = overrideTemplate ? [null, null] : await Promise.all([
     activeIdCardTemplate('student', job.studentIdTemplateId),
     activeIdCardTemplate('staff', job.facultyIdTemplateId).catch(async () => activeIdCardTemplate('student', job.studentIdTemplateId))
   ]);
+  const studentTemplate = overrideTemplate || defaultStudentTemplate;
+  const staffTemplate = overrideTemplate || defaultStaffTemplate;
   const timestamp = timestampForFolder(new Date());
   const studentTemplatePath = path.join(outputFolder, `id-card-student-template-${timestamp}.json`);
   const staffTemplatePath = path.join(outputFolder, `id-card-staff-template-${timestamp}.json`);
@@ -7334,7 +8193,7 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     staffTemplatePath,
     tsvPath,
     base64Arg(idCardSchoolYear(options.directorySchoolYear)),
-    '',
+    options.idCardBackgroundOverride || '',
     'false'
   ], { cwd: bundledResourceRoot });
 
@@ -7350,6 +8209,10 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     templates: {
       student: { id: studentTemplate.id, name: studentTemplate.name },
       staff: { id: staffTemplate.id, name: staffTemplate.name }
+    },
+    overrides: {
+      template: overrideTemplate ? { id: overrideTemplate.id, name: overrideTemplate.name } : null,
+      background: options.idCardBackgroundOverride || null
     },
     backgroundFolder: path.join(job.rootPath, 'ID_Templates'),
     gradeBackgrounds: {
@@ -7492,7 +8355,7 @@ function normalizeIdTemplateType(value) {
 
 async function listIdTemplates(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const { folder } = await idTemplateFolderForJob(jobId);
+  const { job, folder } = await idTemplateFolderForJob(jobId);
   const templateRows = await querySql(`
     SELECT
       id,
@@ -7523,6 +8386,8 @@ async function listIdTemplates(_event, jobIdValue) {
     .sort((first, second) => first.fileName.localeCompare(second.fileName, undefined, { sensitivity: 'base' }));
   return {
     folder: path.relative(projectRoot, folder),
+    studentIdTemplateId: job.studentIdTemplateId || null,
+    facultyIdTemplateId: job.facultyIdTemplateId || null,
     templates,
     backgrounds
   };
@@ -7784,7 +8649,7 @@ async function adminListSubjectIds(jobId, listName) {
 
 function adminItemDefinitionsForStage(stage) {
   return Array.from(ADMIN_ITEM_TYPES.entries())
-    .filter(([_type, item]) => item.stages.includes(stage))
+    .filter(([type, item]) => type !== 'id_cards' && item.stages.includes(stage))
     .map(([type, item]) => ({
       type,
       label: item.label,
@@ -8173,6 +9038,8 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     idCardReason: normalizeIdCardReason(input.idCardReason || (stage === 'makeup_day' ? 'makeup_day' : 'admin_batch')),
     idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false,
+    idCardTemplateOverrideId: normalizeNullableId(input.idCardTemplateOverrideId, 'ID card template'),
+    idCardBackgroundOverride: normalizeIdCardBackgroundOverride(input.idCardBackgroundOverride),
     cameraCardSource: normalizeCameraCardSource(input.cameraCardSource),
     cameraCardSourceValue: optionalText(input.cameraCardSourceValue, 255) || '',
     cameraCardListName: optionalText(input.cameraCardListName, 255) || '',
@@ -8233,7 +9100,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
-    await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
+    renderDetails = await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
   } else if (type === 'camera_cards') {
     const cameraListName = options.cameraCardSource === 'list'
       ? (options.cameraCardListName || options.cameraCardSourceValue)
@@ -9575,7 +10442,6 @@ async function loadOnsiteSetup(_event, input = {}) {
       const refreshedExistingJob = existingJobRows.length > 0;
       if (refreshedExistingJob) {
         clearImportedJobRows(database, sourceJob.id);
-        clearLocalCaptureDatabase(sourceJob.id);
       }
 
       let clientRows = rowsFromDatabase(database, `
@@ -9674,6 +10540,10 @@ async function loadOnsiteSetup(_event, input = {}) {
     setupDatabase.close();
   }
 
+  // Loading an onsite setup starts a fresh onsite capture state. Clear the
+  // workstation's local capture history after the main import succeeds, even
+  // when the old main job was deleted before reloading the setup.
+  clearLocalCaptureDatabase(result.id);
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
@@ -10159,6 +11029,9 @@ ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
 ipcMain.handle('job:load-onsite-setups', loadOnsiteSetups);
 ipcMain.handle('app:system-info', () => systemInfo());
 ipcMain.handle('app:focus-window', focusWindow);
+ipcMain.handle('app:confirm-image-unlink', confirmImageUnlink);
+ipcMain.handle('app:confirm-action', confirmAction);
+ipcMain.handle('app:show-message', showMessage);
 ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
 ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
@@ -10342,6 +11215,15 @@ function importRowValue(row, mapping, key) {
   return normalizeImportCell(row[Number(columnIndex)]);
 }
 
+function uppercaseImportValue(value, maxLength) {
+  const uppercaseValue = normalizeImportCell(value).toUpperCase();
+  return optionalText(uppercaseValue, maxLength);
+}
+
+function uppercaseMappedImportValue(row, mapping, key, maxLength) {
+  return uppercaseImportValue(importRowValue(row, mapping, key), maxLength);
+}
+
 function normalizedImportSubjectType(value) {
   const text = String(value || '').trim().toLowerCase();
   if (!text) {
@@ -10480,16 +11362,16 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 
     try {
       dataRows.forEach((row, index) => {
-        const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-        const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-        const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
-        const externalId = optionalText(importRowValue(row, mapping, 'externalId'), 255);
+        const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+        const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+        const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
+        const externalId = uppercaseMappedImportValue(row, mapping, 'externalId', 255);
         const grade = normalizeTrecsGrade(importRowValue(row, mapping, 'grade'));
-        const homeroom = optionalText(importRowValue(row, mapping, 'homeroom'), 100);
-        const track = optionalText(importRowValue(row, mapping, 'track'), 100);
-        const team = optionalText(importRowValue(row, mapping, 'team'), 100);
-        const field1 = optionalText(importRowValue(row, mapping, 'field1'), 255);
-        const field2 = optionalText(importRowValue(row, mapping, 'field2'), 255);
+        const homeroom = uppercaseMappedImportValue(row, mapping, 'homeroom', 100);
+        const track = uppercaseMappedImportValue(row, mapping, 'track', 100);
+        const team = uppercaseMappedImportValue(row, mapping, 'team', 100);
+        const field1 = uppercaseMappedImportValue(row, mapping, 'field1', 255);
+        const field2 = uppercaseMappedImportValue(row, mapping, 'field2', 255);
         const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
         const rawEnrollmentStatus = mapping.enrollmentStatus !== null && mapping.enrollmentStatus !== undefined && mapping.enrollmentStatus !== ''
           ? importRowValue(row, mapping, 'enrollmentStatus')
@@ -10497,8 +11379,8 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         const enrollmentStatus = rawEnrollmentStatus
           ? normalizeEnrollmentStatus(rawEnrollmentStatus)
           : 'active';
-        const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
-        const mappedRef = importRowValue(row, mapping, 'ref');
+        const notes = uppercaseMappedImportValue(row, mapping, 'notes', 5000);
+        const mappedRef = uppercaseMappedImportValue(row, mapping, 'ref', 100);
         const hasImportedData = Boolean(
           mappedRef ||
           firstName ||
@@ -10848,25 +11730,25 @@ function schoolDataImportRowsFromInput(input = {}) {
   const allRows = nonEmptySchoolDataRows(readSchoolDataRowsSync(input.filePath));
   const dataRows = input.hasHeader ? allRows.slice(1) : allRows;
   return dataRows.map((row, index) => {
-    const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-    const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-    const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
+    const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+    const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+    const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
     return {
       rowNumber: index + (input.hasHeader ? 2 : 1),
-      ref: optionalText(importRowValue(row, mapping, 'ref'), 100),
+      ref: uppercaseMappedImportValue(row, mapping, 'ref', 100),
       firstName,
       lastName,
       displayName,
-      externalId: optionalText(importRowValue(row, mapping, 'externalId'), 255),
+      externalId: uppercaseMappedImportValue(row, mapping, 'externalId', 255),
       grade: normalizeTrecsGrade(importRowValue(row, mapping, 'grade')),
-      homeroom: optionalText(importRowValue(row, mapping, 'homeroom'), 100),
-      track: optionalText(importRowValue(row, mapping, 'track'), 100),
-      team: optionalText(importRowValue(row, mapping, 'team'), 100),
-      field1: optionalText(importRowValue(row, mapping, 'field1'), 255),
-      field2: optionalText(importRowValue(row, mapping, 'field2'), 255),
+      homeroom: uppercaseMappedImportValue(row, mapping, 'homeroom', 100),
+      track: uppercaseMappedImportValue(row, mapping, 'track', 100),
+      team: uppercaseMappedImportValue(row, mapping, 'team', 100),
+      field1: uppercaseMappedImportValue(row, mapping, 'field1', 255),
+      field2: uppercaseMappedImportValue(row, mapping, 'field2', 255),
       subjectType: normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType')),
       enrollmentStatus: enrollmentStatusMapped ? normalizeEnrollmentStatus(importRowValue(row, mapping, 'enrollmentStatus')) : '',
-      notes: optionalText(importRowValue(row, mapping, 'notes'), 5000)
+      notes: uppercaseMappedImportValue(row, mapping, 'notes', 5000)
     };
   }).filter((row) => row.ref || row.firstName || row.lastName || row.displayName || row.externalId || row.grade || row.homeroom || row.field1 || row.field2);
 }
@@ -11618,18 +12500,11 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 100;
   `);
 
-  const localCapture = await readLocalCaptureRows(jobId);
-  const activeCaptureImageIds = new Set(localCapture.rows.map((row) => Number(row.image_asset_id)).filter(Boolean));
-  const activeCaptureSubjectIds = new Set(localCapture.rows.map((row) => Number(row.subject_id)).filter(Boolean));
   if (summary[0]) {
-    summary[0].activeCaptureImages = activeCaptureImageIds.size;
-    summary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    summary[0].activeCaptureEvents = localCapture.rows.length;
+    summary[0].activeCaptureEvents = Number(summary[0].activeCaptureImages || 0);
   }
   if (captureSummary[0]) {
-    captureSummary[0].activeCaptureImages = activeCaptureImageIds.size;
-    captureSummary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    captureSummary[0].activeCaptureEvents = localCapture.rows.length;
+    captureSummary[0].activeCaptureEvents = Number(captureSummary[0].activeCaptureImages || 0);
   }
 
   const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
@@ -12222,8 +13097,8 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
 async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue = 'all') {
   const jobId = numericId(jobIdValue);
   const search = normalizeEnvelopeSearch(searchValue);
-  const mode = ['all', 'name', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
-  const minimumLength = mode === 'grade' || mode === 'homeroom' ? 1 : 2;
+  const mode = ['all', 'name', 'id', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
+  const minimumLength = ['id', 'grade', 'homeroom'].includes(mode) ? 1 : 2;
   if (search.length < minimumLength) {
     return [];
   }
@@ -12235,6 +13110,8 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue
     ? `(COALESCE(s.grade, '') LIKE ${likeSql})`
     : mode === 'homeroom'
       ? `(COALESCE(s.homeroom, '') LIKE ${likeSql})`
+      : mode === 'id'
+        ? `(COALESCE(s.external_id, '') LIKE ${likeSql})`
       : mode === 'name'
         ? `(
             COALESCE(s.display_name, '') LIKE ${likeSql}
@@ -12327,10 +13204,9 @@ function latestImageInFolder(folderPath) {
 function rawPairPathForImage(imagePath) {
   const folderPath = path.dirname(imagePath);
   const base = path.basename(imagePath, path.extname(imagePath)).toLowerCase();
-  const match = fs.readdirSync(folderPath).find((name) => (
-    path.basename(name, path.extname(name)).toLowerCase() === base
-    && path.extname(name).toLowerCase() === '.cr3'
-  ));
+  const match = fs.readdirSync(folderPath)
+    .filter((name) => path.basename(name, path.extname(name)).toLowerCase() === base)
+    .find((name) => ['.cr2', '.cr3'].includes(path.extname(name).toLowerCase()));
   return match ? path.join(folderPath, match) : null;
 }
 
@@ -12370,9 +13246,8 @@ function shootStageLabel(value) {
   }[stage];
 }
 
-function latestCapturePairInFolder(folderPath, options = {}) {
+function capturePairForImage(imagePath, options = {}) {
   const fileMode = normalizeCaptureFileMode(options.fileMode);
-  const imagePath = latestImageInFolder(folderPath);
   const rawPath = fileMode === 'jpg_only' ? null : rawPairPathForImage(imagePath);
   const filename = path.basename(imagePath);
 
@@ -12405,7 +13280,7 @@ function latestCapturePairInFolder(folderPath, options = {}) {
       filename,
       fileMode,
       ready: false,
-      reason: `Waiting for CR3 pair for ${filename}`
+      reason: `Waiting for CR2 or CR3 pair for ${filename}`
     };
   }
 
@@ -12428,6 +13303,39 @@ function latestCapturePairInFolder(folderPath, options = {}) {
     ready: true,
     reason: 'Ready'
   };
+}
+
+function captureImagesInFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) {
+    throw new Error(`Hot folder not found: ${folderPath}`);
+  }
+
+  return fs.readdirSync(folderPath)
+    .flatMap((name) => {
+      const filePath = path.join(folderPath, name);
+      const extension = path.extname(filePath).toLowerCase();
+      if (!['.jpg', '.jpeg', '.png'].includes(extension)) {
+        return [];
+      }
+      try {
+        const stats = fs.statSync(filePath);
+        return stats.isFile() ? [{ path: filePath, modified: stats.mtimeMs }] : [];
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          return [];
+        }
+        throw error;
+      }
+    })
+    .sort((first, second) => first.modified - second.modified || first.path.localeCompare(second.path));
+}
+
+function latestCapturePairInFolder(folderPath, options = {}) {
+  const images = captureImagesInFolder(folderPath);
+  if (!images.length) {
+    throw new Error('No JPG/PNG capture images found in the hot folder');
+  }
+  return capturePairForImage(images[images.length - 1].path, options);
 }
 
 function envelopeDestinationName(ref, sourcePath) {
@@ -13658,7 +14566,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   const subjectId = numericId(subjectIdValue);
   const fileMode = normalizeCaptureFileMode(options.fileMode);
   const shootStage = normalizeShootStage(options.shootStage);
-  const hotFolder = resolveWorkspacePath('CaptureHotFolder');
+  const hotFolder = captureHotFolder;
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
   }
@@ -13678,6 +14586,33 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   });
 
   const webContentsId = event.sender.id;
+  const existingState = captureWatchers.get(webContentsId);
+  if (existingState
+    && existingState.jobId === jobId
+    && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
+    // Capture anything already written under the previous student before the UI
+    // changes the active subject. Each queued image keeps this subject snapshot.
+    existingState.queueAvailableFiles();
+    existingState.subjectId = subjectId;
+    existingState.fileMode = fileMode;
+    existingState.shootStage = shootStage;
+    existingState.photographerName = optionalText(options.photographerName, 255);
+    existingState.workstationName = optionalText(options.workstationName, 255);
+    existingState.captureSessionId = captureSessionId;
+    existingState.queueAvailableFiles();
+    existingState.scheduleProcessing(0);
+    return {
+      jobId,
+      subjectId,
+      hotFolder,
+      fileMode,
+      shootStage,
+      shootStageLabel: shootStageLabel(shootStage),
+      captureSessionId,
+      queuedCaptures: existingState.pendingCaptures.length
+    };
+  }
+
   closeCaptureWatcher(webContentsId);
 
   const watcherState = {
@@ -13687,107 +14622,191 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     timer: null,
     importing: false,
     lastImportAt: 0,
-    lastSourcePath: null,
     fileMode,
     shootStage,
     photographerName: optionalText(options.photographerName, 255),
     workstationName: optionalText(options.workstationName, 255),
     captureSessionId,
+    pendingCaptures: [],
+    queuedSourcePaths: new Set(),
+    queueAvailableFiles: null,
+    scheduleProcessing: null,
     watcher: null
   };
 
-  const importLatest = (quietWhenEmpty = false) => {
-    clearTimeout(watcherState.timer);
-    watcherState.timer = setTimeout(async () => {
-      if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
-        return;
-      }
-      if (Date.now() - watcherState.lastImportAt < 1200) {
-        return;
-      }
-      watcherState.importing = true;
-      try {
-        const pair = latestCapturePairInFolder(hotFolder, { fileMode: watcherState.fileMode });
-        if (!pair.ready) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: false,
-                message: pair.reason || 'Waiting for capture pair',
-                filename: pair.filename || '',
-                fileMode: watcherState.fileMode
-              }
-            });
-          }
-          importLatest();
-          return;
-        }
-        const sourcePath = pair.imagePath;
-        if (watcherState.lastSourcePath === sourcePath) {
-          return;
-        }
-        const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
-          fileMode: watcherState.fileMode,
-          shootStage: watcherState.shootStage,
-          photographerName: watcherState.photographerName,
-          workstationName: watcherState.workstationName
-        });
-        watcherState.lastSourcePath = sourcePath;
-        watcherState.lastImportAt = Date.now();
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            ...result,
-            status: {
-              ready: true,
-              message: 'Ready',
-              filename: result.image.filename,
-              fileMode: watcherState.fileMode
-            }
-          });
-        }
-      } catch (error) {
-        if (quietWhenEmpty && /No JPG\/PNG envelope scans/.test(error.message || '')) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: true,
-                message: 'Ready'
-              }
-            });
-          }
-          return;
-        }
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            error: error.message || 'Image capture import failed'
-          });
-        }
-      } finally {
-        watcherState.importing = false;
-      }
-    }, 700);
+  const sourceKey = (sourcePath) => path.resolve(sourcePath).toLowerCase();
+
+  const sendCaptureStatus = (payload) => {
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('capture:image-imported', payload);
+    }
   };
+
+  const queueAvailableFiles = () => {
+    let images = [];
+    try {
+      images = captureImagesInFolder(hotFolder);
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not read the capture hot folder' });
+      return 0;
+    }
+
+    let queued = 0;
+    images.forEach((image) => {
+      const key = sourceKey(image.path);
+      if (watcherState.queuedSourcePaths.has(key)) {
+        return;
+      }
+      watcherState.queuedSourcePaths.add(key);
+      watcherState.pendingCaptures.push({
+        sourcePath: image.path,
+        modified: image.modified,
+        jobId: watcherState.jobId,
+        subjectId: watcherState.subjectId,
+        fileMode: watcherState.fileMode,
+        shootStage: watcherState.shootStage,
+        photographerName: watcherState.photographerName,
+        workstationName: watcherState.workstationName
+      });
+      queued += 1;
+    });
+    watcherState.pendingCaptures.sort((first, second) => (
+      first.modified - second.modified || first.sourcePath.localeCompare(second.sourcePath)
+    ));
+    return queued;
+  };
+
+  const scheduleProcessing = (delay = 250) => {
+    clearTimeout(watcherState.timer);
+    watcherState.timer = setTimeout(processQueue, delay);
+  };
+
+  const processQueue = async () => {
+    if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
+      return;
+    }
+
+    queueAvailableFiles();
+    const pending = watcherState.pendingCaptures[0];
+    if (!pending) {
+      sendCaptureStatus({
+        status: {
+          ready: true,
+          message: 'Ready',
+          queued: 0
+        }
+      });
+      return;
+    }
+
+    if (!fs.existsSync(pending.sourcePath)) {
+      watcherState.pendingCaptures.shift();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      scheduleProcessing(0);
+      return;
+    }
+
+    let pair;
+    try {
+      pair = capturePairForImage(pending.sourcePath, { fileMode: pending.fileMode });
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not inspect the capture pair' });
+      scheduleProcessing();
+      return;
+    }
+
+    if (!pair.ready) {
+      sendCaptureStatus({
+        status: {
+          ready: false,
+          message: pair.reason || 'Waiting for capture pair',
+          filename: pair.filename || '',
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+      scheduleProcessing();
+      return;
+    }
+
+    watcherState.importing = true;
+    try {
+      const result = await importCaptureImageCore(
+        pending.jobId,
+        pending.subjectId,
+        hotFolder,
+        pair.imagePath,
+        pair.rawPath,
+        {
+          fileMode: pending.fileMode,
+          shootStage: pending.shootStage,
+          photographerName: pending.photographerName,
+          workstationName: pending.workstationName
+        }
+      );
+      watcherState.pendingCaptures.shift();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      watcherState.lastImportAt = Date.now();
+      sendCaptureStatus({
+        ...result,
+        status: {
+          ready: true,
+          message: watcherState.pendingCaptures.length
+            ? `Importing ${watcherState.pendingCaptures.length} queued capture${watcherState.pendingCaptures.length === 1 ? '' : 's'}`
+            : 'Ready',
+          filename: result.image.filename,
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Image capture import failed' });
+      if (!fs.existsSync(pending.sourcePath)) {
+        watcherState.pendingCaptures.shift();
+        watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      }
+    } finally {
+      watcherState.importing = false;
+      queueAvailableFiles();
+      if (watcherState.pendingCaptures.length) {
+        scheduleProcessing(0);
+      }
+    }
+  };
+
+  watcherState.queueAvailableFiles = queueAvailableFiles;
+  watcherState.scheduleProcessing = scheduleProcessing;
 
   watcherState.watcher = fs.watch(hotFolder, (eventType) => {
     if (eventType === 'rename' || eventType === 'change') {
-      importLatest();
+      // Queue immediately so a later student scan cannot claim an earlier shot.
+      queueAvailableFiles();
+      scheduleProcessing();
     }
   });
   captureWatchers.set(webContentsId, watcherState);
   event.sender.once('destroyed', () => closeCaptureWatcher(webContentsId));
-  if (fs.readdirSync(hotFolder).some((name) => ['.jpg', '.jpeg', '.png'].includes(path.extname(name).toLowerCase()))) {
-    importLatest(true);
+  if (queueAvailableFiles()) {
+    scheduleProcessing();
+  } else {
+    sendCaptureStatus({
+      status: {
+        ready: true,
+        message: 'Ready',
+        queued: 0
+      }
+    });
   }
 
   return {
     jobId,
     subjectId,
     hotFolder,
-    fileMode
-    ,
+    fileMode,
     shootStage,
     shootStageLabel: shootStageLabel(shootStage),
-    captureSessionId
+    captureSessionId,
+    queuedCaptures: watcherState.pendingCaptures.length
   };
 }
 
@@ -13853,28 +14872,20 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
+      JOIN subject_images si
+        ON si.subject_id = s.id
+        AND si.image_asset_id = ${imageId}
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
         AND s.job_id = ia.job_id;
     `);
 
     if (!match.length || !match[0].values.length) {
-      throw new Error('Student and image must belong to the same job');
+      throw new Error('That image is no longer linked to this student');
     }
     if (match[0].values[0][4] === 'rejected') {
       throw new Error('Rejected images cannot be selected');
     }
-
-    database.run(`
-      INSERT OR IGNORE INTO subject_images (
-        subject_id,
-        image_asset_id,
-        role,
-        selected,
-        sort_order
-      )
-      VALUES (?, ?, 'capture', 0, 0);
-    `, [subjectId, imageId]);
 
     database.run(`
       UPDATE subject_images
@@ -13912,10 +14923,236 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
   return result;
 }
 
+function chooseReplacementCaptureImage(database, subjectId, preferredImageId = null) {
+  const replacementRows = rowsFromDatabase(database, `
+    SELECT si.image_asset_id AS imageId
+    FROM subject_images si
+    JOIN image_assets ia ON ia.id = si.image_asset_id
+    WHERE si.subject_id = ${numericId(subjectId)}
+      AND ia.status NOT IN ('rejected', 'packaged')
+    ORDER BY
+      CASE WHEN si.image_asset_id = ${preferredImageId ? numericId(preferredImageId) : 0} THEN 0 ELSE 1 END,
+      si.selected DESC,
+      si.sort_order,
+      ia.id DESC
+    LIMIT 1;
+  `);
+  const replacementId = replacementRows.length ? Number(replacementRows[0].imageId) : null;
+  database.run(`
+    UPDATE subject_images
+    SET selected = CASE WHEN image_asset_id = ? THEN 1 ELSE 0 END,
+        sort_order = CASE WHEN image_asset_id = ? THEN 0 ELSE sort_order END
+    WHERE subject_id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  database.run(`
+    UPDATE subjects
+    SET primary_image_asset_id = ?,
+        photographed_status = CASE WHEN ? IS NULL THEN 'unknown' ELSE 'photographed' END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  return replacementId;
+}
+
+async function updateLocalCaptureResolution(input) {
+  const dbPath = localCaptureDatabasePath(input.jobId);
+  if (!fs.existsSync(dbPath)) {
+    return null;
+  }
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    createLocalCaptureSchema(database);
+    if (input.actionType === 'move') {
+      database.run(`
+        UPDATE capture_events
+        SET subject_id = ?,
+            ref = ?,
+            selected = 1,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.targetSubjectId, input.targetRef, input.auditNotes, input.imageId]);
+    } else {
+      database.run(`
+        UPDATE capture_events
+        SET selected = 0,
+            sync_status = CASE WHEN ? = 'reject' THEN 'not_needed' ELSE sync_status END,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.actionType, input.auditNotes, input.imageId]);
+    }
+    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    return dbPath;
+  } finally {
+    database.close();
+  }
+}
+
+async function resolveCaptureImage(_event, input = {}) {
+  const sourceSubjectId = numericId(input.sourceSubjectId);
+  const imageId = numericId(input.imageId);
+  const reason = String(input.reason || '').trim();
+  const notes = optionalText(input.notes, 1000);
+  const photographerName = optionalText(input.photographerName, 255);
+  const workstationName = optionalText(input.workstationName, 255);
+  const allowedReasons = new Set(['wrong_student', 'duplicate_test', 'poor_image', 'keep_review', 'other']);
+  if (!allowedReasons.has(reason)) {
+    throw new Error('Choose a valid image resolution reason');
+  }
+  if (reason === 'other' && !notes) {
+    throw new Error('Add a note explaining why this image is being removed');
+  }
+  const targetSubjectId = reason === 'wrong_student' ? numericId(input.targetSubjectId) : null;
+  const replacementImageId = input.replacementImageId ? numericId(input.replacementImageId) : null;
+  if (reason === 'wrong_student' && targetSubjectId === sourceSubjectId) {
+    throw new Error('Choose a different student');
+  }
+
+  const result = await writeSql((database) => {
+    // Capture stations can open databases created by older TRECS builds, or a
+    // shared database can be replaced by an older station after startup.
+    // Repair this feature's schema in the same transaction as the action.
+    ensureCaptureImageActionsSchema(database);
+    const sourceRows = rowsFromDatabase(database, `
+      SELECT
+        s.job_id AS jobId,
+        s.legacy_ref_num AS sourceRef,
+        ia.filename,
+        ia.status
+      FROM subjects s
+      JOIN subject_images si ON si.subject_id = s.id
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      WHERE s.id = ${sourceSubjectId}
+        AND ia.id = ${imageId}
+      LIMIT 1;
+    `);
+    if (!sourceRows.length) {
+      throw new Error('That image is no longer linked to this student');
+    }
+    const source = sourceRows[0];
+    let target = null;
+    if (targetSubjectId) {
+      const targetRows = rowsFromDatabase(database, `
+        SELECT id, job_id AS jobId, legacy_ref_num AS ref
+        FROM subjects
+        WHERE id = ${targetSubjectId}
+        LIMIT 1;
+      `);
+      if (!targetRows.length || Number(targetRows[0].jobId) !== Number(source.jobId)) {
+        throw new Error('The selected student must belong to the same job');
+      }
+      target = targetRows[0];
+    }
+
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+    const sourceReplacementId = chooseReplacementCaptureImage(database, sourceSubjectId, replacementImageId);
+    const unlinkedRename = renameUnlinkedCaptureImage(database, {
+      imageId,
+      ref: source.sourceRef
+    });
+
+    let actionType = 'review';
+    let targetRef = null;
+    let linkedRename = null;
+    if (target) {
+      actionType = 'move';
+      targetRef = target.ref;
+      database.run('UPDATE subject_images SET selected = 0 WHERE subject_id = ?;', [targetSubjectId]);
+      database.run(`
+        INSERT OR IGNORE INTO subject_images (
+          subject_id, image_asset_id, role, selected, sort_order
+        ) VALUES (?, ?, 'capture', 1, 0);
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subject_images
+        SET selected = 1, sort_order = 0
+        WHERE subject_id = ? AND image_asset_id = ?;
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subjects
+        SET primary_image_asset_id = ?,
+            photographed_status = 'photographed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?;
+      `, [imageId, targetSubjectId]);
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+      linkedRename = renameLinkedCaptureImage(database, { imageId, ref: target.ref });
+    } else if (['duplicate_test', 'poor_image'].includes(reason)) {
+      actionType = 'reject';
+      database.run(`
+        UPDATE image_assets
+        SET status = 'rejected',
+            rejected_at = CURRENT_TIMESTAMP,
+            rejected_reason = ?
+        WHERE id = ?;
+      `, [reason === 'duplicate_test' ? 'Duplicate or test capture' : 'Poor image', imageId]);
+    } else {
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+    }
+
+    // A stale capture view must never be able to leave or recreate the source
+    // link after an image has been moved to another student.
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+
+    const auditNotes = [reason.replaceAll('_', ' '), notes].filter(Boolean).join(': ');
+    database.run(`
+      INSERT INTO capture_image_actions (
+        job_id, image_asset_id, source_subject_id, target_subject_id,
+        action_type, reason, notes, photographer_name, workstation_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `, [
+      source.jobId,
+      imageId,
+      sourceSubjectId,
+      targetSubjectId,
+      actionType,
+      reason,
+      notes,
+      photographerName,
+      workstationName
+    ]);
+
+    return {
+      jobId: source.jobId,
+      imageId,
+      sourceSubjectId,
+      sourceReplacementId,
+      targetSubjectId,
+      targetRef,
+      actionType,
+      reason,
+      auditNotes,
+      unlinkedRename,
+      linkedRename
+    };
+  });
+
+  result.localCaptureDatabasePath = await updateLocalCaptureResolution(result);
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  return result;
+}
+
 ipcMain.handle('capture:start-watcher', startCaptureWatcher);
 ipcMain.handle('capture:stop-watcher', stopCaptureWatcher);
 ipcMain.handle('capture:subject-images', getCaptureSubjectImages);
 ipcMain.handle('capture:select-image', selectCaptureImage);
+ipcMain.handle('capture:resolve-image', resolveCaptureImage);
 
 async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue = null) {
   const imageId = numericId(imageIdValue);
@@ -14231,8 +15468,8 @@ async function getImagePreview(_event, imageIdValue) {
 
 ipcMain.handle('image:preview', getImagePreview);
 
-async function chooseCropToolImage() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolImage(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Image To Crop',
     properties: ['openFile'],
     filters: [
@@ -14275,8 +15512,8 @@ function cropToolImagePayload(filePath) {
   };
 }
 
-async function chooseCropToolInputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolInputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Input Folder',
     properties: ['openDirectory']
   });
@@ -14293,8 +15530,8 @@ async function chooseCropToolInputFolder() {
   };
 }
 
-async function chooseCropToolOutputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Output Folder',
     properties: ['openDirectory', 'createDirectory']
   });
@@ -14378,7 +15615,7 @@ async function saveCropToolImage(_event, input = {}) {
     const defaultPath = input.sourcePath
       ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}.jpg`)
       : '8x10-crop.jpg';
-    const result = await dialog.showSaveDialog({
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(_event.sender), {
       title: 'Save 8x10 Crop',
       defaultPath,
       filters: [
@@ -14429,6 +15666,7 @@ function menuActionMap(window) {
     imageCapture: menuAction(window, 'Image Capture', 'image-capture'),
     envelopeEntry: menuAction(window, 'Envelope Entry', 'envelope-entry'),
     adminItems: menuAction(window, 'Admin Items', 'admin-items'),
+    idCardRender: menuAction(window, 'ID Card Render', 'id-card-render'),
     eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
     studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
     onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
@@ -14461,7 +15699,9 @@ function pictureDayMenu(actions) {
       actions.createCameraCards,
       { type: 'separator' },
       actions.prepareOnsiteSetup,
-      actions.loadOnsiteSetup
+      actions.loadOnsiteSetup,
+      { type: 'separator' },
+      actions.makeEndOfDay
     ]
   };
 }
@@ -14488,6 +15728,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -14499,8 +15740,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -14532,6 +15772,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -14543,8 +15784,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -14555,40 +15795,8 @@ function createContextMenus(window, context) {
       {
         label: 'Capture',
         submenu: [
-          actions.makeEndOfDay,
-          actions.addBlankRecords
-        ]
-      },
-      pictureDayMenu(actions),
-      {
-        label: 'TRECS',
-        submenu: [
-          actions.newSchool,
-          actions.newJob,
-          actions.importPreviousJob,
-          actions.loadEndOfDay,
-          { type: 'separator' },
-          actions.studentFieldSetup,
-          { type: 'separator' },
-          actions.imageCapture,
-          actions.envelopeEntry,
-          actions.adminItems,
-          actions.eventWorkflow,
-          actions.studentListBuilder,
-          actions.onlineOrderImport,
-          actions.productionSync,
-          actions.dataVerification,
-          actions.staffVerification,
-          actions.packagePlanEditor,
-          actions.unitRender,
-          actions.batchRender,
-          actions.compositeBuilder,
-          { type: 'separator' },
-          actions.importSchoolData,
-          actions.syncCroppedImages,
-          actions.createCroppedMedium,
-          actions.imageReview,
-          actions.cropTool
+          actions.addBlankRecords,
+          actions.makeEndOfDay
         ]
       }
     ];
@@ -14609,6 +15817,7 @@ function createContextMenus(window, context) {
         actions.imageCapture,
         actions.envelopeEntry,
         actions.adminItems,
+        actions.idCardRender,
         actions.eventWorkflow,
         actions.studentListBuilder,
         actions.onlineOrderImport,
@@ -14625,62 +15834,28 @@ function createContextMenus(window, context) {
         actions.syncCroppedImages,
         actions.createCroppedMedium,
         actions.imageReview,
-        actions.cropTool,
-        actions.makeEndOfDay
+        actions.cropTool
       ]
     }
   ];
 }
 
 function createApplicationMenu(window, context = 'job') {
-  const template = [
-    {
-      label: 'File',
-      submenu: [
-        { role: 'quit' }
-      ]
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' }
-      ]
-    },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' }
-      ]
-    },
-    {
-      label: 'Window',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'close' }
-      ]
-    },
-    ...createContextMenus(window, context),
-    {
-      label: 'Help',
-      submenu: [
-        { role: 'about' }
-      ]
-    }
-  ];
+  const contextMenus = createContextMenus(window, context);
+  const visibleContextMenus = captureStationMode
+    ? contextMenus.filter((item) => !['Job', 'TRECS'].includes(item.label))
+    : contextMenus;
+  const template = context === 'capture'
+    ? visibleContextMenus
+    : [
+        ...visibleContextMenus,
+        {
+          label: 'Help',
+          submenu: [
+            { role: 'about' }
+          ]
+        }
+      ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -14716,7 +15891,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot}`);
+  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot} captureStationMode=${captureStationMode} captureFile=${captureConfigPath} captureHotFolder=${captureHotFolder}`);
   await ensurePrototypeDatabaseShape();
   logStartup('database ready');
   createWindow();

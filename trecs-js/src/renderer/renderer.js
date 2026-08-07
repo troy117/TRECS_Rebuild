@@ -8,6 +8,7 @@ const title = document.querySelector('.topbar h1');
 const navButtons = document.querySelectorAll('nav button');
 const viewButtons = document.querySelectorAll('[data-view-button]');
 const viewTargets = document.querySelectorAll('[data-view-target]');
+let captureStationMode = false;
 const dashboardView = document.getElementById('dashboardView');
 const jobsView = document.getElementById('jobsView');
 const productsView = document.getElementById('productsView');
@@ -15,6 +16,7 @@ const productsPageContent = document.getElementById('productsPageContent');
 const eventsView = document.getElementById('eventsView');
 const eventJobSelect = document.getElementById('eventJobSelect');
 const eventFallJobSelect = document.getElementById('eventFallJobSelect');
+const eventBackToJobsButton = document.getElementById('eventBackToJobsButton');
 const linkEventFallJobButton = document.getElementById('linkEventFallJobButton');
 const importEventImagesButton = document.getElementById('importEventImagesButton');
 const createEventJobButton = document.getElementById('createEventJobButton');
@@ -74,8 +76,10 @@ const productionSyncHeaderRow = document.getElementById('productionSyncHeaderRow
 const productionSyncFirstDataRow = document.getElementById('productionSyncFirstDataRow');
 const saveProductionSyncSettingsButton = document.getElementById('saveProductionSyncSettingsButton');
 const testProductionSyncButton = document.getElementById('testProductionSyncButton');
+const buildProductionSheetButton = document.getElementById('buildProductionSheetButton');
 const previewProductionSyncButton = document.getElementById('previewProductionSyncButton');
 const pushProductionSyncButton = document.getElementById('pushProductionSyncButton');
+const productionMilestoneGrid = document.getElementById('productionMilestoneGrid');
 const productionSyncSummary = document.getElementById('productionSyncSummary');
 const productionSyncPreviewBody = document.getElementById('productionSyncPreviewBody');
 const productionSyncStatus = document.getElementById('productionSyncStatus');
@@ -103,6 +107,17 @@ const staffAssignmentCount = document.getElementById('staffAssignmentCount');
 const staffAssignmentRows = document.getElementById('staffAssignmentRows');
 const staffVerificationStatus = document.getElementById('staffVerificationStatus');
 const saveStaffVerificationButton = document.getElementById('saveStaffVerificationButton');
+const idCardRenderView = document.getElementById('idCardRenderView');
+const idCardRenderForm = document.getElementById('idCardRenderForm');
+const idCardRenderListField = document.getElementById('idCardRenderListField');
+const idCardRenderBackgroundPreview = document.getElementById('idCardRenderBackgroundPreview');
+const idCardRenderMetrics = document.getElementById('idCardRenderMetrics');
+const idCardRenderProgress = document.getElementById('idCardRenderProgress');
+const idCardRenderStatus = document.getElementById('idCardRenderStatus');
+const chooseIdCardRenderBackgroundButton = document.getElementById('chooseIdCardRenderBackgroundButton');
+const clearIdCardRenderBackgroundButton = document.getElementById('clearIdCardRenderBackgroundButton');
+const browseIdCardRenderOutputButton = document.getElementById('browseIdCardRenderOutputButton');
+const startIdCardRenderButton = document.getElementById('startIdCardRenderButton');
 const unitRenderView = document.getElementById('unitRenderView');
 const unitRenderForm = document.getElementById('unitRenderForm');
 const unitRenderFilterField = document.getElementById('unitRenderFilterField');
@@ -110,6 +125,7 @@ const unitRenderFilterLabel = document.getElementById('unitRenderFilterLabel');
 const unitRenderMetrics = document.getElementById('unitRenderMetrics');
 const unitRenderProgress = document.getElementById('unitRenderProgress');
 const unitRenderStatus = document.getElementById('unitRenderStatus');
+const unitRenderEventOptions = document.getElementById('unitRenderEventOptions');
 const exportImagePrepButton = document.getElementById('exportImagePrepButton');
 const browseUnitRenderOutputButton = document.getElementById('browseUnitRenderOutputButton');
 const startUnitRenderButton = document.getElementById('startUnitRenderButton');
@@ -178,10 +194,34 @@ const captureEntryForm = document.getElementById('captureEntryForm');
 const captureEntryStatus = document.getElementById('captureEntryStatus');
 const captureStudentSearchResults = document.getElementById('captureStudentSearchResults');
 const captureSubjectDetail = document.getElementById('captureSubjectDetail');
+const captureRosterToggleButton = document.getElementById('captureRosterToggleButton');
+const captureRosterPanel = document.getElementById('captureRosterPanel');
+const captureRosterFilters = document.getElementById('captureRosterFilters');
+const captureRosterCount = document.getElementById('captureRosterCount');
+const captureRosterTableBody = document.getElementById('captureRosterTableBody');
 const captureCompareGrid = document.getElementById('captureCompareGrid');
 const capturePreviewMeta = document.getElementById('capturePreviewMeta');
 const capturePairStatus = document.getElementById('capturePairStatus');
 const capturePhotoCount = document.getElementById('capturePhotoCount');
+const captureComparisonModal = document.getElementById('captureComparisonModal');
+const captureComparisonSubject = document.getElementById('captureComparisonSubject');
+const captureComparisonStatus = document.getElementById('captureComparisonStatus');
+const captureComparisonScroller = document.getElementById('captureComparisonScroller');
+const closeCaptureComparisonButton = document.getElementById('closeCaptureComparisonButton');
+const captureImageActionForm = document.getElementById('captureImageActionForm');
+const captureImageActionTitle = document.getElementById('captureImageActionTitle');
+const captureImageActionFilename = document.getElementById('captureImageActionFilename');
+const cancelCaptureImageActionButton = document.getElementById('cancelCaptureImageActionButton');
+const captureActionStudentSearch = document.getElementById('captureActionStudentSearch');
+const captureActionReplacementField = document.getElementById('captureActionReplacementField');
+const captureActionStudentResults = document.getElementById('captureActionStudentResults');
+const captureActionSelectedStudent = document.getElementById('captureActionSelectedStudent');
+const captureActionStudentPreview = document.getElementById('captureActionStudentPreview');
+const captureActionStudentPhoto = document.getElementById('captureActionStudentPhoto');
+const captureActionStudentPreviewName = document.getElementById('captureActionStudentPreviewName');
+const captureActionStudentPreviewMeta = document.getElementById('captureActionStudentPreviewMeta');
+const captureImageActionStatus = document.getElementById('captureImageActionStatus');
+const confirmCaptureImageActionButton = document.getElementById('confirmCaptureImageActionButton');
 const captureBackToStudentsButton = document.getElementById('captureBackToStudentsButton');
 const captureSessionMeta = document.getElementById('captureSessionMeta');
 const captureFileModeControl = document.getElementById('captureFileModeControl');
@@ -347,9 +387,12 @@ let jobsState = {
   captureSubject: null,
   captureImages: [],
   captureCompareSlotIds: null,
+  captureImageActionId: null,
   captureSearchResults: [],
   captureSearchActiveIndex: -1,
   captureSearchTimer: null,
+  captureRosterOpen: false,
+  captureRosterFilter: 'all',
   captureSubjectEditId: null,
   captureFileMode: 'jpg_raw',
   captureShootStage: 'main',
@@ -391,6 +434,8 @@ let jobsState = {
   },
   idTemplateDesigner: {
     loaded: false,
+    loading: false,
+    jobId: null,
     folder: '',
     templates: [],
     backgrounds: [],
@@ -408,6 +453,9 @@ let jobsState = {
   idCardReason: 'admin_batch',
   idCardSortMethod: 'alpha_grade',
   idCardPhotographedOnly: true,
+  idCardRenderSetup: null,
+  idCardRenderJobId: null,
+  idCardRenderRunning: false,
   cameraCardSource: 'all',
   cameraCardSourceValue: '',
   cameraCardListName: '',
@@ -478,6 +526,7 @@ let jobsState = {
   batchRenderSetup: null,
   batchRenderRunning: false,
   eventSetup: null,
+  eventPinnedJobId: null,
   eventQueueFilter: 'all',
   eventCandidates: [],
   eventSelectedCandidateId: null,
@@ -518,7 +567,7 @@ if (window.trecs && typeof window.trecs.onTrecsMenuAction === 'function') {
   window.trecs.onTrecsMenuAction((action) => {
     handleTrecsMenuAction(action).catch((error) => {
       console.error(error);
-      window.alert(error.message || 'Menu action failed');
+      showMessage(error.message || 'Menu action failed', { type: 'error' }).catch((messageError) => console.error(messageError));
     });
   });
 }
@@ -661,6 +710,12 @@ function imageFolderName(imagePath) {
   return parts.length > 1 ? parts[parts.length - 2] : '';
 }
 
+function rawFileTypeLabel(rawPath) {
+  const match = String(rawPath || '').match(/\.([^.\\/]+)$/);
+  const extension = match ? match[1].toUpperCase() : '';
+  return ['CR2', 'CR3'].includes(extension) ? extension : 'RAW';
+}
+
 function linkedImageFolderLine(image) {
   const displayFolder = imageFolderName(image.displayPath || image.currentPath);
   const originalFolder = imageFolderName(image.currentPath);
@@ -687,7 +742,7 @@ function linkedImageMetaLine(image) {
   }
   parts.push(image.shootStageLabel || (image.shootStage ? formatShootStage(image.shootStage) : formatImageSource(image.source)));
   if (image.captureFileMode) {
-    parts.push(image.captureFileMode === 'jpg_only' ? 'JPG only' : 'JPG + CR3');
+    parts.push(image.captureFileMode === 'jpg_only' ? 'JPG only' : `JPG + ${rawFileTypeLabel(image.rawPath)}`);
   }
   if (image.captureWorkstation) {
     parts.push(image.captureWorkstation);
@@ -784,10 +839,11 @@ function setView(view) {
   productionSyncView.classList.toggle('active-view', view === 'productionSync');
   dataVerificationView.classList.toggle('active-view', view === 'dataVerification');
   staffVerificationView.classList.toggle('active-view', view === 'staffVerification');
+  idCardRenderView.classList.toggle('active-view', view === 'idCardRender');
   unitRenderView.classList.toggle('active-view', view === 'unitRender');
   batchRenderView.classList.toggle('active-view', view === 'batchRender');
   compositesView.classList.toggle('active-view', view === 'composites');
-  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
+  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'idCardRender' ? 'ID Card Render' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
@@ -802,7 +858,7 @@ function setView(view) {
     });
   }
   if (view === 'events') {
-    loadEventWorkflow().catch((error) => { eventSetupStatus.textContent = error.message || 'Could not load event workflow.'; });
+    loadEventWorkflow(jobsState.eventPinnedJobId || null).catch((error) => { eventSetupStatus.textContent = error.message || 'Could not load event workflow.'; });
   }
   if (view === 'unitRender') {
     loadUnitRenderSetup().catch((error) => {
@@ -814,6 +870,11 @@ function setView(view) {
   }
   if (view === 'onlineOrders') {
     loadOnlineOrderJobs().catch((error) => { onlineOrderStatus.textContent = error.message || 'Could not load jobs.'; });
+  }
+  if (view === 'idCardRender') {
+    loadIdCardRenderSetup().catch((error) => {
+      idCardRenderStatus.textContent = error.message || 'Could not load ID card rendering.';
+    });
   }
   if (view === 'productionSync') {
     loadProductionSyncSettings().catch((error) => { productionSyncStatus.textContent = error.message || 'Could not load production sync settings.'; });
@@ -988,6 +1049,12 @@ function selectJobSummary(jobId) {
 
 async function openJob(jobId) {
   selectJobSummary(jobId);
+  const jobSummary = jobsState.jobs.find((job) => Number(job.id) === Number(jobId));
+  if (['event', 'qr_event'].includes(String(jobSummary?.type || '').toLowerCase())) {
+    jobsState.eventPinnedJobId = Number(jobId);
+    setView('events');
+    return;
+  }
   if (!(await acquireUiJobLock(jobId))) return;
   try {
     await loadJobDetail(jobId);
@@ -1001,6 +1068,7 @@ async function openJob(jobId) {
   }
   setJobsWorkspaceMode(true);
   setWorkspaceMode(jobsState.selectedTab === 'pictureDay' ? 'pictureDay' : 'students');
+  await restoreElectronFocus();
 }
 
 function closeJobWorkspace() {
@@ -1014,6 +1082,56 @@ function closeJobWorkspace() {
 function activeElementAcceptsTyping() {
   const element = document.activeElement;
   return Boolean(element && ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName));
+}
+
+async function restoreElectronFocus(element = null, selectText = false) {
+  try {
+    if (window.trecs && typeof window.trecs.focusWindow === 'function') {
+      await window.trecs.focusWindow();
+    }
+  } catch (error) {
+    console.warn('Could not restore TRECS focus', error);
+  }
+  requestAnimationFrame(() => {
+    if (!element || !element.isConnected) {
+      return;
+    }
+    element.focus({ preventScroll: true });
+    if (selectText && typeof element.select === 'function') {
+      element.select();
+    }
+  });
+}
+
+async function confirmAction(input) {
+  if (window.trecs && typeof window.trecs.confirmAction === 'function') {
+    return window.trecs.confirmAction(input);
+  }
+  return window.confirm([input.message, input.detail].filter(Boolean).join('\n\n'));
+}
+
+function showMessage(message, options = {}) {
+  if (window.trecs && typeof window.trecs.showMessage === 'function') {
+    return window.trecs.showMessage({
+      type: options.type || 'info',
+      title: options.title || 'TRECS',
+      message: String(message || ''),
+      detail: options.detail || ''
+    });
+  }
+  window.alert(message);
+  return Promise.resolve({ shown: true });
+}
+
+function showEndOfDaySuccess(result) {
+  const capturedImages = Number(result?.counts?.capturedImages || result?.counts?.images || 0);
+  return showMessage('End of Day created successfully.', {
+    title: 'End of Day Complete',
+    detail: [
+      `${formatNumber(capturedImages)} captured image${capturedImages === 1 ? '' : 's'} included.`,
+      result?.packagePath ? `Saved to: ${result.packagePath}` : ''
+    ].filter(Boolean).join('\n')
+  });
 }
 
 function focusCaptureBarcode(force = false) {
@@ -1031,6 +1149,7 @@ function focusCaptureBarcode(force = false) {
 
 function setCaptureLoginVisible(visible) {
   captureLoginModal.hidden = !visible;
+  appShell.inert = visible;
   if (!visible) {
     jobsState.pendingCaptureJobId = null;
     captureLoginStatus.textContent = '';
@@ -1043,30 +1162,31 @@ async function focusCaptureLoginPhotographer() {
     return;
   }
 
-  try {
-    if (window.trecs && typeof window.trecs.focusWindow === 'function') {
-      await window.trecs.focusWindow();
+  await restoreElectronFocus(input, true);
+  setTimeout(() => {
+    if (!captureLoginModal.hidden && document.activeElement !== input) {
+      input.focus({ preventScroll: true });
+      input.select();
     }
-  } catch (error) {
-    console.warn('Could not focus TRECS window', error);
+  }, 100);
+}
+
+async function configureStationMode() {
+  if (!window.trecs || typeof window.trecs.getSystemInfo !== 'function') {
+    return;
   }
-
-  [0, 50, 150, 300, 600, 1000].forEach((delay) => {
-    setTimeout(() => {
-      if (captureLoginModal.hidden) {
-        return;
-      }
-      input.focus({ preventScroll: true });
-      input.select();
-    }, delay);
+  const info = await window.trecs.getSystemInfo();
+  captureStationMode = Boolean(info.captureStationMode);
+  if (!captureStationMode) {
+    return;
+  }
+  navButtons.forEach((button) => {
+    const isJobs = button.dataset.viewButton === 'jobs';
+    const isCapture = button.dataset.viewTarget === 'jobs' && button.dataset.jobTabTarget === 'capture';
+    button.hidden = !isJobs && !isCapture;
   });
-
-  requestAnimationFrame(() => {
-    if (!captureLoginModal.hidden) {
-      input.focus({ preventScroll: true });
-      input.select();
-    }
-  });
+  jobsState.selectedTab = 'capture';
+  setView('jobs');
 }
 
 async function openCaptureLogin(jobId) {
@@ -1199,13 +1319,15 @@ function setAddRecordsModalVisible(visible) {
   addRecordsStatus.textContent = '';
   if (visible) {
     addRecordsForm.reset();
-    addRecordsForm.elements.recordCount.focus();
-    addRecordsForm.elements.recordCount.select();
+    restoreElectronFocus(addRecordsForm.elements.recordCount, true).catch((error) => console.error(error));
   }
 }
 
 function setEndOfDayModalVisible(visible) {
   endOfDayModal.hidden = !visible;
+  if (visible) {
+    restoreElectronFocus(cancelEndOfDayButton).catch((error) => console.error(error));
+  }
   if (!visible) {
     jobsState.endOfDayReview = null;
     endOfDayStatus.textContent = '';
@@ -1313,10 +1435,42 @@ function renderEndOfDayCapturedImages(capturedImages) {
         <li>
           <strong>${escapeHtml(image.ref || '')}</strong>
           <span>${escapeHtml(image.studentName || image.filename || '')}</span>
-          <em>${escapeHtml(image.filename || '')}${image.rawPath ? ' / CR3' : ''}</em>
+          <em>${escapeHtml(image.filename || '')}${image.rawPath ? ` / ${rawFileTypeLabel(image.rawPath)}` : ''}</em>
         </li>
       `).join('')}
     </ul>
+  `;
+}
+
+function renderEndOfDayWrongReferenceMoves(moves) {
+  if (!moves.length) {
+    return '<div class="empty-state">No images were moved between student references.</div>';
+  }
+  return `
+    <div class="end-of-day-warning">
+      Review each image photographed under the wrong reference before creating End of Day.
+    </div>
+    <ul class="end-of-day-list">
+      ${moves.map((move) => `
+        <li>
+          <strong>${escapeHtml(move.filename || `Image ${move.imageAssetId}`)}</strong>
+          <span>${escapeHtml(`${move.sourceRef || ''} ${move.sourceName || ''}`.trim())} &rarr; ${escapeHtml(`${move.targetRef || ''} ${move.targetName || ''}`.trim())}</span>
+          <em>${escapeHtml([move.photographerName, move.notes].filter(Boolean).join(' / '))}</em>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
+function renderEndOfDayWrongReferenceConfirmation(moves) {
+  if (!moves.length) {
+    return '';
+  }
+  return `
+    <label class="end-of-day-include end-of-day-wrong-reference-confirmation">
+      <input type="checkbox" data-eod-confirm-wrong-reference>
+      <strong>I confirmed these images are assigned to the correct students.</strong>
+    </label>
   `;
 }
 
@@ -1394,6 +1548,7 @@ function renderEndOfDayEditedSubjects(editedSubjects) {
 function renderEndOfDayReview(review) {
   const counts = review.counts || {};
   const changes = review.subjectChanges || {};
+  const wrongReferenceMoves = review.wrongReferenceMoves || [];
   const newSubjects = changes.newSubjects || [];
   const editedSubjects = changes.editedSubjects || [];
   const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
@@ -1402,13 +1557,18 @@ function renderEndOfDayReview(review) {
   endOfDayReview.innerHTML = `
     <div class="end-of-day-summary">
       <article><span>Captured Images</span><strong>${formatNumber(counts.capturedImages || 0)}</strong></article>
-      <article><span>CR3 Files</span><strong>${formatNumber(counts.capturedRawFiles || 0)}</strong></article>
+      <article><span>RAW Files</span><strong>${formatNumber(counts.capturedRawFiles || 0)}</strong></article>
+      <article><span>Wrong References</span><strong>${formatNumber(wrongReferenceMoves.length)}</strong></article>
       <article><span>New Cards Exported</span><strong>${formatNumber(includedNewSubjectCount)}</strong></article>
       <article><span>Student Edits Exported</span><strong>${formatNumber(includedEditedSubjectCount)}</strong></article>
     </div>
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
+    ${renderEndOfDaySection('wrongReferenceMoves', 'Images Photographed Under Wrong Reference', wrongReferenceMoves.length, renderEndOfDayWrongReferenceMoves(wrongReferenceMoves))}
+    ${renderEndOfDayWrongReferenceConfirmation(wrongReferenceMoves)}
     ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
   `;
+  confirmEndOfDayButton.disabled = wrongReferenceMoves.length > 0
+    && jobsState.endOfDayReview?.wrongReferenceConfirmed !== true;
   bindEndOfDayReviewControls(review);
 }
 
@@ -1417,6 +1577,16 @@ function updateEndOfDaySummaryOnly(review) {
 }
 
 function bindEndOfDayReviewControls(review) {
+  const wrongReferenceConfirmation = endOfDayReview.querySelector('[data-eod-confirm-wrong-reference]');
+  if (wrongReferenceConfirmation) {
+    wrongReferenceConfirmation.checked = jobsState.endOfDayReview?.wrongReferenceConfirmed === true;
+    wrongReferenceConfirmation.addEventListener('change', () => {
+      if (jobsState.endOfDayReview) {
+        jobsState.endOfDayReview.wrongReferenceConfirmed = wrongReferenceConfirmation.checked;
+      }
+      confirmEndOfDayButton.disabled = !wrongReferenceConfirmation.checked;
+    });
+  }
   endOfDayReview.querySelectorAll('[data-end-of-day-toggle]').forEach((button) => {
     button.addEventListener('click', () => {
       const sectionId = button.dataset.endOfDayToggle;
@@ -1495,6 +1665,7 @@ async function openEndOfDayReview(jobId) {
   jobsState.endOfDayReview = { mode: 'create', jobId, loading: true };
   jobsState.endOfDayCollapsed = {
     capturedImages: true,
+    wrongReferenceMoves: false,
     newSubjects: false,
     editedSubjects: false
   };
@@ -1510,6 +1681,7 @@ async function openEndOfDayReview(jobId) {
       mode: 'create',
       jobId,
       review,
+      wrongReferenceConfirmed: false,
       adjustments: createEndOfDayAdjustments(review)
     };
     renderEndOfDayReview(review);
@@ -1533,6 +1705,7 @@ function reviewFromEndOfDayManifest(manifest) {
       currentPath: image.jpgPath,
       rawPath: image.rawPath || null
     })),
+    wrongReferenceMoves: manifest.wrongReferenceMoves || [],
     subjectChanges: manifest.subjectChanges || {
       newSubjects: [],
       editedSubjects: [],
@@ -1547,10 +1720,12 @@ function openEndOfDayPackageReview(choice) {
     mode: 'approve',
     packageFolder: choice.folderPath,
     review,
+    wrongReferenceConfirmed: false,
     adjustments: createEndOfDayAdjustments(review)
   };
   jobsState.endOfDayCollapsed = {
     capturedImages: true,
+    wrongReferenceMoves: false,
     newSubjects: false,
     editedSubjects: false
   };
@@ -1565,6 +1740,10 @@ function openEndOfDayPackageReview(choice) {
 async function confirmEndOfDayPackage() {
   const reviewState = jobsState.endOfDayReview;
   if (!reviewState) {
+    return;
+  }
+  if ((reviewState.review?.wrongReferenceMoves || []).length > 0 && reviewState.wrongReferenceConfirmed !== true) {
+    endOfDayStatus.textContent = 'Confirm the wrong-reference image assignments before continuing.';
     return;
   }
 
@@ -1614,7 +1793,7 @@ async function confirmEndOfDayPackage() {
         jobsState.detail = null;
         await loadJobDetail(result.id);
       }
-      window.alert([
+      await showMessage([
         'End of Day package approved.',
         '',
         `Files copied: ${formatNumber((result.counts && result.counts.copiedFiles) || 0)}`,
@@ -1623,6 +1802,7 @@ async function confirmEndOfDayPackage() {
         `Student edits: ${formatNumber((result.counts && result.counts.editedSubjects) || 0)}`
       ].join('\n'));
     } else {
+      await showEndOfDaySuccess(result);
       await reloadCurrentJobDetail();
     }
   } catch (error) {
@@ -1672,6 +1852,7 @@ function openSchoolDataImport(jobId) {
   schoolDataPreview.innerHTML = '';
   confirmSchoolDataButton.disabled = true;
   setSchoolDataModalVisible(true);
+  restoreElectronFocus(browseSchoolDataButton).catch((error) => console.error(error));
 }
 
 function schoolDataColumnOptions(preview, selectedIndex) {
@@ -2414,10 +2595,11 @@ function renderStudentWorkspace() {
   const unlinkedImageCount = Number(jobsState.detail.capture && jobsState.detail.capture.summary
     ? jobsState.detail.capture.summary.unlinkedImages
     : 0);
+  const isEventJob = ['event', 'qr_event'].includes(String(job.type || '').toLowerCase());
   workspaceJobMeta.innerHTML = `
     <span>${escapeHtml(formatType(job.type))} / ${escapeHtml(job.packagePlan || 'No package plan')} / ${formatNumber(job.subjects)} subjects</span>
     <span class="workspace-unlinked-count">${formatNumber(unlinkedImageCount)} unlinked image${unlinkedImageCount === 1 ? '' : 's'}</span>
-    ${unlinkedImageCount > 0 ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Review Images</button>' : ''}
+    ${isEventJob ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Open Event Workflow</button>' : unlinkedImageCount > 0 ? '<button class="review-alert-button" id="openImageReviewButton" type="button">Review Images</button>' : ''}
   `;
   workspaceStudentCount.textContent = `${formatNumber(subjects.length)} shown`;
   workspaceStudentSearch.value = jobsState.workspaceStudentSearch;
@@ -2447,7 +2629,15 @@ function renderStudentWorkspace() {
   const imageReviewButton = document.getElementById('openImageReviewButton');
   if (imageReviewButton) {
     imageReviewButton.addEventListener('click', () => {
-      setWorkspaceMode('imageReview');
+      if (isEventJob) {
+        jobsState.eventPinnedJobId = Number(job.id);
+        closeJobWorkspace();
+        setView('events');
+      } else {
+        setWorkspaceMode('imageReview');
+        const searchInput = imageReviewWorkspace.querySelector('input[name="subjectSearch"]');
+        restoreElectronFocus(searchInput).catch((error) => console.error(error));
+      }
     });
   }
 }
@@ -2720,6 +2910,7 @@ async function openStudentFieldSettings() {
     console.error(error);
   }
   renderStudentFieldSettingsModal();
+  restoreElectronFocus(studentFieldSettingsForm.elements.scope).catch((error) => console.error(error));
 }
 
 function closeStudentFieldSettings() {
@@ -3107,6 +3298,7 @@ async function openImageLightbox(imageId, options = {}) {
     : lightboxImagesForSubject(subjectId, imageId);
 
   imageLightboxModal.hidden = false;
+  restoreElectronFocus(closeImageLightboxButton).catch((error) => console.error(error));
   imageLightboxTitle.textContent = 'Image Preview';
   imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
   renderImageLightboxActions();
@@ -3376,6 +3568,7 @@ function renderWorkspaceOrderDetail(subject) {
 async function showOrderEnvelope(orderId) {
   jobsState.viewingEnvelopeScanId = null;
   orderEnvelopeModal.hidden = false;
+  restoreElectronFocus(closeOrderEnvelopeButton).catch((error) => console.error(error));
   orderEnvelopeActions.hidden = true;
   orderEnvelopeTitle.textContent = `Order #${orderId} Envelope`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
@@ -3427,8 +3620,7 @@ function showEditOrder(orderId) {
   editOrderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
   editOrderStatus.textContent = '';
   editOrderModal.hidden = false;
-  editOrderForm.elements.orderCodes.focus();
-  editOrderForm.elements.orderCodes.select();
+  restoreElectronFocus(editOrderForm.elements.orderCodes, true).catch((error) => console.error(error));
   loadEditOrderEnvelope(orderId);
 }
 
@@ -3478,7 +3670,13 @@ async function submitEditOrder(event) {
 async function deleteWorkspaceOrder(orderId) {
   const order = findById(jobsState.detail.subjectOrders || [], orderId) || findById(jobsState.detail.orders || [], orderId);
   const label = order && order.packageCodes ? `#${orderId} (${order.packageCodes})` : `#${orderId}`;
-  if (!confirm(`Delete order ${label}? This will keep the envelope scan but remove the order and its items.`)) {
+  if (!(await confirmAction({
+    type: 'warning',
+    title: 'Delete Order',
+    message: `Delete order ${label}?`,
+    detail: 'The envelope scan will be kept, but the order and its items will be removed.',
+    confirmLabel: 'Delete Order'
+  }))) {
     return;
   }
 
@@ -3492,7 +3690,7 @@ async function deleteWorkspaceOrder(orderId) {
       await loadUnlinkedEnvelopeScans();
     }
   } catch (error) {
-    alert(error.message || 'Delete failed');
+    await showMessage(error.message || 'Delete failed', { type: 'error' });
     console.error(error);
   }
 }
@@ -3510,13 +3708,14 @@ function renderCaptureWorkspace() {
   renderCaptureFileModeToggle();
   renderCapturePhotoCount();
   renderCaptureSubject();
+  setCaptureRosterOpen(jobsState.captureRosterOpen);
   loadCaptureImages();
 
   focusCaptureBarcode();
 }
 
 function captureFileModeLabel(mode = jobsState.captureFileMode) {
-  return mode === 'jpg_only' ? 'JPG Only' : 'JPG + CR3';
+  return mode === 'jpg_only' ? 'JPG Only' : 'JPG + RAW';
 }
 
 function captureShootStageLabel(stage = jobsState.captureShootStage) {
@@ -3563,11 +3762,8 @@ function renderCapturePhotoCount() {
     return;
   }
   const summary = jobsState.detail && jobsState.detail.summary ? jobsState.detail.summary : {};
-  const jpgCount = Number(summary.activeCaptureImages || 0);
   const sessionStudents = Number(summary.activeCaptureSubjects || 0);
-  const totalPhotographed = Number(summary.subjectsWithPrimaryImage || 0);
-  const totalRecords = Number(summary.subjects || 0);
-  capturePhotoCount.textContent = `${formatNumber(jpgCount)} JPG / ${formatNumber(sessionStudents)} students / ${formatNumber(totalPhotographed)} photo / ${formatNumber(totalRecords)} records`;
+  capturePhotoCount.textContent = `${formatNumber(sessionStudents)} Student${sessionStudents === 1 ? '' : 's'} Photographed`;
 }
 
 async function setCaptureFileMode(fileMode) {
@@ -3646,7 +3842,7 @@ function renderImageReviewWorkspace() {
         ${renderImageLinkPanel(jobsState.selectedImageId, { mode: 'review' })}
       </section>
       <section class="image-review-main">
-        <aside class="capture-preview image-review-preview" id="imagePreviewPanel">
+        <aside class="capture-preview image-review-preview" id="imageReviewPreviewPanel">
           <div class="empty-state">Select an image to review.</div>
         </aside>
         <div class="image-review-list">
@@ -3676,7 +3872,11 @@ function renderImageReviewWorkspace() {
 
   bindImagePreviewLinkForm({ mode: 'review' });
   loadReviewSubjectPreview();
-  loadImagePreview(jobsState.selectedImageId, { includeLinkPanel: false, layout: 'review' });
+  loadImagePreview(jobsState.selectedImageId, {
+    panelId: 'imageReviewPreviewPanel',
+    includeLinkPanel: false,
+    layout: 'review'
+  });
 }
 
 function isBlankCaptureSubject(subject) {
@@ -3688,6 +3888,116 @@ function isBlankCaptureSubject(subject) {
     subject.grade,
     subject.homeroom
   ].some((value) => String(value || '').trim());
+}
+
+function captureRosterMatchesSearch(subject, search, mode) {
+  if (!search) {
+    return true;
+  }
+  const values = mode === 'name'
+    ? [subject.name, subject.firstName, subject.lastName]
+    : mode === 'id'
+      ? [subject.externalId]
+      : mode === 'grade'
+        ? [subject.grade]
+        : mode === 'homeroom'
+          ? [subject.homeroom]
+          : [subject.ref, subject.name, subject.firstName, subject.lastName, subject.externalId, subject.grade, subject.homeroom];
+  return values.some((value) => String(value || '').toLowerCase().includes(search));
+}
+
+function visibleCaptureRosterSubjects() {
+  const search = captureEntryForm.elements.studentSearch.value.trim().toLowerCase();
+  const mode = captureEntryForm.elements.searchMode ? captureEntryForm.elements.searchMode.value : 'all';
+  const filter = jobsState.captureRosterFilter || 'all';
+  return (jobsState.detail?.subjects || [])
+    .filter((subject) => {
+      const blank = isBlankCaptureSubject(subject);
+      if (filter === 'students' && blank) {
+        return false;
+      }
+      if (filter === 'blanks' && !blank) {
+        return false;
+      }
+      return captureRosterMatchesSearch(subject, search, mode);
+    })
+    .sort((first, second) => String(first.ref || '').localeCompare(String(second.ref || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    }));
+}
+
+function renderCaptureRoster() {
+  if (!captureRosterPanel || !captureRosterTableBody) {
+    return;
+  }
+  const subjects = visibleCaptureRosterSubjects();
+  const total = (jobsState.detail?.subjects || []).length;
+  captureRosterCount.textContent = `${formatNumber(subjects.length)} of ${formatNumber(total)}`;
+  captureRosterFilters.querySelectorAll('[data-capture-roster-filter]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.captureRosterFilter === jobsState.captureRosterFilter);
+  });
+  captureRosterTableBody.innerHTML = subjects.length
+    ? subjects.map((subject) => {
+      const blank = isBlankCaptureSubject(subject);
+      const selected = Number(subject.id) === Number(jobsState.captureSubject?.id);
+      const name = blank ? 'Blank record' : (subject.name || [subject.firstName, subject.lastName].filter(Boolean).join(' ') || 'Unnamed student');
+      return `
+        <tr class="${blank ? 'blank-record' : ''} ${selected ? 'selected' : ''}" data-capture-roster-subject="${subject.id}" tabindex="0">
+          <td><strong>${escapeHtml(subject.ref || '')}</strong></td>
+          <td>${escapeHtml(name)}${blank ? '<span class="capture-blank-badge">Blank</span>' : `${subject.externalId ? `<small>ID ${escapeHtml(subject.externalId)}</small>` : ''}`}</td>
+          <td>${escapeHtml(subject.grade || '')}</td>
+        </tr>
+      `;
+    }).join('')
+    : '<tr><td colspan="3" class="capture-roster-empty">No matching records.</td></tr>';
+
+  captureRosterTableBody.querySelectorAll('[data-capture-roster-subject]').forEach((row) => {
+    const selectRow = () => selectCaptureRosterSubject(Number(row.dataset.captureRosterSubject));
+    row.addEventListener('click', selectRow);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectRow();
+      }
+    });
+  });
+}
+
+function setCaptureRosterOpen(open) {
+  jobsState.captureRosterOpen = Boolean(open);
+  if (!captureRosterPanel || !captureRosterToggleButton) {
+    return;
+  }
+  captureRosterPanel.hidden = !jobsState.captureRosterOpen;
+  captureSubjectDetail.hidden = jobsState.captureRosterOpen;
+  captureRosterToggleButton.setAttribute('aria-expanded', String(jobsState.captureRosterOpen));
+  const labels = captureRosterToggleButton.querySelectorAll('span');
+  if (labels[0]) {
+    labels[0].textContent = jobsState.captureRosterOpen ? 'Hide Student Records' : 'Browse Students & Blank Records';
+  }
+  if (labels[1]) {
+    labels[1].innerHTML = jobsState.captureRosterOpen ? '&#9652;' : '&#9662;';
+  }
+  if (jobsState.captureRosterOpen) {
+    hideCaptureStudentSearch();
+    renderCaptureRoster();
+  }
+}
+
+async function selectCaptureRosterSubject(subjectId) {
+  const subject = (jobsState.detail?.subjects || []).find((item) => Number(item.id) === Number(subjectId));
+  if (!subject) {
+    return;
+  }
+  setCaptureRosterOpen(false);
+  captureEntryStatus.textContent = `Loading ${subject.ref || 'record'}...`;
+  try {
+    await setCaptureSubject(subject, true);
+  } catch (error) {
+    captureEntryStatus.textContent = error.message || 'Could not load student';
+    console.error(error);
+  }
 }
 
 function captureHomeroomOptions(currentHomeroom = '') {
@@ -3708,15 +4018,43 @@ function captureHomeroomOptions(currentHomeroom = '') {
   return options.sort((first, second) => first.localeCompare(second, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
+function captureUppercase(value) {
+  return String(value || '').toUpperCase();
+}
+
+function uppercaseCaptureInput(event) {
+  const input = event && event.target;
+  if (!input || input.tagName !== 'INPUT' || event.isComposing) {
+    return;
+  }
+  const type = String(input.type || 'text').toLowerCase();
+  if (!['text', 'search'].includes(type) || input.name === 'notes') {
+    return;
+  }
+  const uppercaseValue = captureUppercase(input.value);
+  if (uppercaseValue === input.value) {
+    return;
+  }
+  const selectionStart = input.selectionStart;
+  const selectionEnd = input.selectionEnd;
+  input.value = uppercaseValue;
+  if (selectionStart !== null && selectionEnd !== null) {
+    input.setSelectionRange(selectionStart, selectionEnd);
+  }
+}
+
 function renderCaptureHomeroomField(subject, disabled = false) {
-  const value = subject.homeroom || '';
+  const value = captureUppercase(subject.homeroom || '');
   const options = captureHomeroomOptions(value);
   const disabledAttr = disabled ? 'disabled' : '';
   if (options.length) {
     return `
       <select name="homeroom" ${disabledAttr}>
         <option value="">Choose homeroom</option>
-        ${options.map((homeroom) => `<option value="${escapeHtml(homeroom)}" ${homeroom === value ? 'selected' : ''}>${escapeHtml(homeroom)}</option>`).join('')}
+        ${options.map((homeroom) => {
+          const uppercaseHomeroom = captureUppercase(homeroom);
+          return `<option value="${escapeHtml(uppercaseHomeroom)}" ${uppercaseHomeroom === value ? 'selected' : ''}>${escapeHtml(uppercaseHomeroom)}</option>`;
+        }).join('')}
       </select>
     `;
   }
@@ -3753,7 +4091,7 @@ function renderCaptureSubject() {
     <div class="capture-subject-current ${subject.imageAssetId ? 'has-photo' : ''}">
       <div class="capture-subject-info-column">
         <div class="capture-subject-card">
-          <span>${escapeHtml(subject.ref || '')}</span>
+          <span class="capture-reference-number">Reference # ${escapeHtml(subject.ref || '')}</span>
           <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
           <em>${escapeHtml([subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</em>
           <small>${escapeHtml(subject.externalId || '')}</small>
@@ -3763,30 +4101,32 @@ function renderCaptureSubject() {
       <form class="capture-subject-form" data-capture-subject-form data-subject-id="${subject.id}">
         <div class="subheading">
           <h3>Student Info</h3>
-          <span data-capture-subject-status></span>
+          <div class="capture-subject-heading-actions">
+            <span data-capture-subject-status></span>
+            ${editButton}
+          </div>
         </div>
         <div class="capture-subject-fields compact">
           <label>
             <span>First Name</span>
-            <input name="firstName" value="${escapeHtml(subject.firstName || '')}" ${lockedAttr}>
+            <input name="firstName" value="${escapeHtml(captureUppercase(subject.firstName))}" ${lockedAttr}>
           </label>
           <label>
             <span>Last Name</span>
-            <input name="lastName" value="${escapeHtml(subject.lastName || '')}" ${lockedAttr}>
+            <input name="lastName" value="${escapeHtml(captureUppercase(subject.lastName))}" ${lockedAttr}>
           </label>
           <label>
             <span>Student ID</span>
-            <input name="externalId" value="${escapeHtml(subject.externalId || '')}" ${lockedAttr}>
+            <input name="externalId" value="${escapeHtml(captureUppercase(subject.externalId))}" ${lockedAttr}>
           </label>
           <label>
             <span>Grade</span>
-            <input name="grade" value="${escapeHtml(subject.grade || '')}" ${lockedAttr}>
+            <input name="grade" value="${escapeHtml(captureUppercase(subject.grade))}" ${lockedAttr}>
           </label>
           <label class="capture-homeroom-field">
             <span>Homeroom</span>
             <div class="capture-homeroom-row">
               ${homeroomField}
-              ${editButton}
             </div>
           </label>
           <label class="wide-field">
@@ -3804,8 +4144,9 @@ function renderCaptureSubject() {
 function renderCaptureCompare() {
   const images = jobsState.captureImages || [];
   capturePreviewMeta.textContent = jobsState.captureSubject
-    ? `${formatNumber(images.length)} comparison image${images.length === 1 ? '' : 's'}`
+    ? `Compare ${formatNumber(images.length)}`
     : '';
+  capturePreviewMeta.disabled = !jobsState.captureSubject || images.length === 0;
 
   if (!jobsState.captureSubject) {
     captureCompareGrid.innerHTML = '<div class="empty-state">Load a student, then capture images into CaptureHotFolder.</div>';
@@ -3928,11 +4269,11 @@ function bindCaptureSubjectForm() {
     try {
       if (form.elements.firstName) {
         const updatedSubjectFields = {
-          externalId: form.elements.externalId.value,
-          firstName: form.elements.firstName.value,
-          lastName: form.elements.lastName.value,
-          grade: form.elements.grade.value,
-          homeroom: form.elements.homeroom.value,
+          externalId: captureUppercase(form.elements.externalId.value),
+          firstName: captureUppercase(form.elements.firstName.value),
+          lastName: captureUppercase(form.elements.lastName.value),
+          grade: captureUppercase(form.elements.grade.value),
+          homeroom: captureUppercase(form.elements.homeroom.value),
           track: subject.track || '',
           team: subject.team || '',
           subjectType: subject.subjectType || 'student',
@@ -4015,12 +4356,13 @@ async function setCaptureSubject(subject, focusBarcode = false) {
     return;
   }
 
+  setCaptureRosterOpen(false);
   const shouldEditBlank = isBlankCaptureSubject(subject);
   jobsState.captureSubject = subject;
   jobsState.captureSubjectEditId = shouldEditBlank ? subject.id : null;
   jobsState.captureCompareSlotIds = null;
   jobsState.selectedSubjectId = subject.id;
-  captureEntryForm.elements.barcode.value = subject.ref || subject.externalId || '';
+  captureEntryForm.elements.barcode.value = captureUppercase(subject.ref || subject.externalId || '');
   captureEntryStatus.textContent = '';
   renderCaptureSubject();
   await loadCaptureImages();
@@ -4050,7 +4392,7 @@ function renderCaptureStudentSearchResults() {
   captureStudentSearchResults.innerHTML = results.map((subject, index) => `
     <button class="${index === jobsState.captureSearchActiveIndex ? 'active' : ''}" data-capture-student-index="${index}" type="button">
       <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
-      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade ? `Grade ${subject.grade}` : '', subject.homeroom ? `HR ${subject.homeroom}` : ''].filter(Boolean).join(' / '))}</span>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.externalId ? `ID ${subject.externalId}` : '', subject.grade ? `Grade ${subject.grade}` : '', subject.homeroom ? `HR ${subject.homeroom}` : ''].filter(Boolean).join(' / '))}</span>
     </button>
   `).join('');
   captureStudentSearchResults.hidden = false;
@@ -4069,7 +4411,7 @@ async function searchCaptureStudents() {
   const input = captureEntryForm.elements.studentSearch;
   const search = input.value.trim();
   const mode = captureEntryForm.elements.searchMode ? captureEntryForm.elements.searchMode.value : 'all';
-  const minimumLength = mode === 'grade' || mode === 'homeroom' ? 1 : 2;
+  const minimumLength = ['id', 'grade', 'homeroom'].includes(mode) ? 1 : 2;
   if (!jobsState.selectedJobId || search.length < minimumLength) {
     hideCaptureStudentSearch();
     return;
@@ -4162,8 +4504,29 @@ async function selectCaptureImage(imageId, control) {
       ...image,
       selected: Number(image.id) === Number(imageId)
     }));
+    const slots = jobsState.captureCompareSlotIds;
+    const selectedAlreadyVisible = slots && [slots.previousId, slots.recentId]
+      .some((slotId) => Number(slotId) === Number(imageId));
+    if (slots && !selectedAlreadyVisible) {
+      jobsState.captureCompareSlotIds = {
+        previousId: Number(imageId),
+        recentId: Number(slots.recentId) === Number(imageId) ? slots.previousId : slots.recentId
+      };
+    }
+    jobsState.captureSubject = {
+      ...jobsState.captureSubject,
+      imageAssetId: Number(imageId)
+    };
+    const detailSubject = findById(jobsState.detail?.subjects || [], jobsState.captureSubject.id);
+    if (detailSubject) {
+      detailSubject.imageAssetId = Number(imageId);
+      detailSubject.photographedStatus = 'photographed';
+    }
+    renderCaptureSubject();
     renderCaptureCompare();
-    focusCaptureBarcode(true);
+    if (!captureComparisonModal || captureComparisonModal.hidden) {
+      focusCaptureBarcode(true);
+    }
   } catch (error) {
     captureEntryStatus.textContent = error.message || 'Could not select image';
     console.error(error);
@@ -4240,6 +4603,7 @@ function renderUnlinkedEnvelopeScans() {
 async function showEnvelopeScan(scanId) {
   jobsState.viewingEnvelopeScanId = scanId;
   orderEnvelopeModal.hidden = false;
+  restoreElectronFocus(closeOrderEnvelopeButton).catch((error) => console.error(error));
   orderEnvelopeActions.hidden = false;
   orderEnvelopeTitle.textContent = `Envelope Scan #${scanId}`;
   orderEnvelopePreview.innerHTML = '<div class="empty-state">Loading envelope...</div>';
@@ -4262,7 +4626,7 @@ async function assignViewedEnvelopeScan() {
     return;
   }
   if (!subject) {
-    alert('Load a student reference before assigning this envelope.');
+    await showMessage('Load a student reference before assigning this envelope.', { type: 'warning' });
     envelopeEntryForm.elements.barcode.focus();
     return;
   }
@@ -4296,7 +4660,12 @@ async function deleteViewedEnvelopeScan() {
   if (!scanId) {
     return;
   }
-  if (!confirm('Delete this unlinked envelope scan and its image file?')) {
+  if (!(await confirmAction({
+    type: 'warning',
+    title: 'Delete Envelope Scan',
+    message: 'Delete this unlinked envelope scan and its image file?',
+    confirmLabel: 'Delete Scan'
+  }))) {
     return;
   }
 
@@ -4311,7 +4680,7 @@ async function deleteViewedEnvelopeScan() {
     closeOrderEnvelope();
     await loadUnlinkedEnvelopeScans();
   } catch (error) {
-    alert(error.message || 'Could not delete envelope.');
+    await showMessage(error.message || 'Could not delete envelope.', { type: 'error' });
     console.error(error);
   } finally {
     assignEnvelopeScanButton.disabled = false;
@@ -4541,7 +4910,7 @@ function showEnvelopeConfirm(pending) {
   jobsState.envelopePending = pending;
   envelopeConfirmMessage.textContent = `Another envelope was scanned. Attach ${pending.filename} to ref ${jobsState.envelopeSubject.ref || ''}?`;
   envelopeConfirmModal.hidden = false;
-  confirmEnvelopeButton.focus();
+  restoreElectronFocus(confirmEnvelopeButton).catch((error) => console.error(error));
 }
 
 async function respondEnvelopeConfirm(accept) {
@@ -4900,6 +5269,275 @@ function bindDirectoryOptions() {
       renderAdminItemsWorkspace();
     });
   });
+}
+
+function closeCaptureImageAction() {
+  jobsState.captureImageActionId = null;
+  captureImageActionForm.hidden = true;
+  captureImageActionForm.reset();
+  captureImageActionStatus.textContent = '';
+  captureActionStudentResults.hidden = true;
+  captureActionStudentResults.innerHTML = '';
+  captureActionSelectedStudent.hidden = false;
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureActionStudentPreview.hidden = true;
+  captureActionStudentPhoto.innerHTML = '';
+}
+
+function closeCaptureComparison() {
+  closeCaptureImageAction();
+  captureComparisonModal.hidden = true;
+  appShell.inert = false;
+  focusCaptureBarcode(true);
+}
+
+function captureComparisonCardHtml(image) {
+  return `
+    <article class="capture-comparison-card-item ${image.selected ? 'selected' : ''}" data-capture-comparison-image="${image.id}">
+      <div class="capture-comparison-badges">
+        ${image.selected ? '<span class="status ready">Selected</span>' : '<span class="status">Comparison</span>'}
+        ${image.rawPath ? `<span class="status">JPG + ${rawFileTypeLabel(image.rawPath)}</span>` : '<span class="status">JPG</span>'}
+      </div>
+      <div class="capture-comparison-image">
+        ${image.dataUrl ? `<img data-capture-comparison-orient src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}">` : '<div class="empty-state">Preview unavailable.</div>'}
+      </div>
+      <div class="capture-comparison-meta">
+        <strong>${escapeHtml(image.filename || '')}</strong>
+        <span>${escapeHtml(image.capturedAt ? formatShortDateTime(image.capturedAt) : '')}</span>
+      </div>
+      <div class="capture-comparison-actions">
+        <button class="primary" data-capture-comparison-select="${image.id}" type="button" ${image.selected ? 'disabled' : ''}>${image.selected ? 'Selected' : 'Set Selected'}</button>
+        <button data-capture-comparison-move="${image.id}" type="button">Move to Student</button>
+        <button class="danger-button" data-capture-comparison-remove="${image.id}" type="button">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderCaptureComparison() {
+  const subject = jobsState.captureSubject;
+  const images = jobsState.captureImages || [];
+  captureComparisonSubject.textContent = subject
+    ? `${subject.ref || ''} ${subject.name || 'Unnamed student'}`
+    : 'No student selected';
+  captureComparisonStatus.textContent = images.length
+    ? `${formatNumber(images.length)} image${images.length === 1 ? '' : 's'} captured for this student`
+    : 'No comparison images are available.';
+  captureComparisonScroller.innerHTML = images.length
+    ? images.map(captureComparisonCardHtml).join('')
+    : '<div class="empty-state">Capture an image to begin comparing.</div>';
+
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-orient]').forEach((image) => {
+    const orient = () => image.classList.toggle('rotate-ccw', image.naturalWidth > image.naturalHeight);
+    if (image.complete) orient();
+    else image.addEventListener('load', orient, { once: true });
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-select]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await selectCaptureImage(Number(button.dataset.captureComparisonSelect), button);
+      renderCaptureComparison();
+    });
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-move]').forEach((button) => {
+    button.addEventListener('click', () => openCaptureImageAction(Number(button.dataset.captureComparisonMove), 'wrong_student'));
+  });
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-remove]').forEach((button) => {
+    button.addEventListener('click', () => openCaptureImageAction(Number(button.dataset.captureComparisonRemove), 'keep_review'));
+  });
+}
+
+function openCaptureComparison() {
+  if (!jobsState.captureSubject || !(jobsState.captureImages || []).length) {
+    return;
+  }
+  closeCaptureImageAction();
+  renderCaptureComparison();
+  captureComparisonModal.hidden = false;
+  appShell.inert = true;
+  restoreElectronFocus(closeCaptureComparisonButton).catch((error) => console.error(error));
+}
+
+function updateCaptureImageActionForm() {
+  const reason = captureImageActionForm.elements.reason.value;
+  const needsStudent = reason === 'wrong_student';
+  const image = (jobsState.captureImages || []).find((item) => Number(item.id) === Number(jobsState.captureImageActionId));
+  const replacementImages = (jobsState.captureImages || []).filter((item) => Number(item.id) !== Number(jobsState.captureImageActionId));
+  const needsReplacement = !needsStudent && Boolean(image && image.selected) && replacementImages.length > 0;
+  captureActionStudentSearch.hidden = !needsStudent;
+  if (!needsStudent) {
+    captureActionStudentPreview.hidden = true;
+  }
+  captureActionReplacementField.hidden = !needsReplacement;
+  captureImageActionForm.elements.replacementImageId.innerHTML = replacementImages.map((item) => `
+    <option value="${item.id}">${escapeHtml(item.filename || `Image ${item.id}`)}</option>
+  `).join('');
+  confirmCaptureImageActionButton.textContent = needsStudent
+    ? 'Move Image'
+    : ['duplicate_test', 'poor_image'].includes(reason)
+      ? 'Reject Image'
+      : 'Send to Review';
+  if (!needsStudent) {
+    captureImageActionForm.elements.targetSubjectId.value = '';
+    captureImageActionForm.elements.studentSearch.value = '';
+    captureActionStudentResults.hidden = true;
+  }
+  captureImageActionForm.elements.notes.required = reason === 'other';
+}
+
+function openCaptureImageAction(imageId, reason) {
+  const image = (jobsState.captureImages || []).find((item) => Number(item.id) === Number(imageId));
+  if (!image) {
+    return;
+  }
+  jobsState.captureImageActionId = image.id;
+  captureImageActionForm.reset();
+  captureImageActionForm.elements.reason.value = reason;
+  captureImageActionFilename.textContent = image.filename || '';
+  captureImageActionTitle.textContent = reason === 'wrong_student' ? 'Move Image to Correct Student' : 'Remove Image from Student';
+  captureImageActionStatus.textContent = '';
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureImageActionForm.hidden = false;
+  updateCaptureImageActionForm();
+  const focusTarget = reason === 'wrong_student'
+    ? captureImageActionForm.elements.studentSearch
+    : captureImageActionForm.elements.reason;
+  restoreElectronFocus(focusTarget).catch((error) => console.error(error));
+}
+
+function captureActionMatchingStudents() {
+  const search = captureImageActionForm.elements.studentSearch.value.trim().toLowerCase();
+  if (search.length < 2) {
+    return [];
+  }
+  return (jobsState.detail && jobsState.detail.subjects ? jobsState.detail.subjects : [])
+    .filter((subject) => Number(subject.id) !== Number(jobsState.captureSubject && jobsState.captureSubject.id))
+    .filter((subject) => [subject.ref, subject.name, subject.externalId, subject.grade, subject.homeroom]
+      .some((value) => String(value || '').toLowerCase().includes(search)))
+    .slice(0, 12);
+}
+
+function renderCaptureActionStudentResults() {
+  const subjects = captureActionMatchingStudents();
+  captureActionStudentResults.innerHTML = subjects.map((subject) => `
+    <button data-capture-action-subject="${subject.id}" type="button">
+      <strong>${escapeHtml(subject.name || 'Unnamed student')}</strong>
+      <span>${escapeHtml([subject.ref ? `Ref ${subject.ref}` : '', subject.grade, subject.homeroom].filter(Boolean).join(' / '))}</span>
+    </button>
+  `).join('');
+  captureActionStudentResults.hidden = !subjects.length;
+  captureActionStudentResults.querySelectorAll('[data-capture-action-subject]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', () => {
+      const subject = findById(jobsState.detail.subjects || [], Number(button.dataset.captureActionSubject));
+      if (!subject) return;
+      captureImageActionForm.elements.targetSubjectId.value = subject.id;
+      captureImageActionForm.elements.studentSearch.value = `${subject.ref || ''} ${subject.name || ''}`.trim();
+      captureActionSelectedStudent.textContent = `Move to ${subject.ref || ''} ${subject.name || 'Unnamed student'}`;
+      captureActionStudentResults.hidden = true;
+      showCaptureActionSelectedStudent(subject).catch((error) => console.error(error));
+    });
+  });
+}
+
+async function showCaptureActionSelectedStudent(subject) {
+  const subjectId = Number(subject && subject.id);
+  if (!subjectId) {
+    captureActionStudentPreview.hidden = true;
+    captureActionStudentPhoto.innerHTML = '';
+    return;
+  }
+  captureActionStudentPreviewName.textContent = `${subject.ref || ''} ${subject.name || 'Unnamed student'}`.trim();
+  captureActionStudentPreviewMeta.textContent = [subject.grade, subject.homeroom].filter(Boolean).join(' / ') || 'No grade or homeroom';
+  captureActionStudentPhoto.innerHTML = '<div class="empty-state">Loading...</div>';
+  captureActionSelectedStudent.hidden = true;
+  captureActionStudentPreview.hidden = false;
+
+  if (!subject.imageAssetId) {
+    captureActionStudentPhoto.innerHTML = '<div class="empty-state">No current photo</div>';
+    return;
+  }
+  const preview = await trecsApi('getImagePreview').getImagePreview(subject.imageAssetId);
+  if (Number(captureImageActionForm.elements.targetSubjectId.value) !== subjectId) {
+    return;
+  }
+  if (!preview || preview.missing || !preview.dataUrl) {
+    captureActionStudentPhoto.innerHTML = '<div class="empty-state">No current photo</div>';
+    return;
+  }
+  captureActionStudentPhoto.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Current student photo')}">`;
+  setLandscapeRotation(captureActionStudentPhoto.querySelector('img'));
+}
+
+async function submitCaptureImageAction(event) {
+  event.preventDefault();
+  const imageId = Number(jobsState.captureImageActionId);
+  const subject = jobsState.captureSubject;
+  if (!imageId || !subject) {
+    return;
+  }
+  const reason = captureImageActionForm.elements.reason.value;
+  const targetSubjectId = Number(captureImageActionForm.elements.targetSubjectId.value || 0) || null;
+  if (reason === 'wrong_student' && !targetSubjectId) {
+    captureImageActionStatus.textContent = 'Choose the correct student.';
+    captureImageActionForm.elements.studentSearch.focus();
+    return;
+  }
+  if (reason === 'other' && !captureImageActionForm.elements.notes.value.trim()) {
+    captureImageActionStatus.textContent = 'Add a note explaining this action.';
+    captureImageActionForm.elements.notes.focus();
+    return;
+  }
+  if (reason !== 'wrong_student' && (jobsState.captureImages || []).length === 1) {
+    const proceed = await confirmAction({
+      type: 'warning',
+      title: 'Remove Only Image',
+      message: 'This is the student’s only usable image.',
+      detail: 'Removing it will leave the student without a selected photo.',
+      confirmLabel: 'Remove Image'
+    });
+    if (!proceed) {
+      return;
+    }
+  }
+
+  confirmCaptureImageActionButton.disabled = true;
+  captureImageActionStatus.textContent = 'Saving...';
+  try {
+    const result = await trecsApi('resolveCaptureImage').resolveCaptureImage({
+      sourceSubjectId: subject.id,
+      targetSubjectId,
+      imageId,
+      reason,
+      notes: captureImageActionForm.elements.notes.value,
+      replacementImageId: Number(captureImageActionForm.elements.replacementImageId.value || 0) || null,
+      photographerName: jobsState.captureSession && jobsState.captureSession.photographerName,
+      workstationName: jobsState.captureSession && jobsState.captureSession.workstationName
+    });
+    jobsState.detail = await trecsApi('getJobDetail').getJobDetail(jobsState.selectedJobId);
+    const refreshedSubject = findById(jobsState.detail.subjects || [], subject.id);
+    jobsState.captureSubject = refreshedSubject
+      ? { ...subject, ...refreshedSubject }
+      : {
+          ...subject,
+          imageAssetId: result.sourceReplacementId || null,
+          photographedStatus: result.sourceReplacementId ? 'photographed' : 'unknown'
+        };
+    renderCapturePhotoCount();
+    closeCaptureImageAction();
+    await loadCaptureImages();
+    renderCaptureSubject();
+    renderCaptureComparison();
+    captureComparisonStatus.textContent = result.actionType === 'move'
+      ? 'Image moved to the selected student.'
+      : result.actionType === 'reject'
+        ? 'Image rejected and removed from this student.'
+        : 'Image removed and sent to Review Images.';
+  } catch (error) {
+    captureImageActionStatus.textContent = error.message || 'Could not update image.';
+    console.error(error);
+  } finally {
+    confirmCaptureImageActionButton.disabled = false;
+  }
 }
 
 function renderStickerOptions(listNames) {
@@ -5423,8 +6061,17 @@ function idTemplateBackgroundDataUrl(backgroundName) {
 
 function renderIdTemplateDesigner() {
   const designer = jobsState.idTemplateDesigner;
-  if (!designer.loaded) {
+  const currentJobId = Number(jobsState.selectedJobId);
+  if (!designer.loaded || Number(designer.jobId) !== currentJobId) {
+    if (designer.loading && Number(designer.loadingJobId) === currentJobId) {
+      return;
+    }
+    designer.loading = true;
+    designer.loadingJobId = currentJobId;
+    idTemplateList.innerHTML = '<div class="empty-state">Loading templates for this job...</div>';
+    idTemplateFolderLabel.textContent = '';
     loadIdTemplateDesigner().catch((error) => {
+      designer.loading = false;
       idTemplateStatus.textContent = error.message || 'Could not load ID templates';
       console.error(error);
     });
@@ -5515,13 +6162,28 @@ function renderIdTemplateProperties() {
   const template = jobsState.idTemplateDesigner.template || createDefaultIdTemplate();
   const key = jobsState.idTemplateDesigner.selectedElement;
   const element = template.elements && template.elements[key];
+  const restorableElements = ID_TEMPLATE_ELEMENT_DEFINITIONS.filter((definition) => {
+    const current = template.elements && template.elements[definition.key];
+    return !current || current.enabled === false;
+  });
+  const addFieldControls = `
+    <div class="id-template-add-field">
+      <select data-id-template-add-field aria-label="Field to add" ${restorableElements.length ? '' : 'disabled'}>
+        ${restorableElements.length
+          ? restorableElements.map((definition) => `<option value="${escapeHtml(definition.key)}">${escapeHtml(definition.label)}</option>`).join('')
+          : '<option>All fields are shown</option>'}
+      </select>
+      <button class="primary" data-id-template-add-field-button type="button" ${restorableElements.length ? '' : 'disabled'}>Add Field</button>
+    </div>
+  `;
   if (!element) {
-    idTemplateProperties.innerHTML = '<div class="empty-state">Select an element to edit its position and style.</div>';
+    idTemplateProperties.innerHTML = `${addFieldControls}<div class="empty-state">Select an element to edit its position and style.</div>`;
     return;
   }
   const isText = element.kind === 'text';
   const isBarcode = element.kind === 'barcode';
   idTemplateProperties.innerHTML = `
+    ${addFieldControls}
     <h3>${escapeHtml(element.label || key)}</h3>
     <label class="checkbox-label">
       <input data-id-template-property="enabled" type="checkbox" ${element.enabled !== false ? 'checked' : ''}>
@@ -5580,15 +6242,57 @@ function renderIdTemplateProperties() {
   `;
 }
 
+function addIdTemplateField(keyValue) {
+  const definition = ID_TEMPLATE_ELEMENT_DEFINITIONS.find((item) => item.key === String(keyValue || ''));
+  const template = jobsState.idTemplateDesigner.template;
+  if (!definition || !template) {
+    return;
+  }
+  template.elements = template.elements || {};
+  template.elements[definition.key] = {
+    ...definition,
+    ...(template.elements[definition.key] || {}),
+    enabled: true
+  };
+  jobsState.idTemplateDesigner.selectedElement = definition.key;
+  renderIdTemplateStage();
+  renderIdTemplateProperties();
+  idTemplateStatus.textContent = `${definition.label} added. Save the template to keep this change.`;
+}
+
 async function loadIdTemplateDesigner() {
-  const payload = await trecsApi('listIdTemplates').listIdTemplates(jobsState.selectedJobId);
+  const jobId = Number(jobsState.selectedJobId);
+  const previousDesigner = jobsState.idTemplateDesigner;
+  const sameJob = Number(previousDesigner.jobId) === jobId;
+  const payload = await trecsApi('listIdTemplates').listIdTemplates(jobId);
+  if (Number(jobsState.selectedJobId) !== jobId) {
+    return;
+  }
+  const preferredTemplateId = sameJob && previousDesigner.selectedTemplateId
+    ? Number(previousDesigner.selectedTemplateId)
+    : Number(payload.studentIdTemplateId || payload.facultyIdTemplateId || 0);
+  const preferredTemplate = preferredTemplateId
+    && payload.templates.some((item) => Number(item.id) === preferredTemplateId)
+    ? await trecsApi('loadIdTemplate').loadIdTemplate(jobId, String(preferredTemplateId))
+    : null;
+  if (Number(jobsState.selectedJobId) !== jobId) {
+    return;
+  }
   jobsState.idTemplateDesigner = {
-    ...jobsState.idTemplateDesigner,
+    ...previousDesigner,
     loaded: true,
+    loading: false,
+    loadingJobId: null,
+    jobId,
     folder: payload.folder || '',
     templates: payload.templates || [],
     backgrounds: payload.backgrounds || [],
-    template: jobsState.idTemplateDesigner.template || createDefaultIdTemplate()
+    selectedFileName: preferredTemplate ? preferredTemplate.fileName : '',
+    selectedTemplateId: preferredTemplate ? preferredTemplateId : null,
+    selectedElement: 'photo',
+    template: preferredTemplate
+      ? normalizeIdTemplateForDesigner(preferredTemplate.template)
+      : createDefaultIdTemplate()
   };
   renderIdTemplateDesigner();
 }
@@ -6183,8 +6887,7 @@ function openEditJobModal() {
   editJobForm.elements.notes.value = job.notes || '';
   editJobStatus.textContent = '';
   editJobModal.hidden = false;
-  editJobForm.elements.name.focus();
-  editJobForm.elements.name.select();
+  restoreElectronFocus(editJobForm.elements.name, true).catch((error) => console.error(error));
 }
 
 function closeEditJobModal() {
@@ -6475,7 +7178,7 @@ function selectedJobIdForAction() {
   if (jobsState.selectedJobId) {
     return jobsState.selectedJobId;
   }
-  window.alert('Select a job first.');
+  showMessage('Select a job first.', { type: 'warning' }).catch((error) => console.error(error));
   return null;
 }
 
@@ -6517,7 +7220,7 @@ async function performPrepareOnsiteSetup(jobId) {
       packagePath: result.packagePath,
       subjects: result.counts.subjects
     };
-    alert(`Onsite setup created.\n\n${result.packagePath}`);
+    await showMessage(`Onsite setup created.\n\n${result.packagePath}`);
     await loadPictureDayPrep(true);
   } catch (error) {
     jobsState.lastLaptopPackage = {
@@ -6604,6 +7307,7 @@ async function openCameraCardsModal(jobId) {
     filterOptions: { grades: [], homerooms: [], tracks: [] }
   };
   cameraCardsModal.hidden = false;
+  restoreElectronFocus(cameraCardsForm.elements.source).catch((error) => console.error(error));
   cameraCardsForm.elements.source.value = jobsState.cameraCardSource || 'all';
   cameraCardsForm.elements.sortMethod.value = jobsState.cameraCardSortMethod || 'alpha_grade';
   cameraCardsForm.elements.outputFolder.value = jobsState.adminOutputFolder || '';
@@ -6942,6 +7646,7 @@ function setCropToolVisible(visible) {
   if (visible) {
     renderCropToolBatchList();
     drawCropTool();
+    restoreElectronFocus(chooseCropToolImageButton).catch((error) => console.error(error));
   }
 }
 
@@ -7105,6 +7810,17 @@ async function handleTrecsMenuAction(action) {
     return;
   }
 
+  if (action === 'id-card-render') {
+    jobsState.idCardRenderJobId = jobsState.jobWorkspaceOpen
+      ? Number(jobsState.detail?.summary?.id || jobsState.selectedJobId || 0) || null
+      : null;
+    if (jobsState.jobWorkspaceOpen) {
+      closeJobWorkspace();
+    }
+    setView('idCardRender');
+    return;
+  }
+
   if (action === 'package-plan-editor') {
     if (jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
@@ -7136,6 +7852,7 @@ async function handleTrecsMenuAction(action) {
   }
 
   if (action === 'event-workflow') {
+    jobsState.eventPinnedJobId = jobsState.jobWorkspaceOpen ? Number(jobsState.detail?.summary?.id || jobsState.selectedJobId || 0) || null : null;
     if (jobsState.jobWorkspaceOpen) closeJobWorkspace();
     setView('events');
     return;
@@ -7880,9 +8597,14 @@ async function unlinkLinkedImage(subjectId, imageId, control) {
   hideImageHoverPreview();
   const image = linkedImagesForSubject(subjectId).find((item) => Number(item.imageAssetId) === Number(imageId));
   const label = image && image.filename ? image.filename : `image #${imageId}`;
-  if (!confirm(`Unlink ${label} from this student? If this image has no other student links, the reference prefix will be removed from the filename.`)) {
+  const confirmed = window.trecs && typeof window.trecs.confirmImageUnlink === 'function'
+    ? await window.trecs.confirmImageUnlink(label)
+    : confirm(`Unlink ${label} from this student? If this image has no other student links, the reference prefix will be removed from the filename.`);
+  if (!confirmed) {
+    await restoreElectronFocus();
     return;
   }
+  await restoreElectronFocus();
 
   const originalText = control ? control.textContent : '';
   if (control) {
@@ -8139,7 +8861,7 @@ async function acquireUiJobLock(jobId, scope = 'job_write') {
   const result = await trecsApi('acquireJobSession').acquireJobSession(Number(jobId), scope);
   if (!result.acquired) {
     const owner = [result.conflict?.userName, result.conflict?.workstationName].filter(Boolean).join(' on ');
-    window.alert(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nTRECS will release an abandoned lock automatically after two minutes.`);
+    await showMessage(`${result.job.clientName} / ${result.job.name} is currently in use${owner ? ` by ${owner}` : ' on another workstation'}.\n\nIf TRECS was closed normally, the lock is released immediately. After an unexpected shutdown on another workstation, the lock expires automatically after two minutes.`, { type: 'warning' });
     return false;
   }
   activeJobLockIds.add(Number(jobId));
@@ -8213,7 +8935,12 @@ async function saveCurrentStudentList() {
 }
 
 async function deleteCurrentStudentList() {
-  if (!jobsState.studentListId || !window.confirm(`Delete “${studentListName.value}”?`)) return;
+  if (!jobsState.studentListId || !(await confirmAction({
+    type: 'warning',
+    title: 'Delete Student List',
+    message: `Delete “${studentListName.value}”?`,
+    confirmLabel: 'Delete List'
+  }))) return;
   const jobId = Number(jobsState.studentListSetup.selectedJobId); if (!(await acquireUiJobLock(jobId))) return;
   await trecsApi('deleteStudentList').deleteStudentList(jobsState.studentListId); await loadStudentListSetup(jobId); studentListStatus.textContent = 'List deleted.';
 }
@@ -8277,6 +9004,67 @@ async function loadProductionSyncSettings() {
   const settings = await trecsApi('getProductionSyncSettings').getProductionSyncSettings();
   populateProductionSyncSettings(settings);
   productionSyncStatus.textContent = 'Preview sheet updates before pushing.';
+  await loadProductionStatusDashboard();
+}
+
+function productionMilestoneClass(status) {
+  if (status === 'done') return 'ready';
+  if (status === 'in_progress') return 'review';
+  if (status === 'blocked') return 'error';
+  return '';
+}
+
+function productionMilestoneLabel(status) {
+  return {
+    not_started: 'Not started',
+    in_progress: 'In progress',
+    done: 'Done',
+    blocked: 'Blocked'
+  }[status] || formatType(status || 'not_started');
+}
+
+function renderProductionStatusDashboard(dashboard) {
+  jobsState.productionStatusDashboard = dashboard;
+  if (!dashboard?.rows?.length) {
+    productionMilestoneGrid.innerHTML = '<div class="empty-state">No active jobs found for production tracking.</div>';
+    return;
+  }
+  productionMilestoneGrid.innerHTML = `
+    <div class="production-milestone-header">
+      <strong>${formatNumber(dashboard.totals?.jobs || 0)} jobs</strong>
+      <span>${formatNumber(dashboard.totals?.completedMilestones || 0)} of ${formatNumber(dashboard.totals?.milestones || 0)} milestones complete</span>
+    </div>
+    <div class="production-milestone-list">
+      ${dashboard.rows.map((row) => `
+        <article class="production-milestone-row">
+          <div class="production-milestone-school">
+            <strong>${escapeHtml(row.schoolName || '')}</strong>
+            <span>${escapeHtml([row.jobName, row.jobType].filter(Boolean).join(' / '))}</span>
+            <small>${formatNumber(row.photographed || 0)} photographed / ${formatNumber(row.subjects || 0)} subjects / ${formatNumber(row.orders || 0)} orders</small>
+          </div>
+          <div class="production-milestone-chips">
+            ${(row.milestones || []).map((milestone) => {
+              if (milestone.automatic) {
+                return `<span class="status ${productionMilestoneClass(milestone.status)}">${escapeHtml(milestone.label)}: ${escapeHtml(milestone.value || productionMilestoneLabel(milestone.status))}</span>`;
+              }
+              return `<label class="production-manual-milestone"><span>${escapeHtml(milestone.label)}</span><select data-production-milestone-job="${row.jobId}" data-production-milestone-key="${escapeHtml(milestone.key)}">
+                ${['not_started', 'in_progress', 'done', 'blocked'].map((status) => `<option value="${status}" ${milestone.status === status ? 'selected' : ''}>${productionMilestoneLabel(status)}</option>`).join('')}
+              </select></label>`;
+            }).join('')}
+          </div>
+        </article>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function loadProductionStatusDashboard() {
+  try {
+    const dashboard = await trecsApi('getProductionStatusDashboard').getProductionStatusDashboard();
+    renderProductionStatusDashboard(dashboard);
+  } catch (error) {
+    productionMilestoneGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load production milestones.')}</div>`;
+  }
 }
 
 function renderProductionSyncPreview(preview) {
@@ -8369,6 +9157,26 @@ async function testProductionSync() {
   }
 }
 
+async function buildProductionSheet() {
+  buildProductionSheetButton.disabled = true;
+  previewProductionSyncButton.disabled = true;
+  pushProductionSyncButton.disabled = true;
+  productionSyncStatus.textContent = 'Building production tracker sheet...';
+  try {
+    await saveProductionSyncSettings();
+    const result = await trecsApi('buildProductionStatusSheet').buildProductionStatusSheet(productionSyncInput());
+    productionSyncStatus.textContent = `Built ${result.settings?.sheetName || 'production tracker'} with ${formatNumber(result.rows || 0)} jobs and ${formatNumber(result.columns || 0)} columns as ${result.serviceAccountEmail || 'service account'}.`;
+    await loadProductionStatusDashboard();
+  } catch (error) {
+    productionSyncStatus.textContent = error.message || 'Could not build production tracker sheet.';
+    console.error(error);
+  } finally {
+    buildProductionSheetButton.disabled = false;
+    previewProductionSyncButton.disabled = false;
+    pushProductionSyncButton.disabled = !(jobsState.productionSyncPreview?.updates || []).length;
+  }
+}
+
 async function pushProductionSync() {
   pushProductionSyncButton.disabled = true;
   productionSyncStatus.textContent = 'Pushing production status updates...';
@@ -8379,6 +9187,29 @@ async function pushProductionSync() {
     productionSyncStatus.textContent = `Pushed ${formatNumber(result.pushed || 0)} cell update${Number(result.pushed || 0) === 1 ? '' : 's'} to ${result.settings?.sheetName || 'Google Sheets'}.`;
   } catch (error) {
     productionSyncStatus.textContent = error.message || 'Could not push production sync.';
+  }
+}
+
+async function saveProductionMilestoneFromSelect(select) {
+  const jobId = Number(select.dataset.productionMilestoneJob);
+  const milestoneKey = select.dataset.productionMilestoneKey;
+  const previousValue = jobsState.productionStatusDashboard?.rows
+    ?.find((row) => Number(row.jobId) === jobId)
+    ?.milestones?.find((milestone) => milestone.key === milestoneKey)?.status || 'not_started';
+  select.disabled = true;
+  productionSyncStatus.textContent = 'Saving production milestone...';
+  try {
+    const dashboard = await trecsApi('saveProductionMilestone').saveProductionMilestone({
+      jobId,
+      milestoneKey,
+      status: select.value
+    });
+    renderProductionStatusDashboard(dashboard);
+    productionSyncStatus.textContent = 'Production milestone saved.';
+  } catch (error) {
+    select.value = previousValue;
+    productionSyncStatus.textContent = error.message || 'Could not save production milestone.';
+    select.disabled = false;
   }
 }
 
@@ -8427,13 +9258,18 @@ async function loadEventImagePreview(imageAssetId, container, missingText) {
 
 function renderEventJobSetup() {
   const setup = jobsState.eventSetup;
+  const pinned = Boolean(jobsState.eventPinnedJobId);
+  const eventJobLabel = eventJobSelect.closest('label');
+  if (eventJobLabel) eventJobLabel.hidden = pinned;
   eventJobSelect.innerHTML = setup?.eventJobs?.length ? setup.eventJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedEventJobId) ? 'selected' : ''}>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</option>`).join('') : '<option value="">No event jobs yet</option>';
   eventFallJobSelect.innerHTML = setup?.fallJobs?.length ? `<option value="">Choose the matching fall job</option>${setup.fallJobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.linkedFallJobId) ? 'selected' : ''}>${escapeHtml(job.jobName)} · ${formatNumber(job.subjects)} students · ${formatNumber(job.photographed)} photos</option>`).join('')}` : '<option value="">No fall jobs for this school</option>';
   const empty = !setup?.selectedEventJobId;
   eventWorkflowEmpty.hidden = !empty; eventWorkflowLayout.hidden = empty;
   linkEventFallJobButton.disabled = empty || !setup.fallJobs.length;
   importEventImagesButton.disabled = empty;
-  eventSetupStatus.textContent = empty ? 'Create an Event job to begin.' : setup.linkedFallJobId ? 'Fall student records linked. Ready for image matching.' : 'Choose and link the fall job before matching students.';
+  const currentJob = setup?.eventJobs?.find((job) => Number(job.id) === Number(setup.selectedEventJobId));
+  const currentJobText = pinned && currentJob ? `${currentJob.clientName} / ${currentJob.jobName}: ` : '';
+  eventSetupStatus.textContent = empty ? 'Create an Event job first.' : setup.linkedFallJobId ? `${currentJobText}Fall student records linked. Ready for image matching.` : `${currentJobText}Choose and link the fall job before matching students.`;
 }
 
 function filteredEventQueue() {
@@ -8447,7 +9283,13 @@ function renderEventQueue() {
   const setup = jobsState.eventSetup; if (!setup) return;
   const queue = filteredEventQueue();
   eventQueueCount.textContent = `${queue.length} of ${setup.queue.length}`;
-  eventImageQueue.innerHTML = queue.length ? queue.map((entry) => `<button class="event-image-card ${Number(entry.id) === Number(setup.selectedEntry?.id) ? 'active' : ''}" data-event-entry-id="${entry.id}" type="button"><span><strong>Image ${escapeHtml(entry.imageNumber)}</strong><small>${escapeHtml(entry.linkedNames || entry.filename)}</small></span><span class="status ${eventStatusClass(entry.status)}">${escapeHtml(eventStatusLabel(entry.status))}</span></button>`).join('') : '<div class="empty-state">No event images match this filter.</div>';
+  eventImageQueue.innerHTML = queue.length ? queue.map((entry) => {
+    const linkedNames = String(entry.linkedNames || '').split(' / ').map((name) => name.trim()).filter(Boolean);
+    const detail = linkedNames.length
+      ? `<span class="event-linked-name-list">${linkedNames.map((name) => `<small>${escapeHtml(name)}</small>`).join('')}</span>`
+      : `<small>${escapeHtml(entry.filename || '')}</small>`;
+    return `<button class="event-image-card ${Number(entry.id) === Number(setup.selectedEntry?.id) ? 'active' : ''}" data-event-entry-id="${entry.id}" type="button"><span><strong>Image ${escapeHtml(entry.imageNumber)}</strong>${detail}</span><span class="status ${eventStatusClass(entry.status)}">${escapeHtml(eventStatusLabel(entry.status))}</span></button>`;
+  }).join('') : '<div class="empty-state">No event images match this filter.</div>';
 }
 
 function renderEventExistingLinks() {
@@ -8460,12 +9302,10 @@ function renderEventSelectedCandidate() {
   if (!candidate) {
     eventSelectedStudent.innerHTML = '<span>No fall student selected.</span>';
     eventFallPreview.innerHTML = '<div class="empty-state">Select a fall student result.</div>';
-    eventOrderForm.elements.confirmed.checked = false;
     return;
   }
   const name = candidate.name || [candidate.firstName, candidate.lastName].filter(Boolean).join(' ') || `Ref ${candidate.ref}`;
   eventSelectedStudent.innerHTML = `<strong>${escapeHtml(name)}</strong><span>${escapeHtml([candidate.ref ? `Ref ${candidate.ref}` : '', candidate.grade ? `Grade ${candidate.grade}` : '', candidate.homeroom || ''].filter(Boolean).join(' · '))}</span>`;
-  eventOrderForm.elements.confirmed.checked = false;
   const existing = jobsState.eventSetup?.selectedEntry?.links?.find((link) => Number(link.subjectId) === Number(candidate.id || candidate.subjectId));
   eventOrderForm.elements.orderCodes.value = existing?.packageCodes || '';
   eventOrderForm.elements.paidStatus.value = existing?.paidStatus || 'paid';
@@ -8557,7 +9397,7 @@ async function saveEventOrder(goNext) {
   if (!(await acquireUiJobLock(setup.selectedEventJobId))) return;
   jobsState.eventSaving = true; eventSaveNextButton.disabled = true; eventSaveStayButton.disabled = true;
   try {
-    const result = await trecsApi('saveEventMatch').saveEventMatch({ eventJobId: setup.selectedEventJobId, entryId: setup.selectedEntry.id, fallSubjectId: candidate.id || candidate.subjectId, confirmed: eventOrderForm.elements.confirmed.checked, orderCodes: eventOrderForm.elements.orderCodes.value, paidStatus: eventOrderForm.elements.paidStatus.value, notes: eventOrderForm.elements.notes.value });
+    const result = await trecsApi('saveEventMatch').saveEventMatch({ eventJobId: setup.selectedEventJobId, entryId: setup.selectedEntry.id, fallSubjectId: candidate.id || candidate.subjectId, confirmed: true, orderCodes: eventOrderForm.elements.orderCodes.value, paidStatus: eventOrderForm.elements.paidStatus.value, notes: eventOrderForm.elements.notes.value });
     await loadEventWorkflow(setup.selectedEventJobId, goNext ? result.nextEntryId : result.entryId);
     eventOrderStatus.textContent = result.orderId ? 'Student linked and picture order saved.' : 'Student linked without an order.';
     if (goNext) { eventStudentSearch.focus(); eventStudentSearch.select(); } else { jobsState.eventSelectedCandidateId = null; renderEventSelectedCandidate(); eventStudentSearch.focus(); eventStudentSearch.select(); }
@@ -8586,6 +9426,7 @@ function productCategoryOptions(selected = '') {
     ['print_bundle', 'Print Bundle'],
     ['group_print', 'Group / Composite Print'],
     ['id_card', 'ID Card'],
+    ['event_item', 'Event Items'],
     ['image_prep', 'ImagePrep'],
     ['specialty', 'Photoshop Handoff / Specialty'],
     ['digital', 'Digital'],
@@ -8850,7 +9691,11 @@ function bindPackageEditor(selected) {
     }
   });
   document.querySelector('#saveProductsDefaultButton').addEventListener('click', async (event) => {
-    if (!window.confirm('Save the current product list as the default products loaded by TRECS?')) return;
+    if (!(await confirmAction({
+      title: 'Save Default Products',
+      message: 'Save the current product list as the default products loaded by TRECS?',
+      confirmLabel: 'Save Defaults'
+    }))) return;
     event.currentTarget.disabled = true;
     try {
       rememberProductListScroll();
@@ -8919,7 +9764,12 @@ function bindPackageEditor(selected) {
     }
     if (deleteButton) {
       const product = jobsState.packageEditor.products.find((row) => Number(row.id) === Number(deleteButton.dataset.deleteProduct));
-      if (!product || !window.confirm(`Delete product ${product.name}?`)) return;
+      if (!product || !(await confirmAction({
+        type: 'warning',
+        title: 'Delete Product',
+        message: `Delete product ${product.name}?`,
+        confirmLabel: 'Delete Product'
+      }))) return;
       deleteButton.disabled = true;
       try {
         rememberProductListScroll();
@@ -9009,7 +9859,12 @@ function bindPackageEditor(selected) {
     } catch (error) { status.textContent = error.message; }
   });
   document.querySelector('#deletePackageCodeButton').addEventListener('click', async () => {
-    if (!selected || !window.confirm(`Delete package code ${selected.code}?`)) return;
+    if (!selected || !(await confirmAction({
+      type: 'warning',
+      title: 'Delete Package Code',
+      message: `Delete package code ${selected.code}?`,
+      confirmLabel: 'Delete Code'
+    }))) return;
     rememberPackageCodeListScroll();
     await trecsApi('deletePackageCode').deletePackageCode(selected.id);
     jobsState.packageEditor = await trecsApi('getPackageEditorData').getPackageEditorData(jobsState.packageEditorPlanId);
@@ -9033,6 +9888,8 @@ async function loadJobDetail(jobId) {
   jobsState.captureImages = [];
   jobsState.captureCompareSlotIds = null;
   jobsState.captureSearchResults = [];
+  jobsState.captureRosterOpen = false;
+  jobsState.captureRosterFilter = 'all';
   hideCaptureStudentSearch();
   jobsState.envelopeSubject = null;
   jobsState.envelopeScan = null;
@@ -9063,6 +9920,9 @@ async function reloadCurrentJobDetail() {
     } else if (jobsState.workspaceMode === 'capture') {
       if (captureEditing) {
         renderCapturePhotoCount();
+        if (jobsState.captureRosterOpen) {
+          renderCaptureRoster();
+        }
       } else {
         renderCaptureWorkspace();
       }
@@ -9081,13 +9941,15 @@ async function reloadCurrentJobDetail() {
 async function loadImagePreview(imageId, options = {}) {
   const panel = document.getElementById(options.panelId || 'imagePreviewPanel');
   if (!panel || !imageId) {
-    if (panel) {
-      panel.innerHTML = '<div class="empty-state">Select an image to review.</div>';
-    }
     return;
   }
 
+  const requestId = `${imageId}:${Date.now()}:${Math.random()}`;
+  panel.dataset.previewRequest = requestId;
   const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+  if (!panel.isConnected || panel.dataset.previewRequest !== requestId) {
+    return;
+  }
   if (!preview || preview.missing || !preview.dataUrl) {
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     return;
@@ -9359,6 +10221,25 @@ function unitRenderSelectedJob() {
   return setup.jobs.find((job) => Number(job.id) === Number(unitRenderForm.elements.jobId.value)) || null;
 }
 
+function unitRenderJobIsEvent(job = unitRenderSelectedJob()) {
+  return ['event', 'qr_event'].includes(String(job?.type || '').toLowerCase());
+}
+
+function renderUnitRenderModeOptions() {
+  const isEvent = unitRenderJobIsEvent();
+  if (unitRenderEventOptions) unitRenderEventOptions.hidden = !isEvent;
+  exportImagePrepButton.hidden = isEvent;
+  unitRenderForm.elements.includeUnits.closest('.unit-render-checks').hidden = isEvent;
+  const sortSelect = unitRenderForm.elements.sortBy;
+  const previous = sortSelect.value;
+  sortSelect.innerHTML = isEvent
+    ? '<option value="imageNumber" selected>Image Number</option><option value="ref">Reference</option><option value="homeroom">Homeroom</option>'
+    : '<option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option>';
+  if ([...sortSelect.options].some((option) => option.value === previous)) {
+    sortSelect.value = previous;
+  }
+}
+
 function renderUnitRenderFilter() {
   const setup = jobsState.unitRenderSetup;
   if (!setup) return;
@@ -9378,6 +10259,14 @@ function renderUnitRenderSummary() {
     return;
   }
   unitRenderForm.elements.packagePlan.value = job.packagePlan || 'No package plan';
+  if (unitRenderJobIsEvent(job)) {
+    unitRenderMetrics.innerHTML = `
+      <article><span>Coded Event Orders</span><strong>${formatNumber(job.paidOrders)}</strong></article>
+      <article><span>Ready Event Images</span><strong>${formatNumber(job.readyOrders)}</strong></article>
+      <article><span>Event Images</span><strong>${formatNumber(job.eventImages || 0)}</strong></article>
+      <article><span>Package Plan</span><strong>${escapeHtml(job.packagePlan || 'None')}</strong></article>`;
+    return;
+  }
   unitRenderMetrics.innerHTML = `
     <article><span>Paid Orders</span><strong>${formatNumber(job.paidOrders)}</strong></article>
     <article><span>Ready With Photo</span><strong>${formatNumber(job.readyOrders)}</strong></article>
@@ -9392,6 +10281,7 @@ async function loadUnitRenderSetup(jobId = null) {
   jobsState.unitRenderSetup = await trecsApi('getUnitRenderSetup').getUnitRenderSetup(previousJobId);
   const setup = jobsState.unitRenderSetup;
   unitRenderForm.elements.jobId.innerHTML = setup.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(setup.selectedJobId) ? 'selected' : ''}>${escapeHtml(`${job.clientName} — ${job.jobName}`)}</option>`).join('');
+  renderUnitRenderModeOptions();
   renderUnitRenderSummary();
   renderUnitRenderFilter();
   unitRenderStatus.textContent = setup.jobs.length ? 'Choose an output folder, then render.' : 'No jobs are available.';
@@ -9468,9 +10358,17 @@ async function submitUnitRender(event) {
       includeEnvelopes: unitRenderForm.elements.includeEnvelopes.checked,
       includeLabels: unitRenderForm.elements.includeLabels.checked,
       includeCompositeNotice: unitRenderForm.elements.includeCompositeNotice.checked,
+      eventPlanMode: unitRenderForm.elements.eventPlanMode?.value || 'package_plan',
+      eventIndividualCards: unitRenderForm.elements.eventIndividualCards?.checked !== false,
+      eventStackSheets: unitRenderForm.elements.eventStackSheets?.checked !== false,
+      eventPdf: unitRenderForm.elements.eventPdf?.checked !== false,
       outputFolder
     });
-    unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.zipFiles || 0} zips, ${result.idCards || 0} ID cards, ${result.addons || 0} AddOns, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}. ${result.outputFolder || ''}`;
+    if (result.eventRender) {
+      unitRenderStatus.textContent = `Complete: ${result.cards || 0} event cards, ${result.sheetPages || 0} stack sheet${Number(result.sheetPages || 0) === 1 ? '' : 's'}, ${result.pdfPath ? 'PDF built' : 'no PDF'}, ${result.missingPhotos?.length || 0} missing photo(s), ${result.unsupportedItems?.length || 0} skipped item(s). ${result.outputFolder || ''}`;
+    } else {
+      unitRenderStatus.textContent = `Complete: ${result.units} unit sheets, ${result.tenByThirteens || 0} 10x13s, ${result.digitalDownloads || 0} digital downloads, ${result.zipFiles || 0} zips, ${result.idCards || 0} ID cards, ${result.addons || 0} AddOns, ${result.envelopes} envelopes, ${result.largeEnvelopes} large envelopes, ${result.labels} labels. ${result.unsupportedItems.length} template items skipped${result.missingImagePrep?.length ? `; ${result.missingImagePrep.length} missing ImagePrep image(s)` : ''}. ${result.outputFolder || ''}`;
+    }
   } catch (error) {
     unitRenderStatus.textContent = error.message || 'Render failed.';
     console.error(error);
@@ -9763,6 +10661,147 @@ async function loadJobs() {
   renderJobsScreen();
 }
 
+function idCardRenderSelectedJob() {
+  const jobId = Number(idCardRenderForm.elements.jobId.value || jobsState.idCardRenderJobId || 0);
+  return jobsState.jobs.find((job) => Number(job.id) === jobId) || null;
+}
+
+function renderIdCardBackgroundPreview(background = null) {
+  if (!background) {
+    idCardRenderBackgroundPreview.innerHTML = '<span>Grade backgrounds will be used.</span>';
+    return;
+  }
+  idCardRenderBackgroundPreview.innerHTML = `${background.dataUrl ? `<img src="${background.dataUrl}" alt="Selected ID card background">` : ''}<span><strong>${escapeHtml(background.fileName)}</strong> will be used for every card in this render.</span>`;
+}
+
+function renderIdCardRenderSetup() {
+  const setup = jobsState.idCardRenderSetup;
+  const job = idCardRenderSelectedJob();
+  if (!setup || !job) {
+    idCardRenderMetrics.innerHTML = '<div class="empty-state">No job is available for ID card rendering.</div>';
+    startIdCardRenderButton.disabled = true;
+    return;
+  }
+  const listNames = setup.adminItems?.listNames || [];
+  const templateSetup = setup.templates || {};
+  const metrics = setup.adminItems?.metrics || {};
+  const selectedListName = idCardRenderForm.elements.listName.value;
+  const selectedTemplateId = idCardRenderForm.elements.templateOverrideId.value;
+  idCardRenderForm.elements.listName.innerHTML = listNames.length
+    ? listNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')
+    : '<option value="">No saved lists</option>';
+  idCardRenderForm.elements.templateOverrideId.innerHTML = `<option value="">Use Job Template Assignments</option>${(templateSetup.templates || []).map((template) => `<option value="${template.id}">${escapeHtml(template.name)} (${escapeHtml(formatType(template.templateType))})</option>`).join('')}`;
+  if (listNames.includes(selectedListName)) {
+    idCardRenderForm.elements.listName.value = selectedListName;
+  }
+  if ((templateSetup.templates || []).some((template) => String(template.id) === selectedTemplateId)) {
+    idCardRenderForm.elements.templateOverrideId.value = selectedTemplateId;
+  }
+  idCardRenderListField.hidden = idCardRenderForm.elements.source.value !== 'list';
+  const templateById = new Map((templateSetup.templates || []).map((template) => [Number(template.id), template.name]));
+  const studentTemplate = templateById.get(Number(templateSetup.studentIdTemplateId)) || 'Default Student ID';
+  const staffTemplate = templateById.get(Number(templateSetup.facultyIdTemplateId)) || studentTemplate;
+  idCardRenderMetrics.innerHTML = `
+    <article><span>Students</span><strong>${formatNumber(metrics.subjects || 0)}</strong></article>
+    <article><span>Photographed</span><strong>${formatNumber(metrics.photographed || 0)}</strong></article>
+    <article><span>Student Template</span><strong>${escapeHtml(studentTemplate)}</strong></article>
+    <article><span>Staff Template</span><strong>${escapeHtml(staffTemplate)}</strong></article>
+  `;
+  startIdCardRenderButton.disabled = jobsState.idCardRenderRunning || (idCardRenderForm.elements.source.value === 'list' && !listNames.length);
+}
+
+async function loadIdCardRenderSetup(jobId = null) {
+  if (!jobsState.jobs.length) {
+    await loadJobs();
+  }
+  const previousId = Number(jobId || jobsState.idCardRenderJobId || idCardRenderForm.elements.jobId.value || 0);
+  const selectedJob = jobsState.jobs.find((job) => Number(job.id) === previousId) || jobsState.jobs[0] || null;
+  idCardRenderForm.elements.jobId.innerHTML = jobsState.jobs.length
+    ? jobsState.jobs.map((job) => `<option value="${job.id}" ${Number(job.id) === Number(selectedJob?.id) ? 'selected' : ''}>${escapeHtml(`${job.location} / ${job.job}`)}</option>`).join('')
+    : '<option value="">No jobs available</option>';
+  jobsState.idCardRenderJobId = selectedJob ? Number(selectedJob.id) : null;
+  if (!selectedJob) {
+    jobsState.idCardRenderSetup = null;
+    renderIdCardRenderSetup();
+    return;
+  }
+  idCardRenderStatus.textContent = 'Loading ID card options...';
+  const [adminItems, templates] = await Promise.all([
+    trecsApi('getAdminItems').getAdminItems(selectedJob.id, 'original_picture_day'),
+    trecsApi('listIdTemplates').listIdTemplates(selectedJob.id)
+  ]);
+  jobsState.idCardRenderSetup = { adminItems, templates };
+  renderIdCardRenderSetup();
+  idCardRenderStatus.textContent = 'Choose an output folder, then render.';
+}
+
+async function chooseIdCardRenderBackground() {
+  const job = idCardRenderSelectedJob();
+  if (!job) return;
+  chooseIdCardRenderBackgroundButton.disabled = true;
+  try {
+    const result = await trecsApi('chooseIdTemplateBackground').chooseIdTemplateBackground(job.id);
+    if (!result.canceled) {
+      idCardRenderForm.elements.backgroundOverride.value = result.fileName;
+      jobsState.idCardRenderBackground = result;
+      renderIdCardBackgroundPreview(result);
+    }
+  } catch (error) {
+    idCardRenderStatus.textContent = error.message || 'Could not choose the background.';
+  } finally {
+    chooseIdCardRenderBackgroundButton.disabled = false;
+  }
+}
+
+async function browseIdCardRenderOutput() {
+  browseIdCardRenderOutputButton.disabled = true;
+  try {
+    const result = await trecsApi('chooseAdminOutputFolder').chooseAdminOutputFolder();
+    if (!result.canceled) {
+      idCardRenderForm.elements.outputFolder.value = result.folderPath;
+    }
+  } catch (error) {
+    idCardRenderStatus.textContent = error.message || 'Could not choose the output folder.';
+  } finally {
+    browseIdCardRenderOutputButton.disabled = false;
+  }
+}
+
+async function submitIdCardRender(event) {
+  event.preventDefault();
+  if (jobsState.idCardRenderRunning) return;
+  const job = idCardRenderSelectedJob();
+  if (!job) return;
+  jobsState.idCardRenderRunning = true;
+  startIdCardRenderButton.disabled = true;
+  idCardRenderProgress.value = 15;
+  idCardRenderStatus.textContent = 'Preparing ID card sheets...';
+  try {
+    const result = await trecsApi('renderAdminItem').renderAdminItem(job.id, {
+      type: 'id_cards',
+      stage: 'original_picture_day',
+      idCardSource: idCardRenderForm.elements.source.value,
+      idCardListName: idCardRenderForm.elements.listName.value,
+      idCardReason: idCardRenderForm.elements.reason.value,
+      idCardSortMethod: idCardRenderForm.elements.sortMethod.value,
+      idCardPhotographedOnly: idCardRenderForm.elements.photographedOnly.checked,
+      idCardTemplateOverrideId: idCardRenderForm.elements.templateOverrideId.value || null,
+      idCardBackgroundOverride: idCardRenderForm.elements.backgroundOverride.value,
+      directorySchoolYear: idCardRenderForm.elements.schoolYear.value,
+      outputFolder: idCardRenderForm.elements.outputFolder.value
+    });
+    idCardRenderProgress.value = 100;
+    idCardRenderStatus.textContent = `Rendered ${formatNumber(result.subjects || 0)} ID card${Number(result.subjects || 0) === 1 ? '' : 's'} to ${result.pdfPath || result.absoluteOutputPath}.`;
+  } catch (error) {
+    idCardRenderProgress.value = 0;
+    idCardRenderStatus.textContent = error.message || 'ID card render failed.';
+    console.error(error);
+  } finally {
+    jobsState.idCardRenderRunning = false;
+    renderIdCardRenderSetup();
+  }
+}
+
 async function submitNewSchool(event) {
   event.preventDefault();
   const button = newSchoolForm.querySelector('button[type="submit"]');
@@ -9937,9 +10976,9 @@ async function loadOnsiteSetup() {
       await loadJobDetail(firstLoaded.id);
     }
     const skippedText = result.counts.skipped ? `\nSkipped ${result.counts.skipped}.` : '';
-    window.alert(`Loaded ${result.counts.loaded} onsite setup${result.counts.loaded === 1 ? '' : 's'}.${skippedText}`);
+    await showMessage(`Loaded ${result.counts.loaded} onsite setup${result.counts.loaded === 1 ? '' : 's'}.${skippedText}`);
   } catch (error) {
-    window.alert(error.message || 'Load onsite setup failed');
+    await showMessage(error.message || 'Load onsite setup failed', { type: 'error' });
     console.error(error);
   } finally {
     if (loadOnsiteSetupButton) {
@@ -9973,7 +11012,7 @@ async function loadEndOfDayPackage() {
 
     openEndOfDayPackageReview(choice);
   } catch (error) {
-    window.alert(error.message || 'Load End of Day failed');
+    await showMessage(error.message || 'Load End of Day failed', { type: 'error' });
     console.error(error);
   } finally {
     if (loadEndOfDayButton) {
@@ -10002,6 +11041,7 @@ async function loadDashboard() {
 }
 
 loadDashboard();
+configureStationMode().catch((error) => console.error('Could not configure capture station mode.', error));
 
 toggleSidebarButton.addEventListener('click', () => {
   setSidebarCollapsed(!appShell.classList.contains('sidebar-collapsed'));
@@ -10012,12 +11052,33 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'jobs') {
       jobsState.selectedTab = 'subjects';
     }
-    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
+    if (button.dataset.viewButton === 'events') {
+      jobsState.eventPinnedJobId = null;
+    }
+    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'idCardRender', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
     }
     setView(button.dataset.viewButton);
   });
 });
+
+idCardRenderForm.elements.jobId.addEventListener('change', () => {
+  idCardRenderForm.elements.backgroundOverride.value = '';
+  jobsState.idCardRenderBackground = null;
+  renderIdCardBackgroundPreview();
+  loadIdCardRenderSetup(Number(idCardRenderForm.elements.jobId.value)).catch((error) => {
+    idCardRenderStatus.textContent = error.message || 'Could not load ID card options.';
+  });
+});
+idCardRenderForm.elements.source.addEventListener('change', renderIdCardRenderSetup);
+idCardRenderForm.addEventListener('submit', submitIdCardRender);
+chooseIdCardRenderBackgroundButton.addEventListener('click', chooseIdCardRenderBackground);
+clearIdCardRenderBackgroundButton.addEventListener('click', () => {
+  idCardRenderForm.elements.backgroundOverride.value = '';
+  jobsState.idCardRenderBackground = null;
+  renderIdCardBackgroundPreview();
+});
+browseIdCardRenderOutputButton.addEventListener('click', browseIdCardRenderOutput);
 
 eventJobSelect.addEventListener('change', async () => {
   const previousId = jobsState.eventSetup?.selectedEventJobId;
@@ -10028,6 +11089,10 @@ linkEventFallJobButton.addEventListener('click', configureSelectedEventFallJob);
 importEventImagesButton.addEventListener('click', importSelectedEventImages);
 createEventJobButton.addEventListener('click', () => {
   setView('jobs'); setNewJobFormVisible(true); newJobForm.elements.type.value = 'event'; newJobForm.elements.name.focus();
+});
+eventBackToJobsButton.addEventListener('click', () => {
+  jobsState.eventPinnedJobId = null;
+  setView('jobs');
 });
 eventImageQueue.addEventListener('click', (event) => { const button = event.target.closest('[data-event-entry-id]'); if (button) selectEventEntry(Number(button.dataset.eventEntryId)).catch((error) => { eventOrderStatus.textContent = error.message; }); });
 eventQueueFilters.addEventListener('click', (event) => { const button = event.target.closest('[data-event-queue-filter]'); if (!button) return; jobsState.eventQueueFilter = button.dataset.eventQueueFilter; eventQueueFilters.querySelectorAll('[data-event-queue-filter]').forEach((item) => item.classList.toggle('active', item === button)); renderEventQueue(); });
@@ -10056,7 +11121,21 @@ eventPackageCodeShortcuts.addEventListener('click', (event) => { const button = 
 eventOrderForm.addEventListener('submit', (event) => { event.preventDefault(); saveEventOrder(true); });
 eventSaveStayButton.addEventListener('click', () => saveEventOrder(false));
 eventAddAnotherButton.addEventListener('click', () => { jobsState.eventSelectedCandidateId = null; eventStudentSearch.value = ''; eventOrderForm.reset(); eventOrderForm.elements.paidStatus.value = 'paid'; renderEventSelectedCandidate(); searchEventStudents().catch((error) => { eventOrderStatus.textContent = error.message; }); eventStudentSearch.focus(); });
-eventExistingLinks.addEventListener('click', async (event) => { const button = event.target.closest('[data-remove-event-link]'); if (!button || !window.confirm('Remove this fall-student match and its event order?')) return; try { await trecsApi('removeEventSubjectLink').removeEventSubjectLink(Number(button.dataset.removeEventLink)); await loadEventWorkflow(jobsState.eventSetup.selectedEventJobId, jobsState.eventSetup.selectedEntry.id); } catch (error) { eventOrderStatus.textContent = error.message; } });
+eventExistingLinks.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-remove-event-link]');
+  if (!button || !(await confirmAction({
+    type: 'warning',
+    title: 'Remove Student Match',
+    message: 'Remove this fall-student match and its event order?',
+    confirmLabel: 'Remove Match'
+  }))) return;
+  try {
+    await trecsApi('removeEventSubjectLink').removeEventSubjectLink(Number(button.dataset.removeEventLink));
+    await loadEventWorkflow(jobsState.eventSetup.selectedEventJobId, jobsState.eventSetup.selectedEntry.id);
+  } catch (error) {
+    eventOrderStatus.textContent = error.message;
+  }
+});
 
 studentListJobSelect.addEventListener('change', () => loadStudentListSetup(Number(studentListJobSelect.value)).catch((error) => { studentListStatus.textContent = error.message; }));
 studentListSearch.addEventListener('input', renderStudentListBuilder);
@@ -10074,8 +11153,13 @@ importOnlineOrdersButton.addEventListener('click', importReadyOnlineOrders);
 chooseProductionSyncCredentialsButton.addEventListener('click', chooseProductionSyncCredentials);
 saveProductionSyncSettingsButton.addEventListener('click', saveProductionSyncSettings);
 testProductionSyncButton.addEventListener('click', testProductionSync);
+buildProductionSheetButton.addEventListener('click', buildProductionSheet);
 previewProductionSyncButton.addEventListener('click', previewProductionSync);
 pushProductionSyncButton.addEventListener('click', pushProductionSync);
+productionMilestoneGrid.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-production-milestone-job]');
+  if (select) saveProductionMilestoneFromSelect(select);
+});
 browseBatchRenderOutputButton.addEventListener('click', browseBatchRenderOutput);
 refreshBatchRenderButton.addEventListener('click', () => loadBatchRenderSetup().catch((error) => { batchRenderStatus.textContent = error.message; }));
 batchRenderForm.addEventListener('submit', submitBatchRender);
@@ -10305,6 +11389,14 @@ if (idTemplateStage) {
 }
 
 if (idTemplateProperties) {
+  idTemplateProperties.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-id-template-add-field-button]');
+    if (!button) {
+      return;
+    }
+    const select = idTemplateProperties.querySelector('[data-id-template-add-field]');
+    addIdTemplateField(select && select.value);
+  });
   idTemplateProperties.addEventListener('change', (event) => {
     const control = event.target.closest('[data-id-template-property]');
     if (!control) {
@@ -10518,6 +11610,9 @@ if (cropToolCanvas) {
   });
 }
 
+captureEntryForm.addEventListener('input', uppercaseCaptureInput);
+captureSubjectDetail.addEventListener('input', uppercaseCaptureInput);
+captureImageActionForm.addEventListener('input', uppercaseCaptureInput);
 captureEntryForm.addEventListener('submit', (event) => {
   event.preventDefault();
   lookupCaptureSubject();
@@ -10530,13 +11625,34 @@ captureEntryForm.elements.barcode.addEventListener('keydown', (event) => {
 });
 captureEntryForm.elements.studentSearch.addEventListener('input', () => {
   clearTimeout(jobsState.captureSearchTimer);
+  if (jobsState.captureRosterOpen) {
+    renderCaptureRoster();
+    return;
+  }
   jobsState.captureSearchTimer = setTimeout(searchCaptureStudents, 180);
 });
 captureEntryForm.elements.searchMode.addEventListener('change', () => {
   clearTimeout(jobsState.captureSearchTimer);
+  if (jobsState.captureRosterOpen) {
+    renderCaptureRoster();
+    return;
+  }
   jobsState.captureSearchTimer = setTimeout(searchCaptureStudents, 60);
 });
 captureEntryForm.elements.studentSearch.addEventListener('keydown', (event) => {
+  if (jobsState.captureRosterOpen) {
+    if (event.key === 'ArrowDown') {
+      const firstRow = captureRosterTableBody.querySelector('[data-capture-roster-subject]');
+      if (firstRow) {
+        event.preventDefault();
+        firstRow.focus();
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      setCaptureRosterOpen(false);
+    }
+    return;
+  }
   const results = jobsState.captureSearchResults || [];
   if (event.key === 'ArrowDown' && results.length) {
     event.preventDefault();
@@ -10556,6 +11672,21 @@ captureEntryForm.elements.studentSearch.addEventListener('keydown', (event) => {
 captureEntryForm.elements.studentSearch.addEventListener('blur', () => {
   setTimeout(hideCaptureStudentSearch, 120);
 });
+if (captureRosterToggleButton) {
+  captureRosterToggleButton.addEventListener('click', () => {
+    setCaptureRosterOpen(!jobsState.captureRosterOpen);
+  });
+}
+if (captureRosterFilters) {
+  captureRosterFilters.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-capture-roster-filter]');
+    if (!button) {
+      return;
+    }
+    jobsState.captureRosterFilter = button.dataset.captureRosterFilter;
+    renderCaptureRoster();
+  });
+}
 if (captureFileModeToggle) {
   captureFileModeToggle.addEventListener('click', (event) => {
     const button = event.target.closest('[data-capture-file-mode]');
@@ -10676,7 +11807,13 @@ applyStudentFieldsToAllButton.addEventListener('click', async () => {
   }
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
+  if (event.key === 'Escape' && captureComparisonModal && !captureComparisonModal.hidden) {
+    if (!captureImageActionForm.hidden) {
+      closeCaptureImageAction();
+    } else {
+      closeCaptureComparison();
+    }
+  } else if (event.key === 'Escape' && imageLightboxModal && !imageLightboxModal.hidden) {
     closeImageLightbox();
   } else if (event.key === 'ArrowLeft' && imageLightboxModal && !imageLightboxModal.hidden) {
     moveLightboxImage(-1);
@@ -10714,10 +11851,11 @@ endOfDayModal.addEventListener('wheel', (event) => {
   }
 
   const target = event.target instanceof Element ? event.target : event.target.parentElement;
+  const scrollableSelector = '.end-of-day-list, .end-of-day-section-body, .end-of-day-review';
   const candidates = target
-    ? Array.from(target.closest('.end-of-day-card')?.querySelectorAll('.end-of-day-section-body, .end-of-day-review') || [])
+    ? Array.from(target.closest('.end-of-day-card')?.querySelectorAll(scrollableSelector) || [])
     : [];
-  const nearestScrollable = target ? target.closest('.end-of-day-section-body, .end-of-day-review') : null;
+  const nearestScrollable = target ? target.closest(scrollableSelector) : null;
   const scrollTarget = [nearestScrollable, ...candidates]
     .filter(Boolean)
     .find((candidate) => {
@@ -10741,23 +11879,49 @@ cancelSchoolDataButton.addEventListener('click', () => {
 browseSchoolDataButton.addEventListener('click', browseSchoolDataFile);
 confirmSchoolDataButton.addEventListener('click', confirmSchoolDataImport);
 captureLoginForm.addEventListener('submit', submitCaptureLogin);
+window.addEventListener('focus', () => {
+  if (!captureLoginModal.hidden) {
+    focusCaptureLoginPhotographer().catch((error) => console.error(error));
+  }
+});
 cancelCaptureLoginButton.addEventListener('click', () => {
   const jobId = jobsState.pendingCaptureJobId;
   setCaptureLoginVisible(false);
   if (jobId && !jobsState.jobWorkspaceOpen) releaseUiJobLocks(jobId).catch((error) => console.error(error));
 });
-window.addEventListener('focus', () => {
-  if (!captureLoginModal.hidden) {
-    focusCaptureLoginPhotographer();
-  }
-});
 refreshUnlinkedEnvelopesButton.addEventListener('click', loadUnlinkedEnvelopeScans);
 if (window.trecs && typeof window.trecs.onEnvelopeScanImported === 'function') {
   window.trecs.onEnvelopeScanImported(handleEnvelopeScanImported);
 }
+let captureImageImportRefreshQueue = Promise.resolve();
 if (window.trecs && typeof window.trecs.onCaptureImageImported === 'function') {
-  window.trecs.onCaptureImageImported(handleCaptureImageImported);
+  window.trecs.onCaptureImageImported((payload) => {
+    captureImageImportRefreshQueue = captureImageImportRefreshQueue
+      .then(() => handleCaptureImageImported(payload))
+      .catch((error) => {
+        captureEntryStatus.textContent = error.message || 'Could not refresh captured images';
+        console.error(error);
+      });
+  });
 }
+capturePreviewMeta.addEventListener('click', openCaptureComparison);
+closeCaptureComparisonButton.addEventListener('click', closeCaptureComparison);
+cancelCaptureImageActionButton.addEventListener('click', closeCaptureImageAction);
+captureImageActionForm.elements.reason.addEventListener('change', updateCaptureImageActionForm);
+captureImageActionForm.elements.studentSearch.addEventListener('input', () => {
+  captureImageActionForm.elements.targetSubjectId.value = '';
+  captureActionSelectedStudent.hidden = false;
+  captureActionSelectedStudent.textContent = 'Choose the student this image belongs to.';
+  captureActionStudentPreview.hidden = true;
+  captureActionStudentPhoto.innerHTML = '';
+  renderCaptureActionStudentResults();
+});
+captureImageActionForm.addEventListener('submit', submitCaptureImageAction);
+captureComparisonModal.addEventListener('click', (event) => {
+  if (event.target === captureComparisonModal) {
+    closeCaptureComparison();
+  }
+});
 
 if (newSchoolButton) {
   newSchoolButton.addEventListener('click', () => {

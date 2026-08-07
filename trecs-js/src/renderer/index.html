@@ -28,6 +28,7 @@
           <button data-view-button="productionSync">Production Sync</button>
           <button data-view-button="dataVerification">Data Verification</button>
           <button data-view-button="staffVerification">Staff Verification</button>
+          <button data-view-button="idCardRender">ID Card Render</button>
           <button data-view-button="unitRender">Unit Render</button>
           <button data-view-button="batchRender">Batch Render</button>
           <button data-view-button="composites">Class Composites</button>
@@ -84,7 +85,7 @@
           <section class="panel event-workflow-panel">
             <div class="panel-heading">
               <div><h2>Event Workflow</h2><p>Match event photographs to the school’s fall students, visually confirm identity, and key picture orders at production speed.</p></div>
-              <span class="status ready">Fall-record linked</span>
+              <div class="event-heading-actions"><button id="eventBackToJobsButton" type="button">Back to Jobs</button><span class="status ready">Fall-record linked</span></div>
             </div>
             <div class="event-setup-toolbar">
               <label><span>Event Job</span><select id="eventJobSelect"></select></label>
@@ -117,7 +118,6 @@
                 <div id="eventStudentResults" class="event-student-results"><div class="empty-state">Link a fall job to begin searching.</div></div>
                 <form id="eventOrderForm" class="event-order-form">
                   <div id="eventSelectedStudent" class="event-selected-student"><span>No fall student selected.</span></div>
-                  <label class="event-confirm-line"><input name="confirmed" type="checkbox"><span>I confirmed the fall thumbnail matches the person in the event photo.</span></label>
                   <label><span>Picture Order Code</span><input name="orderCodes" autocomplete="off" placeholder="Example: 1 or 1.2"></label>
                   <div id="eventPackageCodeShortcuts" class="event-code-shortcuts"></div>
                   <div class="event-order-row"><label><span>Payment</span><select name="paidStatus"><option value="paid">Paid</option><option value="unpaid">Unpaid</option><option value="unknown">Unknown</option></select></label><label><span>Notes</span><input name="notes"></label></div>
@@ -189,8 +189,12 @@
             <div class="production-sync-actions">
               <button id="saveProductionSyncSettingsButton" type="button">Save Settings</button>
               <button id="testProductionSyncButton" type="button">Test A1</button>
+              <button id="buildProductionSheetButton" type="button">Build Sheet</button>
               <button id="previewProductionSyncButton" type="button">Preview Sheet Updates</button>
               <button id="pushProductionSyncButton" class="primary" type="button" disabled>Push Updates</button>
+            </div>
+            <div id="productionMilestoneGrid" class="production-milestone-grid">
+              <div class="empty-state">Loading production milestones...</div>
             </div>
             <div id="productionSyncSummary" class="unit-render-metrics">
               <div class="empty-state">Configure the Google Sheet and preview updates before pushing.</div>
@@ -304,6 +308,46 @@
           </section>
         </section>
 
+        <section id="idCardRenderView" class="view">
+          <section class="panel id-card-render-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>ID Card Render</h2>
+                <p>Render ID card sheets with the job defaults, or temporarily override the template and grade backgrounds.</p>
+              </div>
+              <span class="status ready">Override-ready</span>
+            </div>
+            <form id="idCardRenderForm" class="id-card-render-form">
+              <section class="id-card-render-options">
+                <h3>Cards to Render</h3>
+                <label><span>Job</span><select name="jobId" required></select></label>
+                <label><span>Source</span><select name="source"><option value="all">All Students</option><option value="list">Saved Student List</option></select></label>
+                <label id="idCardRenderListField" hidden><span>Student List</span><select name="listName"></select></label>
+                <label><span>Sort</span><select name="sortMethod"><option value="alpha_grade">Grade, then Name</option><option value="alpha_homeroom">Homeroom, then Name</option><option value="alpha_school">Name</option></select></label>
+                <label><span>Reason</span><select name="reason"><option value="admin_batch">Admin Batch</option><option value="makeup_day">Makeup Day</option><option value="replacement_request">Replacement Request</option><option value="school_request">School Request</option></select></label>
+                <label><span>School Year</span><input name="schoolYear" value="2026-2027" placeholder="2026-2027"></label>
+                <label class="checkbox-line"><input name="photographedOnly" type="checkbox" checked><span>Only include students with a linked photo</span></label>
+              </section>
+              <section class="id-card-render-overrides">
+                <h3>Optional Overrides</h3>
+                <p class="id-card-override-note">Leave either option on its default to keep the job's assigned student/staff templates and grade backgrounds.</p>
+                <label><span>Template</span><select name="templateOverrideId"><option value="">Use Job Template Assignments</option></select></label>
+                <label><span>Background</span><div class="folder-picker"><input name="backgroundOverride" readonly placeholder="Use Grade Background Assignments"><button id="chooseIdCardRenderBackgroundButton" type="button">Choose</button><button id="clearIdCardRenderBackgroundButton" type="button">Clear</button></div></label>
+                <div id="idCardRenderBackgroundPreview" class="id-card-render-background-preview"><span>Grade backgrounds will be used.</span></div>
+                <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose where ID cards will be created"><button id="browseIdCardRenderOutputButton" type="button">Browse</button></div></label>
+              </section>
+              <section class="id-card-render-summary">
+                <h3>Ready to Render</h3>
+                <div id="idCardRenderMetrics" class="unit-render-metrics"><div class="empty-state">Choose a job to see its ID card totals.</div></div>
+                <div class="id-card-render-summary-note"><strong>Overrides apply to this render only</strong><p>The job's saved template assignments and grade backgrounds will not be changed.</p></div>
+                <progress id="idCardRenderProgress" value="0" max="100"></progress>
+                <p id="idCardRenderStatus" class="tool-status">Choose an output folder, then render.</p>
+                <button class="primary" id="startIdCardRenderButton" type="submit">Render ID Cards</button>
+              </section>
+            </form>
+          </section>
+        </section>
+
         <section id="unitRenderView" class="view">
           <section class="panel unit-render-panel">
             <div class="panel-heading">
@@ -321,6 +365,14 @@
                 <label><span>Render Orders</span><select name="source"><option value="all">All Paid Orders</option><option value="grade">Grade</option><option value="homeroom">Homeroom</option><option value="individual">Individual Order</option></select></label>
                 <label id="unitRenderFilterField" hidden><span id="unitRenderFilterLabel">Filter</span><select name="sourceValue"></select></label>
                 <label><span>Output By</span><select name="sortBy"><option value="last">Last Name</option><option value="grade">Grade</option><option value="homeroom" selected>Homeroom</option></select></label>
+                <div class="unit-render-event-options" id="unitRenderEventOptions" hidden>
+                  <label><span>Event Product Mapping</span><select name="eventPlanMode"><option value="package_plan" selected>Use Package Plan Products</option><option value="count_5x7">Order code is 5x7 count</option><option value="count_wallets">Order code is wallet count</option></select></label>
+                  <div class="unit-render-checks compact">
+                    <label class="checkbox-line"><input name="eventIndividualCards" type="checkbox" checked><span>Individual 5.5 x 8 cards</span></label>
+                    <label class="checkbox-line"><input name="eventStackSheets" type="checkbox" checked><span>11 x 17 stack-cut sheets</span></label>
+                    <label class="checkbox-line"><input name="eventPdf" type="checkbox" checked><span>Build stack-cut PDF</span></label>
+                  </div>
+                </div>
                 <div class="unit-render-image-prep">
                   <button id="exportImagePrepButton" type="button">Export All Image Prep Items</button>
                 </div>
@@ -747,16 +799,21 @@
                       <select name="searchMode">
                         <option value="all">All</option>
                         <option value="name">Name</option>
+                        <option value="id">ID #</option>
                         <option value="grade">Grade</option>
                         <option value="homeroom">Homeroom</option>
                       </select>
-                      <input name="studentSearch" autocomplete="off" placeholder="Name, grade, or homeroom">
+                      <input name="studentSearch" autocomplete="off" placeholder="Name, ID #, grade, or homeroom">
                     </div>
                     <div id="captureStudentSearchResults" class="student-search-results" hidden></div>
                   </label>
+                  <button class="secondary capture-roster-toggle" id="captureRosterToggleButton" type="button" aria-expanded="false">
+                    <span>Browse Students &amp; Blank Records</span>
+                    <span aria-hidden="true">&#9662;</span>
+                  </button>
                   <div class="capture-mode-control" id="captureFileModeControl">
                     <div class="segmented compact" id="captureFileModeToggle">
-                      <button data-capture-file-mode="jpg_raw" type="button">JPG + CR3</button>
+                      <button data-capture-file-mode="jpg_raw" type="button">JPG + RAW</button>
                       <button data-capture-file-mode="jpg_only" type="button">JPG Only</button>
                     </div>
                   </div>
@@ -764,6 +821,29 @@
                 </form>
                 <div id="captureSubjectDetail" class="capture-subject-detail">
                   <div class="empty-state">Scan a camera card barcode or search for a student.</div>
+                </div>
+                <div id="captureRosterPanel" class="capture-roster-panel" hidden>
+                  <div class="capture-roster-heading">
+                    <strong>Student Records</strong>
+                    <span id="captureRosterCount"></span>
+                  </div>
+                  <div class="segmented compact capture-roster-filters" id="captureRosterFilters">
+                    <button data-capture-roster-filter="all" type="button">All</button>
+                    <button data-capture-roster-filter="students" type="button">Students</button>
+                    <button data-capture-roster-filter="blanks" type="button">Blanks</button>
+                  </div>
+                  <div class="capture-roster-table-wrap">
+                    <table class="capture-roster-table">
+                      <thead>
+                        <tr>
+                          <th>Ref</th>
+                          <th>Student</th>
+                          <th>Grade</th>
+                        </tr>
+                      </thead>
+                      <tbody id="captureRosterTableBody"></tbody>
+                    </table>
+                  </div>
                 </div>
               </section>
 
@@ -776,7 +856,7 @@
                   <div class="capture-heading-status">
                     <span id="capturePairStatus" class="capture-pair-status ready"><i></i>Ready</span>
                     <span id="capturePhotoCount" class="capture-photo-count"></span>
-                    <span id="capturePreviewMeta"></span>
+                    <button id="capturePreviewMeta" class="secondary small capture-compare-button" type="button" disabled></button>
                   </div>
                 </div>
                 <div id="captureCompareGrid" class="capture-compare-grid">
@@ -1266,6 +1346,67 @@
           <button class="primary" type="submit">Start Capture</button>
         </div>
       </form>
+    </div>
+
+    <div class="modal-backdrop capture-comparison-backdrop" id="captureComparisonModal" hidden>
+      <section class="modal-card capture-comparison-card" aria-labelledby="captureComparisonTitle">
+        <div class="modal-heading">
+          <div>
+            <h2 id="captureComparisonTitle">Compare Captured Images</h2>
+            <p id="captureComparisonSubject"></p>
+          </div>
+          <button id="closeCaptureComparisonButton" type="button">Close</button>
+        </div>
+        <p id="captureComparisonStatus"></p>
+        <div id="captureComparisonScroller" class="capture-comparison-scroller"></div>
+        <form id="captureImageActionForm" class="capture-image-action-form" hidden>
+          <div class="modal-heading">
+            <div>
+              <h3 id="captureImageActionTitle">Resolve Image</h3>
+              <p id="captureImageActionFilename"></p>
+            </div>
+            <button id="cancelCaptureImageActionButton" type="button">Cancel</button>
+          </div>
+          <label>
+            <span>Reason</span>
+            <select name="reason">
+              <option value="wrong_student">Wrong student</option>
+              <option value="duplicate_test">Duplicate or test capture</option>
+              <option value="poor_image">Poor image</option>
+              <option value="keep_review">Keep for later review</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label class="capture-action-student-search" id="captureActionStudentSearch">
+            <span>Correct Student</span>
+            <input name="studentSearch" type="search" autocomplete="off" placeholder="Reference, name, ID, grade">
+            <input name="targetSubjectId" type="hidden">
+            <div id="captureActionStudentResults" class="student-search-results" hidden></div>
+            <small id="captureActionSelectedStudent">Choose the student this image belongs to.</small>
+            <div id="captureActionStudentPreview" class="capture-action-student-preview" hidden>
+              <div id="captureActionStudentPhoto" class="capture-action-student-photo"></div>
+              <div>
+                <strong id="captureActionStudentPreviewName"></strong>
+                <span id="captureActionStudentPreviewMeta"></span>
+                <small>Current student photo</small>
+              </div>
+            </div>
+          </label>
+          <label id="captureActionReplacementField" hidden>
+            <span>New Selected Image</span>
+            <select name="replacementImageId"></select>
+            <small>This image is currently selected. Choose its replacement.</small>
+          </label>
+          <label>
+            <span>Notes</span>
+            <textarea name="notes" rows="2" placeholder="Optional details"></textarea>
+          </label>
+          <div class="form-actions">
+            <span id="captureImageActionStatus"></span>
+            <button class="primary" id="confirmCaptureImageActionButton" type="submit">Move Image</button>
+          </div>
+        </form>
+      </section>
     </div>
 
     <script src="./renderer.js"></script>

@@ -3,7 +3,7 @@ const path = require('path');
 
 const projectRoot = path.resolve(__dirname, '..');
 const initSqlJs = require(path.join(projectRoot, 'trecs-js', 'node_modules', 'sql.js'));
-const sourceDbPath = path.join(projectRoot, 'database', 'migration_prototype.db');
+const sourceDbPath = path.join(projectRoot, 'database', 'ProgramData.db');
 const outputDbPath = path.join(projectRoot, 'database', 'program.db');
 const sqlWasmPath = path.join(projectRoot, 'trecs-js', 'node_modules', 'sql.js', 'dist');
 

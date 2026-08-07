@@ -50,7 +50,7 @@ async function main() {
     ON envelope_scans(job_id, subject_id, status);
   `);
 
-  const outputPath = path.join(projectRoot, 'database', 'migration_prototype.db');
+  const outputPath = path.join(projectRoot, 'database', 'ProgramData.db');
   fs.writeFileSync(outputPath, Buffer.from(database.export()));
   database.close();
   console.log(`Created clean ${outputPath}`);

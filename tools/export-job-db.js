@@ -3,7 +3,7 @@ const path = require('path');
 
 const projectRoot = path.resolve(__dirname, '..');
 const initSqlJs = require(path.join(projectRoot, 'trecs-js', 'node_modules', 'sql.js'));
-const sourceDbPath = path.join(projectRoot, 'database', 'migration_prototype.db');
+const sourceDbPath = path.join(projectRoot, 'database', 'ProgramData.db');
 const sqlWasmPath = path.join(projectRoot, 'trecs-js', 'node_modules', 'sql.js', 'dist');
 
 function rowsFromResult(result) {
@@ -221,21 +221,6 @@ function createJobDatabaseSchema(database) {
       status TEXT NOT NULL DEFAULT 'scanned',
       scanned_at TEXT,
       keyed_at TEXT,
-      notes TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS capture_events (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      image_asset_id INTEGER,
-      ref TEXT,
-      jpg_path TEXT,
-      cr3_path TEXT,
-      filename TEXT,
-      selected INTEGER NOT NULL DEFAULT 1,
-      captured_at TEXT,
-      sync_status TEXT NOT NULL DEFAULT 'pending_sync',
       notes TEXT
     );
 

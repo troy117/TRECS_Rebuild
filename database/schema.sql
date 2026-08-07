@@ -375,6 +375,20 @@ CREATE TABLE IF NOT EXISTS envelope_scans (
   notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS capture_image_actions (
+  id INTEGER PRIMARY KEY,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  image_asset_id INTEGER NOT NULL REFERENCES image_assets(id) ON DELETE CASCADE,
+  source_subject_id INTEGER REFERENCES subjects(id) ON DELETE SET NULL,
+  target_subject_id INTEGER REFERENCES subjects(id) ON DELETE SET NULL,
+  action_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  notes TEXT,
+  photographer_name TEXT,
+  workstation_name TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS sync_packages (
   id INTEGER PRIMARY KEY,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -606,6 +620,7 @@ CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id ON image_assets(c
 CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage ON image_assets(job_id, shoot_stage);
 CREATE INDEX IF NOT EXISTS idx_image_import_events_job_id ON image_import_events(job_id);
 CREATE INDEX IF NOT EXISTS idx_image_import_events_status ON image_import_events(status);
+CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image ON capture_image_actions(image_asset_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id ON envelope_scans(job_id);
 CREATE INDEX IF NOT EXISTS idx_envelope_scans_order_id ON envelope_scans(order_id);
 CREATE INDEX IF NOT EXISTS idx_envelope_scans_status ON envelope_scans(status);

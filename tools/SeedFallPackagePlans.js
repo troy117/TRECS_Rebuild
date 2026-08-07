@@ -219,7 +219,7 @@ function seedDatabase(dbPath, SQL) {
 (async () => {
   const dataRoot = process.argv[2] ? path.resolve(process.argv[2]) : readDataRoot();
   const databaseFolder = path.join(dataRoot, 'database');
-  const dbPaths = ['migration_prototype.db', 'program.db']
+  const dbPaths = ['ProgramData.db', 'migration_prototype.db', 'program.db']
     .map((name) => path.join(databaseFolder, name))
     .filter((dbPath) => fs.existsSync(dbPath));
   if (!dbPaths.length) throw new Error(`No TRECS databases were found in ${databaseFolder}`);
