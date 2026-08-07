@@ -153,7 +153,7 @@ async function confirmImageUnlink(event, labelValue) {
     type: 'warning',
     title: 'Unlink Image',
     message: `Unlink ${label} from this student?`,
-    detail: 'If this image has no other student links, the reference prefix will be removed from the JPG and CR3 filenames.',
+    detail: 'If this image has no other student links, the reference prefix will be removed from the JPG and RAW filenames.',
     buttons: ['Unlink', 'Cancel'],
     defaultId: 1,
     cancelId: 1,
@@ -2907,6 +2907,9 @@ function movePackageFile(sourcePathValue, destinationFolder, fallbackName = null
 
 function endOfDayPackageDisplayName(preview, createdAt) {
   const timestamp = endOfDayTimestampForFolder(createdAt);
+  const school = preview.job && (preview.job.trecsName || preview.job.clientName || preview.job.name)
+    ? preview.job.trecsName || preview.job.clientName || preview.job.name
+    : 'School';
   const workstation = (preview.workstationNames && preview.workstationNames.length === 1)
     ? preview.workstationNames[0]
     : preview.workstationNames && preview.workstationNames.length > 1
@@ -2917,7 +2920,9 @@ function endOfDayPackageDisplayName(preview, createdAt) {
     : preview.photographerNames && preview.photographerNames.length > 1
       ? 'Multiple Photographers'
       : process.env.USERNAME || os.userInfo().username || 'Photographer';
-  return safeFolderName(`EOD - ${timestamp} - ${workstation} - ${photographer}`);
+  return safeFolderName(
+    `EOD-${safeFileToken(school)}_${timestamp}_${safeFileToken(workstation)}_${safeFileToken(photographer)}`
+  );
 }
 
 function clearPackagedCaptureLinks(database, jobId, copiedImages) {
@@ -3057,7 +3062,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const packagePath = uniquePath(path.join(projectRoot, 'exports', 'end-of-day'), packageName);
   const databaseFolder = path.join(packagePath, 'Database');
   const jpgFolder = path.join(packagePath, 'JPG');
-  const rawFolder = path.join(packagePath, 'CR3');
+  const rawFolder = path.join(packagePath, 'RAW');
   fs.mkdirSync(databaseFolder, { recursive: true });
   fs.mkdirSync(jpgFolder, { recursive: true });
   fs.mkdirSync(rawFolder, { recursive: true });
@@ -3150,7 +3155,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
       onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
       images: 'JPG',
-      rawImages: 'CR3'
+      rawImages: 'RAW'
     }
   };
 
@@ -7093,6 +7098,17 @@ function normalizeIdCardSortMethod(value) {
   return sort;
 }
 
+function normalizeIdCardBackgroundOverride(value) {
+  const fileName = optionalText(value, 255) || '';
+  if (!fileName) {
+    return '';
+  }
+  if (path.basename(fileName) !== fileName || !/\.(bmp|jpe?g|png)$/i.test(fileName)) {
+    throw new Error('Invalid ID card background override');
+  }
+  return fileName;
+}
+
 function normalizeCameraCardSource(value) {
   const source = String(value || 'all').trim();
   const allowed = new Set(['all', 'grade', 'homeroom', 'track', 'list']);
@@ -7951,6 +7967,33 @@ async function activeIdCardTemplate(templateType, preferredId = null) {
   };
 }
 
+async function activeIdCardTemplateById(templateId) {
+  const id = normalizeNullableId(templateId, 'ID card template');
+  if (!id) {
+    return null;
+  }
+  const rows = await querySql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      template_json AS templateJson
+    FROM id_card_templates
+    WHERE id = ${id}
+      AND active = 1
+    LIMIT 1;
+  `);
+  if (!rows.length) {
+    throw new Error('The selected ID card template is no longer available');
+  }
+  return {
+    id: Number(rows[0].id),
+    name: rows[0].name,
+    templateType: rows[0].templateType,
+    template: JSON.parse(rows[0].templateJson)
+  };
+}
+
 function idCardSchoolYear(value) {
   return String(value || '2025-2026')
     .replace(/^school year:\s*/i, '')
@@ -8118,11 +8161,20 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
   if (!idCardSubjects.length) {
     throw new Error('No students matched the ID card render options');
   }
+  if (options.idCardBackgroundOverride) {
+    const backgroundPath = path.join(resolveProjectPath(job.rootPath), 'ID_Templates', options.idCardBackgroundOverride);
+    if (!fs.existsSync(backgroundPath)) {
+      throw new Error('The selected ID card background is no longer available');
+    }
+  }
 
-  const [studentTemplate, staffTemplate] = await Promise.all([
+  const overrideTemplate = await activeIdCardTemplateById(options.idCardTemplateOverrideId);
+  const [defaultStudentTemplate, defaultStaffTemplate] = overrideTemplate ? [null, null] : await Promise.all([
     activeIdCardTemplate('student', job.studentIdTemplateId),
     activeIdCardTemplate('staff', job.facultyIdTemplateId).catch(async () => activeIdCardTemplate('student', job.studentIdTemplateId))
   ]);
+  const studentTemplate = overrideTemplate || defaultStudentTemplate;
+  const staffTemplate = overrideTemplate || defaultStaffTemplate;
   const timestamp = timestampForFolder(new Date());
   const studentTemplatePath = path.join(outputFolder, `id-card-student-template-${timestamp}.json`);
   const staffTemplatePath = path.join(outputFolder, `id-card-staff-template-${timestamp}.json`);
@@ -8141,7 +8193,7 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     staffTemplatePath,
     tsvPath,
     base64Arg(idCardSchoolYear(options.directorySchoolYear)),
-    '',
+    options.idCardBackgroundOverride || '',
     'false'
   ], { cwd: bundledResourceRoot });
 
@@ -8157,6 +8209,10 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     templates: {
       student: { id: studentTemplate.id, name: studentTemplate.name },
       staff: { id: staffTemplate.id, name: staffTemplate.name }
+    },
+    overrides: {
+      template: overrideTemplate ? { id: overrideTemplate.id, name: overrideTemplate.name } : null,
+      background: options.idCardBackgroundOverride || null
     },
     backgroundFolder: path.join(job.rootPath, 'ID_Templates'),
     gradeBackgrounds: {
@@ -8593,7 +8649,7 @@ async function adminListSubjectIds(jobId, listName) {
 
 function adminItemDefinitionsForStage(stage) {
   return Array.from(ADMIN_ITEM_TYPES.entries())
-    .filter(([_type, item]) => item.stages.includes(stage))
+    .filter(([type, item]) => type !== 'id_cards' && item.stages.includes(stage))
     .map(([type, item]) => ({
       type,
       label: item.label,
@@ -8982,6 +9038,8 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     idCardReason: normalizeIdCardReason(input.idCardReason || (stage === 'makeup_day' ? 'makeup_day' : 'admin_batch')),
     idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false,
+    idCardTemplateOverrideId: normalizeNullableId(input.idCardTemplateOverrideId, 'ID card template'),
+    idCardBackgroundOverride: normalizeIdCardBackgroundOverride(input.idCardBackgroundOverride),
     cameraCardSource: normalizeCameraCardSource(input.cameraCardSource),
     cameraCardSourceValue: optionalText(input.cameraCardSourceValue, 255) || '',
     cameraCardListName: optionalText(input.cameraCardListName, 255) || '',
@@ -9042,7 +9100,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
-    await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
+    renderDetails = await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
   } else if (type === 'camera_cards') {
     const cameraListName = options.cameraCardSource === 'list'
       ? (options.cameraCardListName || options.cameraCardSourceValue)
@@ -13039,8 +13097,8 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
 async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue = 'all') {
   const jobId = numericId(jobIdValue);
   const search = normalizeEnvelopeSearch(searchValue);
-  const mode = ['all', 'name', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
-  const minimumLength = mode === 'grade' || mode === 'homeroom' ? 1 : 2;
+  const mode = ['all', 'name', 'id', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
+  const minimumLength = ['id', 'grade', 'homeroom'].includes(mode) ? 1 : 2;
   if (search.length < minimumLength) {
     return [];
   }
@@ -13052,6 +13110,8 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue
     ? `(COALESCE(s.grade, '') LIKE ${likeSql})`
     : mode === 'homeroom'
       ? `(COALESCE(s.homeroom, '') LIKE ${likeSql})`
+      : mode === 'id'
+        ? `(COALESCE(s.external_id, '') LIKE ${likeSql})`
       : mode === 'name'
         ? `(
             COALESCE(s.display_name, '') LIKE ${likeSql}
@@ -13144,10 +13204,9 @@ function latestImageInFolder(folderPath) {
 function rawPairPathForImage(imagePath) {
   const folderPath = path.dirname(imagePath);
   const base = path.basename(imagePath, path.extname(imagePath)).toLowerCase();
-  const match = fs.readdirSync(folderPath).find((name) => (
-    path.basename(name, path.extname(name)).toLowerCase() === base
-    && path.extname(name).toLowerCase() === '.cr3'
-  ));
+  const match = fs.readdirSync(folderPath)
+    .filter((name) => path.basename(name, path.extname(name)).toLowerCase() === base)
+    .find((name) => ['.cr2', '.cr3'].includes(path.extname(name).toLowerCase()));
   return match ? path.join(folderPath, match) : null;
 }
 
@@ -13187,9 +13246,8 @@ function shootStageLabel(value) {
   }[stage];
 }
 
-function latestCapturePairInFolder(folderPath, options = {}) {
+function capturePairForImage(imagePath, options = {}) {
   const fileMode = normalizeCaptureFileMode(options.fileMode);
-  const imagePath = latestImageInFolder(folderPath);
   const rawPath = fileMode === 'jpg_only' ? null : rawPairPathForImage(imagePath);
   const filename = path.basename(imagePath);
 
@@ -13222,7 +13280,7 @@ function latestCapturePairInFolder(folderPath, options = {}) {
       filename,
       fileMode,
       ready: false,
-      reason: `Waiting for CR3 pair for ${filename}`
+      reason: `Waiting for CR2 or CR3 pair for ${filename}`
     };
   }
 
@@ -13245,6 +13303,39 @@ function latestCapturePairInFolder(folderPath, options = {}) {
     ready: true,
     reason: 'Ready'
   };
+}
+
+function captureImagesInFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) {
+    throw new Error(`Hot folder not found: ${folderPath}`);
+  }
+
+  return fs.readdirSync(folderPath)
+    .flatMap((name) => {
+      const filePath = path.join(folderPath, name);
+      const extension = path.extname(filePath).toLowerCase();
+      if (!['.jpg', '.jpeg', '.png'].includes(extension)) {
+        return [];
+      }
+      try {
+        const stats = fs.statSync(filePath);
+        return stats.isFile() ? [{ path: filePath, modified: stats.mtimeMs }] : [];
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          return [];
+        }
+        throw error;
+      }
+    })
+    .sort((first, second) => first.modified - second.modified || first.path.localeCompare(second.path));
+}
+
+function latestCapturePairInFolder(folderPath, options = {}) {
+  const images = captureImagesInFolder(folderPath);
+  if (!images.length) {
+    throw new Error('No JPG/PNG capture images found in the hot folder');
+  }
+  return capturePairForImage(images[images.length - 1].path, options);
 }
 
 function envelopeDestinationName(ref, sourcePath) {
@@ -14495,6 +14586,33 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   });
 
   const webContentsId = event.sender.id;
+  const existingState = captureWatchers.get(webContentsId);
+  if (existingState
+    && existingState.jobId === jobId
+    && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
+    // Capture anything already written under the previous student before the UI
+    // changes the active subject. Each queued image keeps this subject snapshot.
+    existingState.queueAvailableFiles();
+    existingState.subjectId = subjectId;
+    existingState.fileMode = fileMode;
+    existingState.shootStage = shootStage;
+    existingState.photographerName = optionalText(options.photographerName, 255);
+    existingState.workstationName = optionalText(options.workstationName, 255);
+    existingState.captureSessionId = captureSessionId;
+    existingState.queueAvailableFiles();
+    existingState.scheduleProcessing(0);
+    return {
+      jobId,
+      subjectId,
+      hotFolder,
+      fileMode,
+      shootStage,
+      shootStageLabel: shootStageLabel(shootStage),
+      captureSessionId,
+      queuedCaptures: existingState.pendingCaptures.length
+    };
+  }
+
   closeCaptureWatcher(webContentsId);
 
   const watcherState = {
@@ -14504,107 +14622,191 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     timer: null,
     importing: false,
     lastImportAt: 0,
-    lastSourcePath: null,
     fileMode,
     shootStage,
     photographerName: optionalText(options.photographerName, 255),
     workstationName: optionalText(options.workstationName, 255),
     captureSessionId,
+    pendingCaptures: [],
+    queuedSourcePaths: new Set(),
+    queueAvailableFiles: null,
+    scheduleProcessing: null,
     watcher: null
   };
 
-  const importLatest = (quietWhenEmpty = false) => {
-    clearTimeout(watcherState.timer);
-    watcherState.timer = setTimeout(async () => {
-      if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
-        return;
-      }
-      if (Date.now() - watcherState.lastImportAt < 1200) {
-        return;
-      }
-      watcherState.importing = true;
-      try {
-        const pair = latestCapturePairInFolder(hotFolder, { fileMode: watcherState.fileMode });
-        if (!pair.ready) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: false,
-                message: pair.reason || 'Waiting for capture pair',
-                filename: pair.filename || '',
-                fileMode: watcherState.fileMode
-              }
-            });
-          }
-          importLatest();
-          return;
-        }
-        const sourcePath = pair.imagePath;
-        if (watcherState.lastSourcePath === sourcePath) {
-          return;
-        }
-        const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
-          fileMode: watcherState.fileMode,
-          shootStage: watcherState.shootStage,
-          photographerName: watcherState.photographerName,
-          workstationName: watcherState.workstationName
-        });
-        watcherState.lastSourcePath = sourcePath;
-        watcherState.lastImportAt = Date.now();
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            ...result,
-            status: {
-              ready: true,
-              message: 'Ready',
-              filename: result.image.filename,
-              fileMode: watcherState.fileMode
-            }
-          });
-        }
-      } catch (error) {
-        if (quietWhenEmpty && /No JPG\/PNG envelope scans/.test(error.message || '')) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: true,
-                message: 'Ready'
-              }
-            });
-          }
-          return;
-        }
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            error: error.message || 'Image capture import failed'
-          });
-        }
-      } finally {
-        watcherState.importing = false;
-      }
-    }, 700);
+  const sourceKey = (sourcePath) => path.resolve(sourcePath).toLowerCase();
+
+  const sendCaptureStatus = (payload) => {
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('capture:image-imported', payload);
+    }
   };
+
+  const queueAvailableFiles = () => {
+    let images = [];
+    try {
+      images = captureImagesInFolder(hotFolder);
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not read the capture hot folder' });
+      return 0;
+    }
+
+    let queued = 0;
+    images.forEach((image) => {
+      const key = sourceKey(image.path);
+      if (watcherState.queuedSourcePaths.has(key)) {
+        return;
+      }
+      watcherState.queuedSourcePaths.add(key);
+      watcherState.pendingCaptures.push({
+        sourcePath: image.path,
+        modified: image.modified,
+        jobId: watcherState.jobId,
+        subjectId: watcherState.subjectId,
+        fileMode: watcherState.fileMode,
+        shootStage: watcherState.shootStage,
+        photographerName: watcherState.photographerName,
+        workstationName: watcherState.workstationName
+      });
+      queued += 1;
+    });
+    watcherState.pendingCaptures.sort((first, second) => (
+      first.modified - second.modified || first.sourcePath.localeCompare(second.sourcePath)
+    ));
+    return queued;
+  };
+
+  const scheduleProcessing = (delay = 250) => {
+    clearTimeout(watcherState.timer);
+    watcherState.timer = setTimeout(processQueue, delay);
+  };
+
+  const processQueue = async () => {
+    if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
+      return;
+    }
+
+    queueAvailableFiles();
+    const pending = watcherState.pendingCaptures[0];
+    if (!pending) {
+      sendCaptureStatus({
+        status: {
+          ready: true,
+          message: 'Ready',
+          queued: 0
+        }
+      });
+      return;
+    }
+
+    if (!fs.existsSync(pending.sourcePath)) {
+      watcherState.pendingCaptures.shift();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      scheduleProcessing(0);
+      return;
+    }
+
+    let pair;
+    try {
+      pair = capturePairForImage(pending.sourcePath, { fileMode: pending.fileMode });
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not inspect the capture pair' });
+      scheduleProcessing();
+      return;
+    }
+
+    if (!pair.ready) {
+      sendCaptureStatus({
+        status: {
+          ready: false,
+          message: pair.reason || 'Waiting for capture pair',
+          filename: pair.filename || '',
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+      scheduleProcessing();
+      return;
+    }
+
+    watcherState.importing = true;
+    try {
+      const result = await importCaptureImageCore(
+        pending.jobId,
+        pending.subjectId,
+        hotFolder,
+        pair.imagePath,
+        pair.rawPath,
+        {
+          fileMode: pending.fileMode,
+          shootStage: pending.shootStage,
+          photographerName: pending.photographerName,
+          workstationName: pending.workstationName
+        }
+      );
+      watcherState.pendingCaptures.shift();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      watcherState.lastImportAt = Date.now();
+      sendCaptureStatus({
+        ...result,
+        status: {
+          ready: true,
+          message: watcherState.pendingCaptures.length
+            ? `Importing ${watcherState.pendingCaptures.length} queued capture${watcherState.pendingCaptures.length === 1 ? '' : 's'}`
+            : 'Ready',
+          filename: result.image.filename,
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Image capture import failed' });
+      if (!fs.existsSync(pending.sourcePath)) {
+        watcherState.pendingCaptures.shift();
+        watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      }
+    } finally {
+      watcherState.importing = false;
+      queueAvailableFiles();
+      if (watcherState.pendingCaptures.length) {
+        scheduleProcessing(0);
+      }
+    }
+  };
+
+  watcherState.queueAvailableFiles = queueAvailableFiles;
+  watcherState.scheduleProcessing = scheduleProcessing;
 
   watcherState.watcher = fs.watch(hotFolder, (eventType) => {
     if (eventType === 'rename' || eventType === 'change') {
-      importLatest();
+      // Queue immediately so a later student scan cannot claim an earlier shot.
+      queueAvailableFiles();
+      scheduleProcessing();
     }
   });
   captureWatchers.set(webContentsId, watcherState);
   event.sender.once('destroyed', () => closeCaptureWatcher(webContentsId));
-  if (fs.readdirSync(hotFolder).some((name) => ['.jpg', '.jpeg', '.png'].includes(path.extname(name).toLowerCase()))) {
-    importLatest(true);
+  if (queueAvailableFiles()) {
+    scheduleProcessing();
+  } else {
+    sendCaptureStatus({
+      status: {
+        ready: true,
+        message: 'Ready',
+        queued: 0
+      }
+    });
   }
 
   return {
     jobId,
     subjectId,
     hotFolder,
-    fileMode
-    ,
+    fileMode,
     shootStage,
     shootStageLabel: shootStageLabel(shootStage),
-    captureSessionId
+    captureSessionId,
+    queuedCaptures: watcherState.pendingCaptures.length
   };
 }
 
@@ -15464,6 +15666,7 @@ function menuActionMap(window) {
     imageCapture: menuAction(window, 'Image Capture', 'image-capture'),
     envelopeEntry: menuAction(window, 'Envelope Entry', 'envelope-entry'),
     adminItems: menuAction(window, 'Admin Items', 'admin-items'),
+    idCardRender: menuAction(window, 'ID Card Render', 'id-card-render'),
     eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
     studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
     onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
@@ -15525,6 +15728,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -15568,6 +15772,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -15590,39 +15795,8 @@ function createContextMenus(window, context) {
       {
         label: 'Capture',
         submenu: [
-          actions.addBlankRecords
-        ]
-      },
-      pictureDayMenu(actions),
-      {
-        label: 'TRECS',
-        submenu: [
-          actions.newSchool,
-          actions.newJob,
-          actions.importPreviousJob,
-          actions.loadEndOfDay,
-          { type: 'separator' },
-          actions.studentFieldSetup,
-          { type: 'separator' },
-          actions.imageCapture,
-          actions.envelopeEntry,
-          actions.adminItems,
-          actions.eventWorkflow,
-          actions.studentListBuilder,
-          actions.onlineOrderImport,
-          actions.productionSync,
-          actions.dataVerification,
-          actions.staffVerification,
-          actions.packagePlanEditor,
-          actions.unitRender,
-          actions.batchRender,
-          actions.compositeBuilder,
-          { type: 'separator' },
-          actions.importSchoolData,
-          actions.syncCroppedImages,
-          actions.createCroppedMedium,
-          actions.imageReview,
-          actions.cropTool
+          actions.addBlankRecords,
+          actions.makeEndOfDay
         ]
       }
     ];
@@ -15643,6 +15817,7 @@ function createContextMenus(window, context) {
         actions.imageCapture,
         actions.envelopeEntry,
         actions.adminItems,
+        actions.idCardRender,
         actions.eventWorkflow,
         actions.studentListBuilder,
         actions.onlineOrderImport,
@@ -15670,54 +15845,17 @@ function createApplicationMenu(window, context = 'job') {
   const visibleContextMenus = captureStationMode
     ? contextMenus.filter((item) => !['Job', 'TRECS'].includes(item.label))
     : contextMenus;
-  const template = [
-    {
-      label: 'File',
-      submenu: [
-        { role: 'quit' }
-      ]
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' }
-      ]
-    },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' }
-      ]
-    },
-    {
-      label: 'Window',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'close' }
-      ]
-    },
-    ...visibleContextMenus,
-    {
-      label: 'Help',
-      submenu: [
-        { role: 'about' }
-      ]
-    }
-  ];
+  const template = context === 'capture'
+    ? visibleContextMenus
+    : [
+        ...visibleContextMenus,
+        {
+          label: 'Help',
+          submenu: [
+            { role: 'about' }
+          ]
+        }
+      ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
