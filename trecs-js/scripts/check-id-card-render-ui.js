@@ -55,8 +55,18 @@ async function run() {
     ? await window.webContents.executeJavaScript(`window.trecs.getAdminItems(${Number(selectedJobId)}, 'original_picture_day')`)
     : { items: [] };
   const mainSource = fs.readFileSync(path.resolve(__dirname, '../src/main/main.js'), 'utf8');
+  const rendererSource = fs.readFileSync(path.resolve(__dirname, '../src/renderer/renderer.js'), 'utf8');
+  const javaSource = fs.readFileSync(path.resolve(__dirname, '../../tools/IdCardSheetRenderer.java'), 'utf8');
   const adminItemsSeparated = !(adminItems.items || []).some((item) => item.type === 'id_cards')
     && mainSource.includes("type !== 'id_cards'");
+  const templateFieldChecks = {
+    field1Label: rendererSource.includes("label: 'Field 1', kind: 'text', field: 'field1'"),
+    field2Label: rendererSource.includes("label: 'Field 2', kind: 'text', field: 'field2'"),
+    legacyLabelsRemoved: !rendererSource.includes("label: 'Extra 1'") && !rendererSource.includes("label: 'Extra 2'"),
+    tsvIncludesFields: mainSource.includes('subject.field1,') && mainSource.includes('subject.field2,'),
+    rendererUsesFields: javaSource.includes('return subject.field1;') && javaSource.includes('return subject.field2;'),
+    legacyTemplatesSupported: javaSource.includes('"extra1".equals(field)') && javaSource.includes('"extra2".equals(field)')
+  };
 
   const trecsMenu = Menu.getApplicationMenu().items.find((item) => item.label === 'TRECS');
   const menuItem = trecsMenu?.submenu.items.find((item) => item.label === 'ID Card Render');
@@ -75,8 +85,9 @@ async function run() {
     && sidebar.jobCount > 0 && sidebar.templateCount > 0
     && sidebar.backgroundDefault && sidebar.hasOutputPicker && sidebar.hasRenderButton
     && [0, 4].includes(sidebar.metricCount) && menu.active && menu.title === 'ID Card Render'
-    && adminItemsSeparated;
-  const report = { pass, screenshotPath, sidebar, menu, adminItemTypes: (adminItems.items || []).map((item) => item.type) };
+    && adminItemsSeparated
+    && Object.values(templateFieldChecks).every(Boolean);
+  const report = { pass, screenshotPath, sidebar, menu, templateFieldChecks, adminItemTypes: (adminItems.items || []).map((item) => item.type) };
   console.log(JSON.stringify(report, null, 2));
   app.exit(pass ? 0 : 1);
 }

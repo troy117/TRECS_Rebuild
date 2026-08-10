@@ -1,8 +1,47 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 async function run() {
   const errors = [];
+  const mainSource = fs.readFileSync(path.join(__dirname, '../src/main/main.js'), 'utf8');
+  const activityLogChecks = {
+    secureTokenGeneration: mainSource.includes("crypto.randomBytes(32).toString('base64url')")
+      && mainSource.includes('safeStorage.encryptString(token)')
+      && mainSource.includes('clipboard.writeText(token)'),
+    localRetryQueue: mainSource.includes("const trecsLogQueuePath = path.join(localWorkstationSettingsFolder, 'trecs-log-queue.json')")
+      && mainSource.includes('async function flushTrecsLogQueue()'),
+    disabledMeansNoTraffic: mainSource.includes("if (!settings.enabled || !settings.encryptedToken) {\n    return { queued: false, reason: 'disabled' };")
+      && mainSource.includes("throw new Error('Google Activity Log is disabled. Enable logging before testing the connection.')"),
+    jobCreationHook: mainSource.includes("queueTrecsLogEvent('JOB.CREATED'"),
+    workflowHooks: [
+      "queueTrecsLogEvent('DATA.LOADED'",
+      "queueTrecsLogEvent('ONSITE_SETUP.CREATED'",
+      "queueTrecsLogEvent('ONSITE_SETUP.LOADED'",
+      "queueTrecsLogEvent('END_OF_DAY.CREATED'",
+      "queueTrecsLogEvent('END_OF_DAY.SERVER_LOADED'"
+    ].every((text) => mainSource.includes(text))
+  };
+  let logTokenConfigured = false;
+  let logSettings = {
+    enabled: false,
+    webAppUrl: 'https://script.google.com/macros/s/test-deployment/exec',
+    appMode: 'auto',
+    resolvedAppMode: 'CAPTURE',
+    stationId: 'RENDERMACHINE',
+    computerName: 'RENDERMACHINE',
+    tokenConfigured: false,
+    encryptionAvailable: true,
+    storageScope: 'Current Windows user on this computer',
+    storageFolder: 'C:\\Users\\Test\\AppData\\Local\\TRECS\\local-settings'
+  };
+  const safeStorageSentinel = 'TRECS-LOG-SECRET-SENTINEL';
+  const safeStorageEncrypted = safeStorage.encryptString(safeStorageSentinel);
+  const safeStorageCheck = {
+    available: safeStorage.isEncryptionAvailable(),
+    encrypted: !safeStorageEncrypted.toString('utf8').includes(safeStorageSentinel),
+    decrypts: safeStorage.decryptString(safeStorageEncrypted) === safeStorageSentinel
+  };
   ipcMain.handle('dashboard:get', () => ({
     counts: [],
     jobs: [],
@@ -23,10 +62,48 @@ async function run() {
   }));
   ipcMain.handle('app:focus-window', () => true);
   ipcMain.handle('app:show-message', (_event, input) => input);
+  ipcMain.handle('app:confirm-action', () => true);
   ipcMain.handle('menu:set-context', (_event, context) => ({ context }));
   ipcMain.handle('settings:student-fields:get', () => ({
     global: { visibleFields: {} },
     jobTypes: {}
+  }));
+  ipcMain.handle('trecs-log:settings:get', () => ({ ...logSettings, tokenConfigured: logTokenConfigured }));
+  ipcMain.handle('trecs-log:settings:save', (_event, input) => {
+    if (input.token) logTokenConfigured = true;
+    logSettings = {
+      ...logSettings,
+      enabled: input.enabled === true,
+      webAppUrl: input.webAppUrl,
+      appMode: input.appMode,
+      resolvedAppMode: input.appMode === 'auto' ? 'CAPTURE' : String(input.appMode).toUpperCase(),
+      tokenConfigured: logTokenConfigured,
+      tokenUpdatedAt: logTokenConfigured ? '2026-08-07T12:00:00.000Z' : null
+    };
+    return logSettings;
+  });
+  ipcMain.handle('trecs-log:token:generate', (_event, input) => {
+    logTokenConfigured = true;
+    logSettings = {
+      ...logSettings,
+      enabled: input.enabled === true,
+      webAppUrl: input.webAppUrl,
+      appMode: input.appMode,
+      tokenConfigured: true,
+      tokenUpdatedAt: '2026-08-07T12:05:00.000Z',
+      pendingEvents: 0
+    };
+    return { ...logSettings, copiedToClipboard: true };
+  });
+  ipcMain.handle('trecs-log:token:clear', () => {
+    logTokenConfigured = false;
+    logSettings = { ...logSettings, enabled: false, tokenConfigured: false, tokenUpdatedAt: null };
+    return logSettings;
+  });
+  ipcMain.handle('trecs-log:connection:test', () => ({
+    ok: true,
+    stationId: 'RENDERMACHINE',
+    message: 'Connection successful. A CONNECTION.TEST row was added to TRECS LOG.'
   }));
   ipcMain.handle('capture:start-watcher', () => ({ started: true }));
   ipcMain.handle('capture:subject-images', () => []);
@@ -48,6 +125,7 @@ async function run() {
       nodeIntegration: false
     }
   });
+  window.setSize(1280, 900);
 
   window.webContents.on('console-message', (_event, level, message) => {
     if (level >= 3) errors.push(message);
@@ -219,6 +297,34 @@ async function run() {
       rosterChecks.selectedBlankRecord = jobsState.captureSubject?.id === 3;
       rosterChecks.collapsedAfterSelection = captureRosterPanel.hidden && !captureSubjectDetail.hidden;
       rosterChecks.blankReadyForEditing = jobsState.captureSubjectEditId === 3;
+      document.querySelector('[data-view-button="settings"]').click();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const connectionDisabledWhenLoggingOff = testTrecsLogConnectionButton.disabled
+        && trecsLogSettingsStatus.textContent.includes('will not queue or send');
+      trecsLogSettingsForm.elements.enabled.checked = true;
+      trecsLogSettingsForm.elements.enabled.dispatchEvent(new Event('change', { bubbles: true }));
+      trecsLogSettingsForm.elements.token.value = 'NEVER-RENDER-THIS-TOKEN';
+      trecsLogSettingsForm.elements.token.dispatchEvent(new Event('input', { bubbles: true }));
+      testTrecsLogConnectionButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const connectionPassed = trecsLogSettingsStatus.textContent.includes('Connection successful');
+      generateTrecsLogTokenButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const settingsChecks = {
+        visibleOnCaptureStation: !document.querySelector('[data-view-button="settings"]').hidden,
+        active: settingsView.classList.contains('active-view'),
+        connectionDisabledWhenLoggingOff,
+        stationId: trecsLogSettingsForm.elements.stationId.value,
+        passwordInput: trecsLogSettingsForm.elements.token.type === 'password',
+        tokenClearedAfterSave: trecsLogSettingsForm.elements.token.value === '',
+        tokenNotRendered: !settingsView.textContent.includes('NEVER-RENDER-THIS-TOKEN'),
+        tokenConfigured: trecsLogSettingsForm.dataset.tokenConfigured === 'true',
+        connectionPassed,
+        tokenGenerated: trecsLogTokenStatus.textContent.includes('copied to the clipboard'),
+        generationInstructions: trecsLogSettingsStatus.textContent.includes('Apps Script STATION_TOKENS'),
+        queueStatusVisible: trecsLogQueueStatus.textContent.includes('No activity events'),
+        localStorageMessage: trecsLogStorageStatus.textContent.includes('stored locally')
+      };
       return {
         ...opened,
         startupNavigation,
@@ -235,10 +341,15 @@ async function run() {
         endOfDayEnabledAfterConfirmation: !confirmEndOfDayButton.disabled,
         capturePhotoCount: document.getElementById('capturePhotoCount').textContent,
         rosterChecks,
+        settingsChecks,
         successPopup
       };
     })()
   `);
+  const screenshotFolder = path.resolve(__dirname, '../../exports/ui-tests');
+  fs.mkdirSync(screenshotFolder, { recursive: true });
+  const settingsScreenshotPath = path.join(screenshotFolder, 'trecs-log-settings.png');
+  fs.writeFileSync(settingsScreenshotPath, (await window.webContents.capturePage()).toPNG());
 
   const passed = result.buttonText === 'Compare 2'
     && result.modalVisible
@@ -247,7 +358,7 @@ async function run() {
     && result.cr2LabelVisible
     && result.startupNavigation.selectedTab === 'capture'
     && result.startupNavigation.captureSelected
-    && result.startupNavigation.visibleItems.join(',') === 'Jobs,Capture'
+    && result.startupNavigation.visibleItems.join(',') === 'Jobs,Capture,Settings'
     && result.captureFieldChecks.referenceBold
     && result.captureFieldChecks.editButtonInHeading
     && result.captureFieldChecks.firstNameUppercase
@@ -282,12 +393,33 @@ async function run() {
     && result.rosterChecks.selectedBlankRecord
     && result.rosterChecks.collapsedAfterSelection
     && result.rosterChecks.blankReadyForEditing
+    && result.settingsChecks.visibleOnCaptureStation
+    && result.settingsChecks.active
+    && result.settingsChecks.connectionDisabledWhenLoggingOff
+    && result.settingsChecks.stationId === 'RENDERMACHINE'
+    && result.settingsChecks.passwordInput
+    && result.settingsChecks.tokenClearedAfterSave
+    && result.settingsChecks.tokenNotRendered
+    && result.settingsChecks.tokenConfigured
+    && result.settingsChecks.connectionPassed
+    && result.settingsChecks.tokenGenerated
+    && result.settingsChecks.generationInstructions
+    && result.settingsChecks.queueStatusVisible
+    && result.settingsChecks.localStorageMessage
+    && activityLogChecks.secureTokenGeneration
+    && activityLogChecks.localRetryQueue
+    && activityLogChecks.disabledMeansNoTraffic
+    && activityLogChecks.jobCreationHook
+    && activityLogChecks.workflowHooks
+    && safeStorageCheck.available
+    && safeStorageCheck.encrypted
+    && safeStorageCheck.decrypts
     && result.successPopup.title === 'End of Day Complete'
     && result.successPopup.message === 'End of Day created successfully.'
     && result.successPopup.detail.includes('3 captured images included.')
     && errors.length === 0;
 
-  console.log(JSON.stringify({ pass: passed, ...result, errors }, null, 2));
+  console.log(JSON.stringify({ pass: passed, ...result, safeStorageCheck, activityLogChecks, settingsScreenshotPath, errors }, null, 2));
   app.exit(passed ? 0 : 1);
 }
 

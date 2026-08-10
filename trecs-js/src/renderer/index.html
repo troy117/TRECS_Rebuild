@@ -32,6 +32,7 @@
           <button data-view-button="unitRender">Unit Render</button>
           <button data-view-button="batchRender">Batch Render</button>
           <button data-view-button="composites">Class Composites</button>
+          <button class="settings-nav-button" data-view-button="settings">Settings</button>
         </nav>
       </aside>
 
@@ -1293,6 +1294,82 @@
               </div>
             </form>
           </div>
+        </section>
+
+        <section id="settingsView" class="view">
+          <section class="panel trecs-settings-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>TRECS Settings</h2>
+                <p>Configure settings that belong only to this Windows computer and user.</p>
+              </div>
+              <span class="status ready">Workstation-local</span>
+            </div>
+            <div class="trecs-settings-layout">
+              <form id="trecsLogSettingsForm" class="trecs-log-settings-form">
+                <div class="settings-section-heading">
+                  <div>
+                    <h3>Google Activity Log</h3>
+                    <p>Send TRECS operation events to the TRECS LOG Apps Script endpoint.</p>
+                  </div>
+                  <label class="checkbox-line settings-enabled-toggle">
+                    <input name="enabled" type="checkbox">
+                    <span>Enable logging</span>
+                  </label>
+                </div>
+                <div class="trecs-settings-grid">
+                  <label class="settings-wide-field">
+                    <span>Apps Script Web App URL</span>
+                    <input name="webAppUrl" type="url" required spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec">
+                  </label>
+                  <label>
+                    <span>Station ID</span>
+                    <input name="stationId" readonly>
+                    <small>Automatically taken from the Windows computer name.</small>
+                  </label>
+                  <label>
+                    <span>Computer Role</span>
+                    <select name="appMode">
+                      <option value="auto">Automatic</option>
+                      <option value="server">Server</option>
+                      <option value="lab">Lab</option>
+                      <option value="capture">Capture</option>
+                      <option value="workstation">Workstation</option>
+                    </select>
+                    <small id="trecsLogResolvedMode"></small>
+                  </label>
+                  <div class="settings-wide-field trecs-token-field">
+                    <label for="trecsLogTokenInput">Station Token</label>
+                    <div class="trecs-token-entry">
+                      <input id="trecsLogTokenInput" name="token" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter a new token to set or replace it">
+                      <button id="generateTrecsLogTokenButton" type="button">Generate &amp; Copy Token</button>
+                    </div>
+                    <small id="trecsLogTokenStatus">No token is stored.</small>
+                  </div>
+                </div>
+                <div class="trecs-log-security-note">
+                  <strong>Protected local storage</strong>
+                  <p id="trecsLogStorageStatus">The token is encrypted for this Windows user and is never saved in the shared TRECS database.</p>
+                  <p id="trecsLogQueueStatus">No activity events are waiting to upload.</p>
+                </div>
+                <div class="trecs-settings-actions">
+                  <button id="clearTrecsLogTokenButton" class="danger" type="button">Clear Token</button>
+                  <span id="trecsLogSettingsStatus" class="tool-status">Load this computer's settings to begin.</span>
+                  <button id="testTrecsLogConnectionButton" type="button">Save &amp; Test Connection</button>
+                  <button id="saveTrecsLogSettingsButton" class="primary" type="submit">Save Settings</button>
+                </div>
+              </form>
+              <aside class="trecs-settings-help">
+                <h3>Per-computer setup</h3>
+                <ol>
+                  <li>Click <strong>Generate &amp; Copy Token</strong>, then paste it beside this Station ID in the Apps Script <strong>STATION_TOKENS</strong> property.</li>
+                  <li>Save the Apps Script property, then choose this computer's role here.</li>
+                  <li>Save and test. A <strong>CONNECTION.TEST</strong> row should appear in TRECS LOG.</li>
+                </ol>
+                <p>The URL may be shared between computers. Each computer should have its own token so it can be identified or revoked independently.</p>
+              </aside>
+            </div>
+          </section>
         </section>
       </main>
     </div>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage, safeStorage, clipboard } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -35,7 +35,10 @@ function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackR
 const projectRoot = process.env.TRECS_DATA_ROOT
   ? path.resolve(process.env.TRECS_DATA_ROOT)
   : configuredPathFromFile('path.txt', defaultProjectRoot);
-const legacyElectronUserDataPath = app.getPath('userData');
+const defaultElectronUserDataPath = app.getPath('userData');
+const localWindowsAppDataPath = process.env.LOCALAPPDATA
+  ? path.resolve(process.env.LOCALAPPDATA)
+  : defaultElectronUserDataPath;
 const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() || 'workstation')
   .trim()
   .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
@@ -44,6 +47,9 @@ const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() 
 const configuredElectronUserDataPath = path.join(projectRoot, 'TRECS-AppData', workstationStorageName);
 fs.mkdirSync(configuredElectronUserDataPath, { recursive: true });
 app.setPath('userData', configuredElectronUserDataPath);
+const localWorkstationSettingsFolder = path.join(localWindowsAppDataPath, 'TRECS', 'local-settings');
+const trecsLogSettingsPath = path.join(localWorkstationSettingsFolder, 'trecs-log.json');
+const trecsLogQueuePath = path.join(localWorkstationSettingsFolder, 'trecs-log-queue.json');
 const captureConfigName = 'capture.txt';
 const captureConfigPath = path.join(defaultProjectRoot, captureConfigName);
 const captureStationMode = fs.existsSync(captureConfigPath) && fs.statSync(captureConfigPath).isFile();
@@ -1703,6 +1709,223 @@ async function saveStudentFieldSettings(_event, input = {}) {
   return settings;
 }
 
+const TRECS_LOG_DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbxmvsv7AKGvQJCgjAji2yO35yAX-E0XFDUWVZPu5bU-cSayeG_w0TUBvbv5QPyKJJRrZA/exec';
+const TRECS_LOG_APP_MODES = new Set(['auto', 'server', 'lab', 'capture', 'workstation']);
+
+function trecsLogStationId() {
+  return String(process.env.COMPUTERNAME || os.hostname() || 'WORKSTATION').trim().toUpperCase();
+}
+
+function defaultTrecsLogSettings() {
+  return {
+    version: 1,
+    enabled: false,
+    webAppUrl: TRECS_LOG_DEFAULT_URL,
+    appMode: 'auto',
+    encryptedToken: '',
+    tokenUpdatedAt: null,
+    updatedAt: null
+  };
+}
+
+function normalizeTrecsLogUrl(value) {
+  const text = String(value || TRECS_LOG_DEFAULT_URL).trim();
+  let url;
+  try {
+    url = new URL(text);
+  } catch (_error) {
+    throw new Error('Enter a valid Apps Script web app URL');
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' || !/^\/macros\/s\/[^/]+\/exec$/.test(url.pathname)) {
+    throw new Error('The log URL must be a production script.google.com web app URL ending in /exec');
+  }
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function readTrecsLogSettingsFile() {
+  if (!fs.existsSync(trecsLogSettingsPath)) {
+    return defaultTrecsLogSettings();
+  }
+  try {
+    const stored = JSON.parse(fs.readFileSync(trecsLogSettingsPath, 'utf8'));
+    const appMode = TRECS_LOG_APP_MODES.has(String(stored.appMode || '').toLowerCase())
+      ? String(stored.appMode).toLowerCase()
+      : 'auto';
+    return {
+      ...defaultTrecsLogSettings(),
+      enabled: stored.enabled === true,
+      webAppUrl: normalizeTrecsLogUrl(stored.webAppUrl),
+      appMode,
+      encryptedToken: typeof stored.encryptedToken === 'string' ? stored.encryptedToken : '',
+      tokenUpdatedAt: stored.tokenUpdatedAt || null,
+      updatedAt: stored.updatedAt || null
+    };
+  } catch (_error) {
+    return defaultTrecsLogSettings();
+  }
+}
+
+function writeTrecsLogSettingsFile(settings) {
+  fs.mkdirSync(localWorkstationSettingsFolder, { recursive: true });
+  fs.writeFileSync(trecsLogSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+}
+
+function defaultTrecsLogQueue() {
+  return {
+    version: 1,
+    events: [],
+    lastUploadAt: null,
+    lastUploadError: null
+  };
+}
+
+function readTrecsLogQueueFile() {
+  if (!fs.existsSync(trecsLogQueuePath)) {
+    return defaultTrecsLogQueue();
+  }
+  try {
+    const stored = JSON.parse(fs.readFileSync(trecsLogQueuePath, 'utf8'));
+    return {
+      ...defaultTrecsLogQueue(),
+      events: Array.isArray(stored.events) ? stored.events.filter((event) => event && event.event_id) : [],
+      lastUploadAt: stored.lastUploadAt || null,
+      lastUploadError: stored.lastUploadError || null
+    };
+  } catch (_error) {
+    return defaultTrecsLogQueue();
+  }
+}
+
+function writeTrecsLogQueueFile(queue) {
+  fs.mkdirSync(localWorkstationSettingsFolder, { recursive: true });
+  fs.writeFileSync(trecsLogQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+}
+
+function resolvedTrecsLogAppMode(appMode) {
+  if (appMode && appMode !== 'auto') {
+    return appMode.toUpperCase();
+  }
+  return captureStationMode ? 'CAPTURE' : 'WORKSTATION';
+}
+
+function publicTrecsLogSettings(settings = readTrecsLogSettingsFile()) {
+  const queue = readTrecsLogQueueFile();
+  return {
+    version: settings.version || 1,
+    enabled: settings.enabled === true,
+    webAppUrl: settings.webAppUrl || TRECS_LOG_DEFAULT_URL,
+    appMode: settings.appMode || 'auto',
+    resolvedAppMode: resolvedTrecsLogAppMode(settings.appMode),
+    stationId: trecsLogStationId(),
+    computerName: process.env.COMPUTERNAME || os.hostname() || '',
+    tokenConfigured: Boolean(settings.encryptedToken),
+    tokenUpdatedAt: settings.tokenUpdatedAt || null,
+    updatedAt: settings.updatedAt || null,
+    encryptionAvailable: safeStorage.isEncryptionAvailable(),
+    storageScope: 'Current Windows user on this computer',
+    storageFolder: localWorkstationSettingsFolder,
+    pendingEvents: queue.events.length,
+    lastUploadAt: queue.lastUploadAt,
+    lastUploadError: queue.lastUploadError
+  };
+}
+
+function readTrecsLogToken(settings = readTrecsLogSettingsFile()) {
+  if (!settings.encryptedToken) {
+    throw new Error(`No Google Log token is saved for ${trecsLogStationId()}`);
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows protected storage is not available');
+  }
+  try {
+    return safeStorage.decryptString(Buffer.from(settings.encryptedToken, 'base64'));
+  } catch (_error) {
+    throw new Error('The saved Google Log token cannot be decrypted by this Windows user. Replace the token in Settings.');
+  }
+}
+
+async function getTrecsLogSettings() {
+  return publicTrecsLogSettings();
+}
+
+async function saveTrecsLogSettings(_event, input = {}) {
+  const existing = readTrecsLogSettingsFile();
+  const appModeValue = String(input.appMode || existing.appMode || 'auto').toLowerCase();
+  const appMode = TRECS_LOG_APP_MODES.has(appModeValue) ? appModeValue : 'auto';
+  const token = String(input.token || '').trim();
+  let encryptedToken = existing.encryptedToken;
+  let tokenUpdatedAt = existing.tokenUpdatedAt;
+
+  if (token) {
+    if (token.length > 1024) {
+      throw new Error('The station token is too long');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Windows protected storage is not available');
+    }
+    encryptedToken = safeStorage.encryptString(token).toString('base64');
+    tokenUpdatedAt = new Date().toISOString();
+  }
+
+  const settings = {
+    version: 1,
+    enabled: input.enabled === true,
+    webAppUrl: normalizeTrecsLogUrl(input.webAppUrl || existing.webAppUrl),
+    appMode,
+    encryptedToken,
+    tokenUpdatedAt,
+    updatedAt: new Date().toISOString()
+  };
+  if (settings.enabled && !settings.encryptedToken) {
+    throw new Error(`Enter the token configured for ${trecsLogStationId()} before enabling Google Log`);
+  }
+  writeTrecsLogSettingsFile(settings);
+  if (settings.enabled) {
+    scheduleTrecsLogFlush();
+  }
+  return publicTrecsLogSettings(settings);
+}
+
+async function generateTrecsLogToken(_event, input = {}) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows protected storage is not available');
+  }
+  const existing = readTrecsLogSettingsFile();
+  const appModeValue = String(input.appMode || existing.appMode || 'auto').toLowerCase();
+  const appMode = TRECS_LOG_APP_MODES.has(appModeValue) ? appModeValue : 'auto';
+  const token = crypto.randomBytes(32).toString('base64url');
+  const settings = {
+    ...existing,
+    enabled: input.enabled === true,
+    webAppUrl: normalizeTrecsLogUrl(input.webAppUrl || existing.webAppUrl),
+    appMode,
+    encryptedToken: safeStorage.encryptString(token).toString('base64'),
+    tokenUpdatedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  writeTrecsLogSettingsFile(settings);
+  clipboard.writeText(token);
+  return {
+    ...publicTrecsLogSettings(settings),
+    copiedToClipboard: true
+  };
+}
+
+async function clearTrecsLogToken() {
+  const existing = readTrecsLogSettingsFile();
+  const settings = {
+    ...existing,
+    enabled: false,
+    encryptedToken: '',
+    tokenUpdatedAt: null,
+    updatedAt: new Date().toISOString()
+  };
+  writeTrecsLogSettingsFile(settings);
+  return publicTrecsLogSettings(settings);
+}
+
 const PRODUCTION_SYNC_SETTINGS_KEY = 'production_status_sync';
 const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 
@@ -1746,6 +1969,248 @@ function httpsJsonRequest(urlValue, options = {}, body = null) {
     if (body) request.write(body);
     request.end();
   });
+}
+
+function trecsLogJsonRequest(urlValue, options = {}, body = null, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlValue);
+    const request = https.request({
+      method: options.method || 'GET',
+      hostname: url.hostname,
+      path: `${url.pathname}${url.search}`,
+      headers: options.headers || {}
+    }, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        if (redirectCount >= 5) {
+          reject(new Error('The Google Log endpoint redirected too many times'));
+          return;
+        }
+        const redirectUrl = new URL(response.headers.location, url);
+        const redirectHostAllowed = redirectUrl.protocol === 'https:'
+          && (redirectUrl.hostname === 'script.google.com' || redirectUrl.hostname.endsWith('.googleusercontent.com'));
+        if (!redirectHostAllowed) {
+          reject(new Error('The Google Log endpoint redirected to an unexpected host'));
+          return;
+        }
+        const preserveRequest = [307, 308].includes(response.statusCode);
+        const redirectHeaders = preserveRequest ? { ...(options.headers || {}) } : {};
+        resolve(trecsLogJsonRequest(redirectUrl.toString(), {
+          method: preserveRequest ? options.method || 'GET' : 'GET',
+          headers: redirectHeaders
+        }, preserveRequest ? body : null, redirectCount + 1));
+        return;
+      }
+
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let payload;
+        try {
+          payload = JSON.parse(text);
+        } catch (_error) {
+          reject(new Error('Google Log returned a web page instead of JSON. Check the Apps Script deployment access and /exec URL.'));
+          return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(payload.error || `Google Log request failed with status ${response.statusCode}`));
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.on('error', reject);
+    request.setTimeout(15000, () => request.destroy(new Error('Google Log request timed out')));
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+function trecsLogEvent(eventType, context = {}) {
+  const normalizedEventType = String(eventType || 'TRECS.EVENT').trim().toUpperCase();
+  const [category = 'TRECS', ...actionParts] = normalizedEventType.split('.');
+  const settings = readTrecsLogSettingsFile();
+  const event = {
+    schema_version: 1,
+    event_id: crypto.randomUUID(),
+    occurred_at_utc: new Date().toISOString(),
+    event_type: normalizedEventType,
+    category: context.category || category,
+    action: context.action || actionParts.join('.') || 'EVENT',
+    outcome: context.outcome || 'SUCCESS',
+    severity: context.severity || 'INFO',
+    message: context.message || normalizedEventType,
+    app_version: app.getVersion(),
+    app_mode: resolvedTrecsLogAppMode(settings.appMode),
+    computer_name: process.env.COMPUTERNAME || os.hostname() || '',
+    station_id: trecsLogStationId(),
+    operator_name: process.env.USERNAME || os.userInfo().username || '',
+    photographer_name: context.photographerName || null,
+    session_id: APP_SESSION_ID,
+    correlation_id: context.correlationId || null,
+    job_id: context.jobId === undefined ? null : context.jobId,
+    job_name: context.jobName || null,
+    school_id: context.schoolId === undefined ? null : context.schoolId,
+    school_name: context.schoolName || null,
+    school_year: context.schoolYear || null,
+    record_count: context.recordCount === undefined ? null : context.recordCount,
+    student_count: context.studentCount === undefined ? null : context.studentCount,
+    image_count: context.imageCount === undefined ? null : context.imageCount,
+    file_count: context.fileCount === undefined ? null : context.fileCount,
+    duration_ms: context.durationMs === undefined ? null : context.durationMs,
+    source_location: context.sourceLocation || null,
+    destination_location: context.destinationLocation || null,
+    error_code: context.errorCode || null,
+    error_message: context.errorMessage || null,
+    details_json: context.details || {}
+  };
+  return event;
+}
+
+let trecsLogFlushPromise = null;
+let trecsLogFlushTimer = null;
+
+function queueTrecsLogEvent(eventType, context = {}) {
+  const settings = readTrecsLogSettingsFile();
+  if (!settings.enabled || !settings.encryptedToken) {
+    return { queued: false, reason: 'disabled' };
+  }
+  const queue = readTrecsLogQueueFile();
+  const event = trecsLogEvent(eventType, context);
+  queue.events.push(event);
+  if (queue.events.length > 10000) {
+    queue.events = queue.events.slice(-10000);
+  }
+  writeTrecsLogQueueFile(queue);
+  scheduleTrecsLogFlush();
+  return { queued: true, eventId: event.event_id };
+}
+
+function scheduleTrecsLogFlush(delayMilliseconds = 250) {
+  if (trecsLogFlushTimer) {
+    return;
+  }
+  trecsLogFlushTimer = setTimeout(() => {
+    trecsLogFlushTimer = null;
+    flushTrecsLogQueue().catch((error) => logStartup('TRECS Log upload failed', error));
+  }, delayMilliseconds);
+  if (typeof trecsLogFlushTimer.unref === 'function') {
+    trecsLogFlushTimer.unref();
+  }
+}
+
+async function flushTrecsLogQueue() {
+  if (trecsLogFlushPromise) {
+    return trecsLogFlushPromise;
+  }
+  trecsLogFlushPromise = (async () => {
+    const settings = readTrecsLogSettingsFile();
+    if (!settings.enabled || !settings.encryptedToken) {
+      return { uploaded: 0, pending: readTrecsLogQueueFile().events.length };
+    }
+    const token = readTrecsLogToken(settings);
+    let uploaded = 0;
+    let queue = readTrecsLogQueueFile();
+    while (queue.events.length) {
+      const batch = queue.events.slice(0, 50);
+      const body = JSON.stringify({
+        station_id: trecsLogStationId(),
+        token,
+        events: batch
+      });
+      try {
+        const response = await trecsLogJsonRequest(settings.webAppUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body)
+          }
+        }, body);
+        if (!response || response.ok !== true) {
+          throw new Error(response && response.error ? response.error : 'Google Log did not accept the queued events');
+        }
+        const acceptedIds = Array.isArray(response.accepted_event_ids)
+          ? new Set(response.accepted_event_ids.map(String))
+          : new Set(batch.map((event) => String(event.event_id)));
+        const acceptedCount = batch.filter((event) => acceptedIds.has(String(event.event_id))).length;
+        if (!acceptedCount) {
+          throw new Error('Google Log did not acknowledge any queued events');
+        }
+        queue.events = queue.events.filter((event) => !acceptedIds.has(String(event.event_id)));
+        queue.lastUploadAt = new Date().toISOString();
+        queue.lastUploadError = null;
+        uploaded += acceptedCount;
+        writeTrecsLogQueueFile(queue);
+      } catch (error) {
+        queue.lastUploadError = error.message || String(error);
+        writeTrecsLogQueueFile(queue);
+        throw error;
+      }
+    }
+    return { uploaded, pending: 0 };
+  })();
+  try {
+    return await trecsLogFlushPromise;
+  } finally {
+    trecsLogFlushPromise = null;
+  }
+}
+
+async function testTrecsLogConnection() {
+  const settings = readTrecsLogSettingsFile();
+  if (!settings.enabled) {
+    throw new Error('Google Activity Log is disabled. Enable logging before testing the connection.');
+  }
+  const token = readTrecsLogToken(settings);
+  const eventId = crypto.randomUUID();
+  const occurredAt = new Date().toISOString();
+  const body = JSON.stringify({
+    station_id: trecsLogStationId(),
+    token,
+    events: [{
+      schema_version: 1,
+      event_id: eventId,
+      occurred_at_utc: occurredAt,
+      event_type: 'CONNECTION.TEST',
+      category: 'CONNECTION',
+      action: 'TEST',
+      outcome: 'SUCCESS',
+      severity: 'INFO',
+      message: 'TRECS logging connection test',
+      app_version: app.getVersion(),
+      app_mode: resolvedTrecsLogAppMode(settings.appMode),
+      computer_name: process.env.COMPUTERNAME || os.hostname() || '',
+      station_id: trecsLogStationId(),
+      operator_name: process.env.USERNAME || os.userInfo().username || '',
+      session_id: APP_SESSION_ID,
+      details_json: {
+        captureStationMode,
+        test: true
+      }
+    }]
+  });
+  const response = await trecsLogJsonRequest(settings.webAppUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body)
+    }
+  }, body);
+  if (!response || response.ok !== true) {
+    throw new Error(response && response.error ? response.error : 'Google Log did not accept the connection test');
+  }
+  if (Array.isArray(response.accepted_event_ids) && !response.accepted_event_ids.includes(eventId)) {
+    throw new Error('Google Log responded, but did not acknowledge the test event');
+  }
+  return {
+    ok: true,
+    stationId: trecsLogStationId(),
+    appMode: resolvedTrecsLogAppMode(settings.appMode),
+    eventId,
+    testedAt: occurredAt,
+    message: 'Connection successful. A CONNECTION.TEST row was added to TRECS LOG.'
+  };
 }
 
 function readServiceAccountCredentials(credentialsPath) {
@@ -2592,6 +3057,23 @@ async function prepareLaptopPackage(_event, jobIdValue) {
     }
   });
 
+  queueTrecsLogEvent('ONSITE_SETUP.CREATED', {
+    message: `Onsite setup created for ${job.clientName} / ${job.name}`,
+    jobId: job.id,
+    jobName: job.name,
+    schoolName: job.clientName,
+    studentCount: Number(job.subjects || 0),
+    imageCount: Number(job.images || 0),
+    fileCount: Number(copiedCroppedMed || 0),
+    sourceLocation: job.rootPath,
+    destinationLocation: setupPath,
+    details: {
+      jobType: job.type,
+      orders: Number(job.orders || 0),
+      packagePlanName: job.packagePlanName || null
+    }
+  });
+
   return {
     packagePath: setupPath,
     manifestPath,
@@ -3164,6 +3646,25 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
 
   const cleanup = await writeSql((database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
   const refreshedJobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+
+  queueTrecsLogEvent('END_OF_DAY.CREATED', {
+    message: `End of Day created for ${preview.job.clientName} / ${preview.job.name}`,
+    photographerName: (preview.photographerNames || []).join(', ') || null,
+    jobId: preview.job.id,
+    jobName: preview.job.name,
+    schoolName: preview.job.clientName,
+    studentCount: Number(adjustedCounts.newSubjects || 0),
+    imageCount: Number(adjustedCounts.capturedImages || 0),
+    fileCount: copiedImages.filter((image) => image.jpgPath || image.rawPath).length,
+    sourceLocation: preview.job.rootPath,
+    destinationLocation: packagePath,
+    details: {
+      rawFiles: Number(adjustedCounts.capturedRawFiles || 0),
+      newSubjects: Number(adjustedCounts.newSubjects || 0),
+      editedSubjects: Number(adjustedCounts.editedSubjects || 0),
+      workstationNames: preview.workstationNames || []
+    }
+  });
 
   return {
     packagePath,
@@ -6735,6 +7236,11 @@ ipcMain.handle('composite:render', runCompositeRender);
 ipcMain.handle('composite:test-layouts', testCompositeLayouts);
 ipcMain.handle('settings:student-fields:get', getStudentFieldSettings);
 ipcMain.handle('settings:student-fields:save', saveStudentFieldSettings);
+ipcMain.handle('trecs-log:settings:get', getTrecsLogSettings);
+ipcMain.handle('trecs-log:settings:save', saveTrecsLogSettings);
+ipcMain.handle('trecs-log:token:generate', generateTrecsLogToken);
+ipcMain.handle('trecs-log:token:clear', clearTrecsLogToken);
+ipcMain.handle('trecs-log:connection:test', testTrecsLogConnection);
 ipcMain.handle('production-sync:settings:get', getProductionSyncSettings);
 ipcMain.handle('production-sync:settings:save', saveProductionSyncSettings);
 ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredentials);
@@ -8012,6 +8518,8 @@ function idCardSubjectTsvRow(subject) {
     subject.homeroom,
     subject.track,
     subject.team,
+    subject.field1,
+    subject.field2,
     subject.subjectType,
     absoluteWorkspacePath(image.path)
   ].map(tsvValue).join('\t');
@@ -10366,6 +10874,22 @@ async function approveEndOfDayPackage(_event, input = {}) {
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('END_OF_DAY.SERVER_LOADED', {
+    message: `End of Day loaded to server for ${(approvedManifest.job && approvedManifest.job.clientName) || 'school'} / ${(approvedManifest.job && approvedManifest.job.name) || jobId}`,
+    photographerName: (approvedManifest.photographerNames || []).join(', ') || approvedManifest.photographerName || null,
+    jobId,
+    jobName: approvedManifest.job && approvedManifest.job.name,
+    schoolName: approvedManifest.job && (approvedManifest.job.clientName || approvedManifest.job.trecsName),
+    studentCount: Number(result.counts.newSubjects || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.copiedFiles || 0),
+    sourceLocation: packageFolder,
+    destinationLocation: approvedManifest.job && approvedManifest.job.rootPath,
+    details: {
+      editedSubjects: Number(result.counts.editedSubjects || 0),
+      subjectImageLinks: Number(result.counts.subjectImageLinks || 0)
+    }
+  });
   return result;
 }
 
@@ -10546,6 +11070,21 @@ async function loadOnsiteSetup(_event, input = {}) {
   clearLocalCaptureDatabase(result.id);
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('ONSITE_SETUP.LOADED', {
+    message: `Onsite setup loaded for ${(manifest.school && manifest.school.name) || 'school'} / ${(manifest.job && manifest.job.name) || result.id}`,
+    jobId: result.id,
+    jobName: manifest.job && manifest.job.name,
+    schoolName: manifest.school && manifest.school.name,
+    studentCount: Number(result.counts.subjects || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.croppedMediumImages || 0),
+    sourceLocation: setupFolder,
+    destinationLocation: manifest.job && manifest.job.rootPath,
+    details: {
+      refreshedExistingJob: result.refreshedExistingJob === true,
+      orders: Number(result.counts.orders || 0)
+    }
+  });
   return result;
 }
 
@@ -10612,11 +11151,33 @@ async function createJob(_event, input = {}) {
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     const jobId = idRows[0].id;
     ensureJobFolders(rootPath);
-    return { id: jobId, rootPath };
+    return {
+      id: jobId,
+      rootPath,
+      name,
+      type,
+      clientId,
+      clientName: clientRows[0].displayName,
+      schoolName: clientRows[0].trecsName || clientRows[0].displayName,
+      shootDate
+    };
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('JOB.CREATED', {
+    message: `Job created: ${result.clientName} / ${result.name}`,
+    jobId: result.id,
+    jobName: result.name,
+    schoolId: result.clientId,
+    schoolName: result.clientName,
+    destinationLocation: result.rootPath,
+    details: {
+      jobType: result.type,
+      shootDate: result.shootDate || null,
+      trecsSchoolName: result.schoolName || null
+    }
+  });
   return result;
 }
 
@@ -11279,8 +11840,10 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
     const jobRows = rowsFromDatabase(database, `
       SELECT
         j.id,
+        j.name AS jobName,
         j.root_path AS rootPath,
-        c.reference_number AS clientReferenceNumber
+        c.reference_number AS clientReferenceNumber,
+        c.display_name AS schoolName
       FROM jobs j
       JOIN clients c ON c.id = j.client_id
       WHERE j.id = ${jobId}
@@ -11473,12 +12036,31 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
       skipped: skippedRows.length,
       skippedRows: skippedRows.slice(0, 25),
       sourceFilePath: copiedSourcePath,
-      importedAt
+      importedAt,
+      jobName: jobRows[0].jobName,
+      schoolName: jobRows[0].schoolName,
+      jobRootPath: jobRows[0].rootPath
     };
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('DATA.LOADED', {
+    message: `School data loaded for ${result.schoolName} / ${result.jobName}`,
+    jobId,
+    jobName: result.jobName,
+    schoolName: result.schoolName,
+    recordCount: Number(result.created || 0) + Number(result.updated || 0),
+    studentCount: Number(result.created || 0) + Number(result.updated || 0),
+    sourceLocation: filePath,
+    destinationLocation: result.jobRootPath,
+    details: {
+      created: Number(result.created || 0),
+      updated: Number(result.updated || 0),
+      skipped: Number(result.skipped || 0),
+      storedSourcePath: result.sourceFilePath
+    }
+  });
   return result;
 }
 
@@ -15895,6 +16477,11 @@ app.whenReady().then(async () => {
   await ensurePrototypeDatabaseShape();
   logStartup('database ready');
   createWindow();
+  scheduleTrecsLogFlush(1000);
+  const trecsLogRetryTimer = setInterval(() => scheduleTrecsLogFlush(), 60000);
+  if (typeof trecsLogRetryTimer.unref === 'function') {
+    trecsLogRetryTimer.unref();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

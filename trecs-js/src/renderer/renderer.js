@@ -83,6 +83,17 @@ const productionMilestoneGrid = document.getElementById('productionMilestoneGrid
 const productionSyncSummary = document.getElementById('productionSyncSummary');
 const productionSyncPreviewBody = document.getElementById('productionSyncPreviewBody');
 const productionSyncStatus = document.getElementById('productionSyncStatus');
+const settingsView = document.getElementById('settingsView');
+const trecsLogSettingsForm = document.getElementById('trecsLogSettingsForm');
+const trecsLogResolvedMode = document.getElementById('trecsLogResolvedMode');
+const trecsLogTokenStatus = document.getElementById('trecsLogTokenStatus');
+const trecsLogStorageStatus = document.getElementById('trecsLogStorageStatus');
+const trecsLogQueueStatus = document.getElementById('trecsLogQueueStatus');
+const trecsLogSettingsStatus = document.getElementById('trecsLogSettingsStatus');
+const saveTrecsLogSettingsButton = document.getElementById('saveTrecsLogSettingsButton');
+const testTrecsLogConnectionButton = document.getElementById('testTrecsLogConnectionButton');
+const generateTrecsLogTokenButton = document.getElementById('generateTrecsLogTokenButton');
+const clearTrecsLogTokenButton = document.getElementById('clearTrecsLogTokenButton');
 const dataVerificationView = document.getElementById('dataVerificationView');
 const verificationJobSelect = document.getElementById('verificationJobSelect');
 const chooseVerificationFileButton = document.getElementById('chooseVerificationFileButton');
@@ -837,13 +848,14 @@ function setView(view) {
   studentListsView.classList.toggle('active-view', view === 'studentLists');
   onlineOrdersView.classList.toggle('active-view', view === 'onlineOrders');
   productionSyncView.classList.toggle('active-view', view === 'productionSync');
+  settingsView.classList.toggle('active-view', view === 'settings');
   dataVerificationView.classList.toggle('active-view', view === 'dataVerification');
   staffVerificationView.classList.toggle('active-view', view === 'staffVerification');
   idCardRenderView.classList.toggle('active-view', view === 'idCardRender');
   unitRenderView.classList.toggle('active-view', view === 'unitRender');
   batchRenderView.classList.toggle('active-view', view === 'batchRender');
   compositesView.classList.toggle('active-view', view === 'composites');
-  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'idCardRender' ? 'ID Card Render' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
+  title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'settings' ? 'Settings' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'idCardRender' ? 'ID Card Render' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
@@ -878,6 +890,9 @@ function setView(view) {
   }
   if (view === 'productionSync') {
     loadProductionSyncSettings().catch((error) => { productionSyncStatus.textContent = error.message || 'Could not load production sync settings.'; });
+  }
+  if (view === 'settings') {
+    loadTrecsLogSettings().catch((error) => { trecsLogSettingsStatus.textContent = error.message || 'Could not load TRECS settings.'; });
   }
   if (view === 'dataVerification') {
     loadRosterVerificationJobs().catch((error) => { verificationStatus.textContent = error.message || 'Could not load jobs.'; });
@@ -1183,7 +1198,8 @@ async function configureStationMode() {
   navButtons.forEach((button) => {
     const isJobs = button.dataset.viewButton === 'jobs';
     const isCapture = button.dataset.viewTarget === 'jobs' && button.dataset.jobTabTarget === 'capture';
-    button.hidden = !isJobs && !isCapture;
+    const isSettings = button.dataset.viewButton === 'settings';
+    button.hidden = !isJobs && !isCapture && !isSettings;
   });
   jobsState.selectedTab = 'capture';
   setView('jobs');
@@ -5919,8 +5935,8 @@ const ID_TEMPLATE_ELEMENT_DEFINITIONS = [
   { key: 'barcode', label: 'Barcode', kind: 'barcode', symbology: 'code128', x: 390, y: 545, w: 420, h: 70, size: 70 },
   { key: 'homeroom', label: 'Homeroom', kind: 'text', field: 'homeroom', x: 390, y: 370, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
   { key: 'studentId', label: 'Student ID', kind: 'text', field: 'studentId', x: 390, y: 425, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
-  { key: 'extra1', label: 'Extra 1', kind: 'text', field: 'extra1', x: 390, y: 480, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
-  { key: 'extra2', label: 'Extra 2', kind: 'text', field: 'extra2', x: 760, y: 480, w: 260, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'extra1', label: 'Field 1', kind: 'text', field: 'field1', x: 390, y: 480, w: 430, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
+  { key: 'extra2', label: 'Field 2', kind: 'text', field: 'field2', x: 760, y: 480, w: 260, h: 45, size: 32, color: '#000000', font: 'Arial', align: 'left' },
   { key: 'year', label: 'School Year', kind: 'text', field: 'year', x: 830, y: 620, w: 230, h: 48, size: 34, color: '#000000', font: 'Myriad Pro', align: 'left' },
   { key: 'qr', label: 'QR Code', kind: 'qr', x: 930, y: 90, w: 120, h: 120 }
 ];
@@ -5954,6 +5970,17 @@ const ID_TEMPLATE_GRADE_BACKGROUNDS = {
   FACULTY: 'FAC.jpg',
   STAFF: 'FAC.jpg'
 };
+
+const ID_TEMPLATE_TEXT_FIELDS = [
+  { value: 'fullName', label: 'Full Name' },
+  { value: 'firstName', label: 'First Name' },
+  { value: 'lastName', label: 'Last Name' },
+  { value: 'homeroom', label: 'Homeroom' },
+  { value: 'studentId', label: 'Student ID' },
+  { value: 'field1', label: 'Field 1' },
+  { value: 'field2', label: 'Field 2' },
+  { value: 'year', label: 'School Year' }
+];
 
 function createDefaultIdTemplate() {
   return {
@@ -6017,6 +6044,10 @@ function normalizeIdTemplateForDesigner(template) {
   };
   Object.values(nextTemplate.elements).forEach((element) => {
     if (element && element.kind === 'text') {
+      if (element.field === 'extra1') element.field = 'field1';
+      if (element.field === 'extra2') element.field = 'field2';
+      if (element.label === 'Extra 1') element.label = 'Field 1';
+      if (element.label === 'Extra 2') element.label = 'Field 2';
       element.align = ['left', 'center', 'right'].includes(element.align) ? element.align : 'left';
     }
   });
@@ -6151,8 +6182,8 @@ function sampleIdTemplateText(element) {
     lastName: 'Student',
     homeroom: 'HR: Martinez',
     studentId: 'ID #: 123456',
-    extra1: 'Grade 5',
-    extra2: 'Track A',
+    field1: 'Field 1 Value',
+    field2: 'Field 2 Value',
     year: jobsState.directorySchoolYear || '2025-2026'
   };
   return samples[element.field] || element.label || 'Text';
@@ -6211,8 +6242,8 @@ function renderIdTemplateProperties() {
       <label>
         <span>Field</span>
         <select data-id-template-property="field">
-          ${['fullName', 'firstName', 'lastName', 'homeroom', 'studentId', 'extra1', 'extra2', 'year'].map((field) => `
-            <option value="${field}" ${element.field === field ? 'selected' : ''}>${escapeHtml(formatType(field))}</option>
+          ${ID_TEMPLATE_TEXT_FIELDS.map((field) => `
+            <option value="${field.value}" ${element.field === field.value ? 'selected' : ''}>${escapeHtml(field.label)}</option>
           `).join('')}
         </select>
       </label>
@@ -9000,6 +9031,152 @@ function populateProductionSyncSettings(settings = {}) {
   productionSyncFirstDataRow.value = settings.firstDataRow || 3;
 }
 
+function trecsLogModeLabel(settings = {}) {
+  const selected = trecsLogSettingsForm.elements.appMode.value;
+  const resolved = selected === 'auto' ? settings.resolvedAppMode || 'WORKSTATION' : selected.toUpperCase();
+  trecsLogResolvedMode.textContent = `Events will be labeled ${resolved}.`;
+}
+
+function updateTrecsLogEnabledState() {
+  const enabled = trecsLogSettingsForm.elements.enabled.checked;
+  testTrecsLogConnectionButton.disabled = !enabled;
+  if (!enabled) {
+    trecsLogSettingsStatus.textContent = 'Logging is disabled. This computer will not queue or send activity events.';
+  }
+}
+
+function populateTrecsLogSettings(settings = {}) {
+  trecsLogSettingsForm.elements.enabled.checked = settings.enabled === true;
+  trecsLogSettingsForm.elements.webAppUrl.value = settings.webAppUrl || '';
+  trecsLogSettingsForm.elements.stationId.value = settings.stationId || settings.computerName || '';
+  trecsLogSettingsForm.elements.appMode.value = settings.appMode || 'auto';
+  trecsLogSettingsForm.elements.token.value = '';
+  trecsLogSettingsForm.dataset.tokenConfigured = settings.tokenConfigured ? 'true' : 'false';
+  trecsLogSettingsForm.dataset.resolvedAppMode = settings.resolvedAppMode || 'WORKSTATION';
+  if (settings.tokenConfigured) {
+    const updated = settings.tokenUpdatedAt ? ` Updated ${new Date(settings.tokenUpdatedAt).toLocaleString()}.` : '';
+    trecsLogTokenStatus.textContent = `A protected token is saved for ${settings.stationId || 'this station'}.${updated} Enter a new token only to replace it.`;
+  } else {
+    trecsLogTokenStatus.textContent = `No token is stored for ${settings.stationId || 'this station'}.`;
+  }
+  clearTrecsLogTokenButton.disabled = !settings.tokenConfigured;
+  trecsLogStorageStatus.textContent = settings.encryptionAvailable === false
+    ? 'Windows protected storage is unavailable. A token cannot be saved on this computer.'
+    : `The token is encrypted for this Windows user and stored locally in ${settings.storageFolder || 'the local TRECS profile'}. It is never saved in the shared TRECS database.`;
+  const pendingEvents = Number(settings.pendingEvents || 0);
+  if (pendingEvents) {
+    const lastError = settings.lastUploadError ? ` Last upload error: ${settings.lastUploadError}` : '';
+    trecsLogQueueStatus.textContent = `${pendingEvents} activity event${pendingEvents === 1 ? '' : 's'} waiting to upload.${lastError}`;
+  } else if (settings.lastUploadAt) {
+    trecsLogQueueStatus.textContent = `Activity queue is current. Last upload ${new Date(settings.lastUploadAt).toLocaleString()}.`;
+  } else {
+    trecsLogQueueStatus.textContent = 'No activity events are waiting to upload.';
+  }
+  trecsLogModeLabel(settings);
+  updateTrecsLogEnabledState();
+}
+
+function trecsLogSettingsInput() {
+  return {
+    enabled: trecsLogSettingsForm.elements.enabled.checked,
+    webAppUrl: trecsLogSettingsForm.elements.webAppUrl.value.trim(),
+    appMode: trecsLogSettingsForm.elements.appMode.value,
+    token: trecsLogSettingsForm.elements.token.value.trim()
+  };
+}
+
+async function loadTrecsLogSettings() {
+  trecsLogSettingsStatus.textContent = 'Loading local settings...';
+  const settings = await trecsApi('getTrecsLogSettings').getTrecsLogSettings();
+  populateTrecsLogSettings(settings);
+  if (settings.enabled) {
+    trecsLogSettingsStatus.textContent = settings.tokenConfigured
+      ? `Protected token ready for ${settings.stationId}.`
+      : `Enter the token configured for ${settings.stationId}.`;
+  }
+  return settings;
+}
+
+async function saveTrecsLogSettings(showSavedStatus = true) {
+  saveTrecsLogSettingsButton.disabled = true;
+  try {
+    trecsLogSettingsStatus.textContent = 'Saving local settings...';
+    const settings = await trecsApi('saveTrecsLogSettings').saveTrecsLogSettings(trecsLogSettingsInput());
+    populateTrecsLogSettings(settings);
+    if (showSavedStatus) {
+      trecsLogSettingsStatus.textContent = settings.enabled
+        ? `Settings saved locally for ${settings.stationId}.`
+        : `Logging disabled for ${settings.stationId}. No activity events will be queued or sent.`;
+    }
+    return settings;
+  } finally {
+    saveTrecsLogSettingsButton.disabled = false;
+  }
+}
+
+async function testTrecsLogConnection() {
+  testTrecsLogConnectionButton.disabled = true;
+  try {
+    await saveTrecsLogSettings(false);
+    trecsLogSettingsStatus.textContent = 'Sending CONNECTION.TEST to TRECS LOG...';
+    const result = await trecsApi('testTrecsLogConnection').testTrecsLogConnection();
+    trecsLogSettingsStatus.textContent = result.message || `Connection successful for ${result.stationId}.`;
+  } catch (error) {
+    trecsLogSettingsStatus.textContent = error.message || 'Could not connect to TRECS LOG.';
+  } finally {
+    testTrecsLogConnectionButton.disabled = !trecsLogSettingsForm.elements.enabled.checked;
+  }
+}
+
+async function generateTrecsLogToken() {
+  if (trecsLogSettingsForm.dataset.tokenConfigured === 'true') {
+    const confirmed = await confirmAction({
+      type: 'warning',
+      title: 'Replace Station Token',
+      message: `Generate a new token for ${trecsLogSettingsForm.elements.stationId.value || 'this computer'}?`,
+      detail: 'The existing token will stop working after you replace it in Apps Script. The new token will be copied to the clipboard once.',
+      confirmLabel: 'Generate New Token'
+    });
+    if (!confirmed) return;
+  }
+
+  generateTrecsLogTokenButton.disabled = true;
+  try {
+    trecsLogSettingsStatus.textContent = 'Generating and protecting a new station token...';
+    const input = trecsLogSettingsInput();
+    input.token = '';
+    const settings = await trecsApi('generateTrecsLogToken').generateTrecsLogToken(input);
+    populateTrecsLogSettings(settings);
+    trecsLogTokenStatus.textContent = `A new protected token is saved for ${settings.stationId} and was copied to the clipboard.`;
+    trecsLogSettingsStatus.textContent = `Paste the copied token into Apps Script STATION_TOKENS for ${settings.stationId}, save the property, then click Save & Test Connection.`;
+  } catch (error) {
+    trecsLogSettingsStatus.textContent = error.message || 'Could not generate a station token.';
+  } finally {
+    generateTrecsLogTokenButton.disabled = false;
+  }
+}
+
+async function clearTrecsLogToken() {
+  const confirmed = await confirmAction({
+    type: 'warning',
+    title: 'Clear Google Log Token',
+    message: `Remove the protected Google Log token from ${trecsLogSettingsForm.elements.stationId.value || 'this computer'}?`,
+    detail: 'Google logging will be disabled until a new token is saved.',
+    confirmLabel: 'Clear Token'
+  });
+  if (!confirmed) return;
+  clearTrecsLogTokenButton.disabled = true;
+  try {
+    const settings = await trecsApi('clearTrecsLogToken').clearTrecsLogToken();
+    populateTrecsLogSettings(settings);
+    trecsLogSettingsStatus.textContent = `Token cleared from ${settings.stationId}.`;
+  } catch (error) {
+    trecsLogSettingsStatus.textContent = error.message || 'Could not clear the token.';
+  } finally {
+    clearTrecsLogTokenButton.disabled = trecsLogSettingsForm.dataset.tokenConfigured !== 'true';
+  }
+}
+
 async function loadProductionSyncSettings() {
   const settings = await trecsApi('getProductionSyncSettings').getProductionSyncSettings();
   populateProductionSyncSettings(settings);
@@ -11055,7 +11232,7 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'events') {
       jobsState.eventPinnedJobId = null;
     }
-    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'idCardRender', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
+    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'settings', 'idCardRender', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
     }
     setView(button.dataset.viewButton);
@@ -11156,6 +11333,30 @@ testProductionSyncButton.addEventListener('click', testProductionSync);
 buildProductionSheetButton.addEventListener('click', buildProductionSheet);
 previewProductionSyncButton.addEventListener('click', previewProductionSync);
 pushProductionSyncButton.addEventListener('click', pushProductionSync);
+trecsLogSettingsForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await saveTrecsLogSettings(true);
+  } catch (error) {
+    trecsLogSettingsStatus.textContent = error.message || 'Could not save TRECS settings.';
+  }
+});
+trecsLogSettingsForm.elements.appMode.addEventListener('change', () => {
+  trecsLogModeLabel({ resolvedAppMode: trecsLogSettingsForm.dataset.resolvedAppMode || 'WORKSTATION' });
+});
+trecsLogSettingsForm.elements.enabled.addEventListener('change', updateTrecsLogEnabledState);
+trecsLogSettingsForm.elements.token.addEventListener('input', () => {
+  if (trecsLogSettingsForm.elements.token.value) {
+    trecsLogTokenStatus.textContent = 'A new token is ready to be encrypted when settings are saved.';
+  } else if (trecsLogSettingsForm.dataset.tokenConfigured === 'true') {
+    trecsLogTokenStatus.textContent = 'The protected token already saved on this computer will be kept.';
+  } else {
+    trecsLogTokenStatus.textContent = `No token is stored for ${trecsLogSettingsForm.elements.stationId.value || 'this station'}.`;
+  }
+});
+testTrecsLogConnectionButton.addEventListener('click', testTrecsLogConnection);
+generateTrecsLogTokenButton.addEventListener('click', generateTrecsLogToken);
+clearTrecsLogTokenButton.addEventListener('click', clearTrecsLogToken);
 productionMilestoneGrid.addEventListener('change', (event) => {
   const select = event.target.closest('[data-production-milestone-job]');
   if (select) saveProductionMilestoneFromSelect(select);
