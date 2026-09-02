@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('trecs', {
   saveProductionMilestone: (input) => ipcRenderer.invoke('production-sync:milestone-save', input),
   buildProductionStatusSheet: (input) => ipcRenderer.invoke('production-sync:build-sheet', input),
   createClient: (input) => ipcRenderer.invoke('client:create', input),
+  importLegacySchools: (input) => ipcRenderer.invoke('clients:import-legacy-schools', input),
   createJob: (input) => ipcRenderer.invoke('job:create', input),
   updateJob: (jobId, input) => ipcRenderer.invoke('job:update', jobId, input),
   choosePreviousTrecsJobFolder: () => ipcRenderer.invoke('job:choose-previous-trecs-folder'),
@@ -136,7 +137,7 @@ contextBridge.exposeInMainWorld('trecs', {
   confirmEnvelopeScan: (accept) => ipcRenderer.invoke('envelope:confirm-scan', accept),
   startCaptureWatcher: (jobId, subjectId, options) => ipcRenderer.invoke('capture:start-watcher', jobId, subjectId, options),
   stopCaptureWatcher: () => ipcRenderer.invoke('capture:stop-watcher'),
-  getCaptureSubjectImages: (subjectId) => ipcRenderer.invoke('capture:subject-images', subjectId),
+  getCaptureSubjectImages: (jobId, subjectId) => ipcRenderer.invoke('capture:subject-images', jobId, subjectId),
   selectCaptureImage: (subjectId, imageId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId),
   resolveCaptureImage: (input) => ipcRenderer.invoke('capture:resolve-image', input),
   onCaptureImageImported: (callback) => {

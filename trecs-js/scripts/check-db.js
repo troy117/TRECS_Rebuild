@@ -22,18 +22,37 @@ async function main() {
     locateFile: (file) => path.join(sqlWasmPath, file)
   });
   const database = new SQL.Database(fs.readFileSync(databasePath));
-  const result = database.exec(`
-    SELECT 'clients' AS label, COUNT(*) AS value FROM clients
-    UNION ALL SELECT 'jobs', COUNT(*) FROM jobs
-    UNION ALL SELECT 'subjects', COUNT(*) FROM subjects
-    UNION ALL SELECT 'orders', COUNT(*) FROM orders
-    UNION ALL SELECT 'images', COUNT(*) FROM image_assets;
-  `);
-
+  const scalar = (db, sql) => Number(db.exec(sql)[0]?.values?.[0]?.[0] || 0);
+  const jobRows = database.exec('SELECT id, root_path FROM jobs ORDER BY id;')[0]?.values || [];
+  const totals = {
+    clients: scalar(database, 'SELECT COUNT(*) FROM clients;'),
+    jobs: jobRows.length,
+    subjects: 0,
+    orders: 0,
+    images: 0
+  };
+  const programTables = new Set((database.exec("SELECT name FROM sqlite_master WHERE type = 'table';")[0]?.values || []).map(([name]) => name));
+  const misplaced = ['subjects', 'orders', 'image_assets'].filter((name) => programTables.has(name));
   database.close();
 
-  const rows = result[0].values.map(([label, value]) => `${label}: ${value}`);
-  console.log(rows.join('\n'));
+  if (misplaced.length) {
+    throw new Error(`ProgramData contains job-owned tables: ${misplaced.join(', ')}`);
+  }
+
+  for (const [, rootPath] of jobRows) {
+    const resolvedRoot = path.isAbsolute(rootPath) ? rootPath : path.resolve(dataRoot, rootPath);
+    const jobDatabasePath = path.join(resolvedRoot, 'Database', 'job.db');
+    if (!fs.existsSync(jobDatabasePath)) {
+      throw new Error(`Missing authoritative job database: ${jobDatabasePath}`);
+    }
+    const jobDatabase = new SQL.Database(fs.readFileSync(jobDatabasePath));
+    totals.subjects += scalar(jobDatabase, 'SELECT COUNT(*) FROM subjects;');
+    totals.orders += scalar(jobDatabase, 'SELECT COUNT(*) FROM orders;');
+    totals.images += scalar(jobDatabase, 'SELECT COUNT(*) FROM image_assets;');
+    jobDatabase.close();
+  }
+
+  console.log(Object.entries(totals).map(([label, value]) => `${label}: ${value}`).join('\n'));
 }
 
 main().catch((error) => {

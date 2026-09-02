@@ -36,6 +36,7 @@ const projectRoot = process.env.TRECS_DATA_ROOT
   ? path.resolve(process.env.TRECS_DATA_ROOT)
   : configuredPathFromFile('path.txt', defaultProjectRoot);
 const defaultElectronUserDataPath = app.getPath('userData');
+const legacyElectronUserDataPath = defaultElectronUserDataPath;
 const localWindowsAppDataPath = process.env.LOCALAPPDATA
   ? path.resolve(process.env.LOCALAPPDATA)
   : defaultElectronUserDataPath;
@@ -624,6 +625,23 @@ function createJobDatabaseSchema(database) {
       UNIQUE(image_asset_id, version_type, path)
     );
 
+    CREATE TABLE IF NOT EXISTS image_import_events (
+      id INTEGER PRIMARY KEY,
+      capture_session_id INTEGER,
+      job_id INTEGER NOT NULL,
+      subject_id INTEGER,
+      image_asset_id INTEGER,
+      event_type TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      destination_path TEXT,
+      filename TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'new',
+      detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      processed_at TEXT,
+      error_message TEXT,
+      metadata_json TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS subject_images (
       id INTEGER PRIMARY KEY,
       subject_id INTEGER NOT NULL,
@@ -693,6 +711,20 @@ function createJobDatabaseSchema(database) {
       notes TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS capture_image_actions (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      image_asset_id INTEGER NOT NULL,
+      source_subject_id INTEGER,
+      target_subject_id INTEGER,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS admin_item_batches (
       id INTEGER PRIMARY KEY,
       job_id INTEGER NOT NULL,
@@ -705,6 +737,38 @@ function createJobDatabaseSchema(database) {
       created_at TEXT,
       completed_at TEXT,
       error_message TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS end_of_day_imports (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      package_name TEXT,
+      package_folder TEXT NOT NULL,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      shoot_stage TEXT,
+      captured_images INTEGER NOT NULL DEFAULT 0,
+      raw_files INTEGER NOT NULL DEFAULT 0,
+      new_subjects INTEGER NOT NULL DEFAULT 0,
+      edited_subjects INTEGER NOT NULL DEFAULT 0,
+      copied_files INTEGER NOT NULL DEFAULT 0,
+      imported_by TEXT,
+      imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      manifest_json TEXT,
+      UNIQUE(job_id, package_folder)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_milestones (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      milestone_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'not_started',
+      completed_at TEXT,
+      completed_by TEXT,
+      source TEXT NOT NULL DEFAULT 'manual',
+      notes TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, milestone_key)
     );
 
     CREATE TABLE IF NOT EXISTS event_entries (
@@ -731,137 +795,30 @@ function createJobDatabaseSchema(database) {
       notes TEXT,
       UNIQUE(event_entry_id, fall_subject_id)
     );
-  `);
-}
 
-function createProgramDatabaseSchema(database) {
-  database.run(`
-    PRAGMA foreign_keys = ON;
+    CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id
+    ON capture_sessions(job_id);
 
-    CREATE TABLE IF NOT EXISTS clients (
-      id INTEGER PRIMARY KEY,
-      reference_number TEXT,
-      display_name TEXT NOT NULL,
-      trecs_name TEXT UNIQUE,
-      phone TEXT,
-      address TEXT,
-      city TEXT,
-      state TEXT,
-      zip TEXT,
-      notes TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
+    CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+    ON capture_image_actions(image_asset_id, created_at);
 
-    CREATE TABLE IF NOT EXISTS jobs (
-      id INTEGER PRIMARY KEY,
-      client_id INTEGER NOT NULL,
-      legacy_id TEXT,
-      reference_number TEXT,
-      name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      package_plan_id INTEGER,
-      student_id_template_id INTEGER,
-      faculty_id_template_id INTEGER,
-      root_path TEXT NOT NULL,
-      legacy_folder_layout TEXT NOT NULL DEFAULT 'trecs_v7',
-      shoot_date TEXT,
-      retake_date TEXT,
-      due_date TEXT,
-      notes TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
+    CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
+    ON image_assets(capture_session_id);
 
-    CREATE TABLE IF NOT EXISTS templates (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      template_type TEXT NOT NULL,
-      source_path TEXT,
-      metadata_json TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, template_type)
-    );
+    CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
+    ON image_assets(job_id, shoot_stage);
 
-    CREATE TABLE IF NOT EXISTS template_elements (
-      id INTEGER PRIMARY KEY,
-      template_id INTEGER NOT NULL,
-      element_type TEXT NOT NULL,
-      x REAL,
-      y REAL,
-      width REAL,
-      height REAL,
-      font TEXT,
-      font_size REAL,
-      color TEXT,
-      metadata_json TEXT,
-      sort_order INTEGER NOT NULL DEFAULT 0
-    );
+    CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id
+    ON end_of_day_imports(job_id, imported_at);
 
-    CREATE TABLE IF NOT EXISTS id_card_templates (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      template_type TEXT NOT NULL CHECK (template_type IN ('student', 'staff')),
-      template_json TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, template_type)
-    );
+    CREATE INDEX IF NOT EXISTS idx_job_milestones_job_id
+    ON job_milestones(job_id, milestone_key);
 
-    CREATE TABLE IF NOT EXISTS package_plans (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 1,
-      active INTEGER NOT NULL DEFAULT 1,
-      legacy_name TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, version)
-    );
+    CREATE INDEX IF NOT EXISTS idx_event_entries_job_status
+    ON event_entries(event_job_id, status, image_number);
 
-    CREATE TABLE IF NOT EXISTS products (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      category TEXT,
-      size TEXT,
-      requires_image INTEGER NOT NULL DEFAULT 1,
-      template_id INTEGER,
-      metadata_json TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS product_aliases (
-      id INTEGER PRIMARY KEY,
-      product_id INTEGER NOT NULL,
-      alias TEXT NOT NULL UNIQUE,
-      source TEXT NOT NULL DEFAULT 'legacy_package_item',
-      notes TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS package_codes (
-      id INTEGER PRIMARY KEY,
-      package_plan_id INTEGER NOT NULL,
-      code TEXT NOT NULL,
-      name TEXT,
-      active INTEGER NOT NULL DEFAULT 1,
-      legacy_code_name TEXT,
-      metadata_json TEXT,
-      UNIQUE(package_plan_id, code)
-    );
-
-    CREATE TABLE IF NOT EXISTS package_code_items (
-      id INTEGER PRIMARY KEY,
-      package_code_id INTEGER NOT NULL,
-      legacy_field TEXT,
-      raw_value TEXT NOT NULL,
-      product_id INTEGER,
-      quantity INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
-    );
+    CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
+    ON event_subject_links(event_entry_id, sort_order);
   `);
 }
 
@@ -930,6 +887,132 @@ function migrateExistingIdTemplateFiles(database) {
   return changed;
 }
 
+const UNUSED_PROGRAM_TABLES = [
+  'subject_field_values',
+  'job_field_definitions',
+  'sync_record_mappings',
+  'sync_conflicts',
+  'sync_packages',
+  'render_tasks',
+  'exports',
+  'client_contacts'
+];
+
+// ProgramData.db is the global directory and configuration database. These
+// tables are materialized only in the in-memory working database; their
+// durable source of truth is JOBS/<school>/<job>/Database/job.db.
+const JOB_DATA_TABLES = [
+  'composite_grade_titles',
+  'duplicate_record_reviews',
+  'capture_sessions',
+  'subjects',
+  'staff_assignments',
+  'subject_groups',
+  'subject_group_members',
+  'subject_codes',
+  'image_assets',
+  'subject_images',
+  'image_versions',
+  'image_import_events',
+  'envelope_scans',
+  'capture_image_actions',
+  'orders',
+  'order_items',
+  'payments',
+  'event_entries',
+  'event_subject_links',
+  'admin_item_batches',
+  'end_of_day_imports',
+  'job_milestones'
+];
+
+const JOB_DATA_DROP_ORDER = [
+  'event_subject_links',
+  'subject_group_members',
+  'subject_codes',
+  'subject_images',
+  'image_versions',
+  'payments',
+  'order_items',
+  'envelope_scans',
+  'capture_image_actions',
+  'event_entries',
+  'admin_item_batches',
+  'end_of_day_imports',
+  'job_milestones',
+  'staff_assignments',
+  'duplicate_record_reviews',
+  'composite_grade_titles',
+  'subject_groups',
+  'image_import_events',
+  'capture_sessions',
+  'orders',
+  'image_assets',
+  'subjects'
+];
+
+function databaseHasTable(database, tableName) {
+  return rowsFromDatabase(database, `
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = ${sqlLiteral(tableName)}
+    LIMIT 1;
+  `).length > 0;
+}
+
+function dropJobDataTables(database) {
+  database.run('PRAGMA foreign_keys = OFF;');
+  try {
+    JOB_DATA_DROP_ORDER.forEach((tableName) => {
+      database.run(`DROP TABLE IF EXISTS ${tableName};`);
+    });
+  } finally {
+    database.run('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function jobDatabasePathForRow(jobRow) {
+  return path.join(resolveProjectPath(jobRow.root_path), 'Database', 'job.db');
+}
+
+function prepareJobDatabaseShape(database) {
+  createJobDatabaseSchema(database);
+  ensureCaptureImageActionsSchema(database);
+  ensureVerificationSchema(database);
+  ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
+  ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER');
+  ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT');
+  ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT');
+  repairMovedCaptureImageLinks(database);
+}
+
+function removeUnusedEmptyProgramTables(database) {
+  let changed = false;
+  database.run('PRAGMA foreign_keys = OFF;');
+  try {
+    UNUSED_PROGRAM_TABLES.forEach((tableName) => {
+      const exists = rowsFromDatabase(database, `
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = ${sqlLiteral(tableName)};
+      `).length > 0;
+      if (!exists) {
+        return;
+      }
+      const count = Number(rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM ${tableName};`)[0]?.count || 0);
+      if (count === 0) {
+        database.run(`DROP TABLE ${tableName};`);
+        changed = true;
+      }
+    });
+  } finally {
+    database.run('PRAGMA foreign_keys = ON;');
+  }
+  return changed;
+}
+
 function croppedMediumPrimaryImageBySubject(database, jobId) {
   const rows = rowsFromDatabase(database, `
     SELECT
@@ -955,10 +1038,8 @@ function croppedMediumPrimaryImageBySubject(database, jobId) {
   return imageBySubject;
 }
 
-async function writeJobDatabaseSnapshot(jobId, options = {}) {
+async function writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options = {}) {
   const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const sourceDatabase = new SQL.Database(databaseBytes);
   const jobDatabase = new SQL.Database();
   const croppedMediumOnly = options.imageScope === 'cropped_med';
 
@@ -986,12 +1067,15 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     }
 
     const rootPath = resolveProjectPath(jobRows[0].root_path);
-    const databaseFolder = path.join(rootPath, 'Database');
+    const databaseFolder = options.outputPath
+      ? path.dirname(path.resolve(options.outputPath))
+      : path.join(rootPath, 'Database');
     fs.mkdirSync(databaseFolder, { recursive: true });
-    const jobDatabasePath = path.join(databaseFolder, 'job.db');
+    const jobDatabasePath = options.outputPath
+      ? path.resolve(options.outputPath)
+      : path.join(databaseFolder, 'job.db');
 
-    createJobDatabaseSchema(jobDatabase);
-    ensureCaptureImageActionsSchema(jobDatabase);
+    prepareJobDatabaseShape(jobDatabase);
     jobDatabase.run('PRAGMA foreign_keys = OFF;');
     jobDatabase.run('BEGIN TRANSACTION;');
 
@@ -1085,6 +1169,12 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'envelope_scans', Object.keys(envelopeRows[0] || {}), envelopeRows);
     const adminRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM admin_item_batches WHERE job_id = ${jobId};`);
     insertRows(jobDatabase, 'admin_item_batches', Object.keys(adminRows[0] || {}), adminRows);
+    const imageImportRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_import_events WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'image_import_events', Object.keys(imageImportRows[0] || {}), imageImportRows);
+    const endOfDayRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM end_of_day_imports WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'end_of_day_imports', Object.keys(endOfDayRows[0] || {}), endOfDayRows);
+    const milestoneRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM job_milestones WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'job_milestones', Object.keys(milestoneRows[0] || {}), milestoneRows);
     const eventEntryRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM event_entries WHERE event_job_id = ${jobId};`);
     const eventEntryIds = eventEntryRows.map((row) => row.id);
     const eventEntryIdList = eventEntryIds.length ? eventEntryIds.join(', ') : '0';
@@ -1104,213 +1194,111 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     throw error;
   } finally {
     jobDatabase.close();
+  }
+}
+
+async function writeJobDatabaseSnapshot(jobId, options = {}) {
+  const sourceDatabase = await openWorkingDatabase();
+  try {
+    return await writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options);
+  } finally {
     sourceDatabase.close();
   }
 }
 
-async function writeProgramDatabaseSnapshot() {
+async function openWorkingDatabase() {
   const SQL = await getSqlModule();
-  const sourceDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
-  const programDatabase = new SQL.Database();
-  const programDatabasePath = path.join(projectRoot, 'database', 'program.db');
+  const database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+  prepareJobDatabaseShape(database);
+  database.run('PRAGMA foreign_keys = OFF;');
 
   try {
-    createProgramDatabaseSchema(programDatabase);
-    programDatabase.run('BEGIN TRANSACTION;');
+    const jobRows = rowsFromDatabase(database, 'SELECT id, root_path FROM jobs ORDER BY id;');
+    for (const jobRow of jobRows) {
+      ensureJobFolders(jobRow.root_path);
+      const databasePath = jobDatabasePathForRow(jobRow);
+      if (!fs.existsSync(databasePath)) {
+        await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+      }
 
-    [
-      'clients',
-      'jobs',
-      'templates',
-      'template_elements',
-      'id_card_templates',
-      'package_plans',
-      'products',
-      'product_aliases',
-      'package_codes',
-      'package_code_items'
-    ].forEach((tableName) => {
-      const rows = rowsFromDatabase(sourceDatabase, `SELECT * FROM ${tableName};`);
-      insertRows(programDatabase, tableName, Object.keys(rows[0] || {}), rows);
-    });
-
-    programDatabase.run('COMMIT;');
-    fs.writeFileSync(programDatabasePath, Buffer.from(programDatabase.export()));
-    return programDatabasePath;
-  } catch (error) {
-    try {
-      programDatabase.run('ROLLBACK;');
-    } catch (_rollbackError) {
-      // Keep the original snapshot error.
+      const jobDatabase = new SQL.Database(fs.readFileSync(databasePath));
+      try {
+        prepareJobDatabaseShape(jobDatabase);
+        JOB_DATA_TABLES.forEach((tableName) => {
+          const rows = rowsFromOptionalTable(jobDatabase, tableName);
+          if (!rows.length) {
+            return;
+          }
+          try {
+            insertImportedRows(database, tableName, rows);
+          } catch (error) {
+            throw new Error(`Could not load ${tableName} from ${databasePath}. Job database IDs must be unique across loaded jobs. ${error.message}`);
+          }
+        });
+      } finally {
+        jobDatabase.close();
+      }
     }
+  } catch (error) {
+    database.close();
     throw error;
   } finally {
+    try {
+      database.run('PRAGMA foreign_keys = ON;');
+    } catch (_error) {
+      // The database may already be closed after a load failure.
+    }
+  }
+
+  return database;
+}
+
+async function persistWorkingDatabase(database) {
+  const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;');
+  for (const jobRow of jobRows) {
+    await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+  }
+
+  const SQL = await getSqlModule();
+  const programDatabase = new SQL.Database(database.export());
+  try {
+    dropJobDataTables(programDatabase);
+    fs.writeFileSync(prototypeDatabasePath, Buffer.from(programDatabase.export()));
+  } finally {
     programDatabase.close();
-    sourceDatabase.close();
   }
 }
+
 
 async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
-  fs.mkdirSync(path.join(projectRoot, 'database'), { recursive: true });
+  fs.mkdirSync(databaseFolderPath, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
   fs.mkdirSync(captureHotFolder, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
 
-  const database = fs.existsSync(prototypeDatabasePath)
-    ? new SQL.Database(fs.readFileSync(prototypeDatabasePath))
-    : new SQL.Database();
+  const isNewDatabase = !fs.existsSync(prototypeDatabasePath);
+  const database = isNewDatabase
+    ? new SQL.Database()
+    : new SQL.Database(fs.readFileSync(prototypeDatabasePath));
 
   try {
-    let changed = false;
-    if (!fs.existsSync(prototypeDatabasePath)) {
+    if (isNewDatabase) {
       const schemaPath = path.join(bundledResourceRoot, 'database', 'schema.sql');
       if (!fs.existsSync(schemaPath)) {
         throw new Error(`Bundled schema was not found at ${schemaPath}`);
       }
       database.run(fs.readFileSync(schemaPath, 'utf8'));
-      changed = true;
     }
 
-    const jobColumns = rowsFromDatabase(database, 'PRAGMA table_info(jobs);')
-      .map((column) => column.name);
-
-    if (!jobColumns.includes('retake_date')) {
-      database.run('ALTER TABLE jobs ADD COLUMN retake_date TEXT;');
-      changed = true;
-    }
-
-    const hadCaptureImageActions = rowsFromDatabase(database, `
-      SELECT name FROM sqlite_master
-      WHERE type = 'table' AND name = 'capture_image_actions';
-    `).length > 0;
-
+    removeUnusedEmptyProgramTables(database);
     database.run(`
-      CREATE TABLE IF NOT EXISTS capture_sessions (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        session_type TEXT NOT NULL,
-        shoot_stage TEXT NOT NULL DEFAULT 'main',
-        file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
-        workstation_name TEXT NOT NULL,
-        user_name TEXT,
-        hot_folder_path TEXT,
-        local_database_path TEXT,
-        storage_root_path TEXT,
-        active_subject_id INTEGER,
-        latest_image_asset_id INTEGER,
-        status TEXT NOT NULL DEFAULT 'open',
-        sync_status TEXT NOT NULL DEFAULT 'local_only',
-        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        ended_at TEXT,
-        notes TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id
-      ON capture_sessions(job_id);
-
-      CREATE INDEX IF NOT EXISTS idx_capture_sessions_status
-      ON capture_sessions(status, sync_status);
-
-      CREATE TABLE IF NOT EXISTS capture_image_actions (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        image_asset_id INTEGER NOT NULL,
-        source_subject_id INTEGER,
-        target_subject_id INTEGER,
-        action_type TEXT NOT NULL,
-        reason TEXT NOT NULL,
-        notes TEXT,
-        photographer_name TEXT,
-        workstation_name TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
-      ON capture_image_actions(image_asset_id, created_at);
-
-      CREATE TABLE IF NOT EXISTS admin_item_batches (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        shoot_stage TEXT NOT NULL,
-        admin_item_type TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'created',
-        options_json TEXT,
-        output_path TEXT,
-        created_by TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        completed_at TEXT,
-        error_message TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id
-      ON admin_item_batches(job_id, shoot_stage, admin_item_type);
-
-      CREATE TABLE IF NOT EXISTS end_of_day_imports (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        package_name TEXT,
-        package_folder TEXT NOT NULL,
-        photographer_name TEXT,
-        workstation_name TEXT,
-        shoot_stage TEXT,
-        captured_images INTEGER NOT NULL DEFAULT 0,
-        raw_files INTEGER NOT NULL DEFAULT 0,
-        new_subjects INTEGER NOT NULL DEFAULT 0,
-        edited_subjects INTEGER NOT NULL DEFAULT 0,
-        copied_files INTEGER NOT NULL DEFAULT 0,
-        imported_by TEXT,
-        imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        manifest_json TEXT,
-        UNIQUE(job_id, package_folder)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id
-      ON end_of_day_imports(job_id, imported_at);
-
-      CREATE TABLE IF NOT EXISTS envelope_scans (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        subject_id INTEGER,
-        capture_session_id INTEGER,
-        image_import_event_id INTEGER,
-        order_id INTEGER,
-        scan_path TEXT,
-        envelope_identifier TEXT,
-        keyed_order_code TEXT,
-        keyed_by TEXT,
-        status TEXT NOT NULL DEFAULT 'scanned',
-        scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        keyed_at TEXT,
-        notes TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id
-      ON envelope_scans(job_id, subject_id, status);
-
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
-
-      CREATE TABLE IF NOT EXISTS job_milestones (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        milestone_key TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'not_started',
-        completed_at TEXT,
-        completed_by TEXT,
-        source TEXT NOT NULL DEFAULT 'manual',
-        notes TEXT,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(job_id, milestone_key)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_job_milestones_job_id
-      ON job_milestones(job_id, milestone_key);
 
       CREATE TABLE IF NOT EXISTS id_card_templates (
         id INTEGER PRIMARY KEY,
@@ -1337,31 +1325,6 @@ async function ensurePrototypeDatabaseShape() {
         expires_at TEXT,
         closed_at TEXT,
         metadata_json TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS event_entries (
-        id INTEGER PRIMARY KEY,
-        event_job_id INTEGER NOT NULL,
-        fall_job_id INTEGER,
-        event_image_asset_id INTEGER NOT NULL,
-        image_number TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'unlinked',
-        notes TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(event_job_id, event_image_asset_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS event_subject_links (
-        id INTEGER PRIMARY KEY,
-        event_entry_id INTEGER NOT NULL,
-        fall_subject_id INTEGER NOT NULL,
-        order_id INTEGER,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        confirmed_by TEXT,
-        confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT,
-        UNIQUE(event_entry_id, fall_subject_id)
       );
 
       CREATE TABLE IF NOT EXISTS render_batches (
@@ -1392,106 +1355,55 @@ async function ensurePrototypeDatabaseShape() {
         UNIQUE(render_batch_id, job_id)
       );
 
-      CREATE TABLE IF NOT EXISTS render_tasks (
-        id INTEGER PRIMARY KEY,
-        render_batch_id INTEGER NOT NULL,
-        order_item_id INTEGER,
-        job_id INTEGER,
-        order_id INTEGER,
-        task_type TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'queued',
-        output_path TEXT,
-        details_json TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-    `);
-    changed = true;
-
-    changed = ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
-    changed = ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'") || changed;
-    changed = ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'subjects', 'enrollment_status', "TEXT NOT NULL DEFAULT 'active'") || changed;
-    changed = ensureColumn(database, 'subjects', 'include_in_composites', 'INTEGER NOT NULL DEFAULT 0') || changed;
-    changed = ensureColumn(database, 'subjects', 'verified_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'verification_source', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'field1', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'field2', 'TEXT') || changed;
-    ensureCompositeGradeTitleTable(database);
-    database.run(`
-      CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        name_key TEXT NOT NULL,
-        subject_ids_key TEXT NOT NULL,
-        reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT,
-        UNIQUE(job_id, name_key, subject_ids_key)
-      );
-    `);
-    if (!hadCaptureImageActions) {
-      changed = true;
-    }
-    if (repairMovedCaptureImageLinks(database) > 0) {
-      changed = true;
-    }
-    changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
-    changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'session_uuid', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'lock_scope', "TEXT NOT NULL DEFAULT 'job_write'") || changed;
-    changed = ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'") || changed;
-    changed = ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'package_codes', 'metadata_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'output_path', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'options_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'result_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'job_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'order_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'details_json', 'TEXT') || changed;
-    changed = migrateExistingIdTemplateFiles(database) || changed;
-    changed = ensureEventPackageProducts(database) || changed;
-
-    database.run(`
-      CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
-      ON image_assets(capture_session_id);
-
-      CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
-      ON image_assets(job_id, shoot_stage);
-
       CREATE INDEX IF NOT EXISTS idx_job_sessions_active
       ON job_sessions(job_id, session_status, lock_scope);
 
       CREATE INDEX IF NOT EXISTS idx_render_batch_jobs_batch
       ON render_batch_jobs(render_batch_id, sort_order);
-
-      CREATE INDEX IF NOT EXISTS idx_event_entries_job_status
-      ON event_entries(event_job_id, status, image_number);
-
-      CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
-      ON event_subject_links(event_entry_id, sort_order);
-
-      CREATE INDEX IF NOT EXISTS idx_event_subject_links_fall_subject
-      ON event_subject_links(fall_subject_id);
     `);
 
-    if (changed) {
-      fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    ensureColumn(database, 'jobs', 'retake_date', 'TEXT');
+    ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER');
+    ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER');
+    ensureColumn(database, 'job_sessions', 'session_uuid', 'TEXT');
+    ensureColumn(database, 'job_sessions', 'lock_scope', "TEXT NOT NULL DEFAULT 'job_write'");
+    ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'");
+    ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT');
+    ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT');
+    ensureColumn(database, 'package_codes', 'metadata_json', 'TEXT');
+    ensureColumn(database, 'render_batches', 'output_path', 'TEXT');
+    ensureColumn(database, 'render_batches', 'options_json', 'TEXT');
+    ensureColumn(database, 'render_batches', 'result_json', 'TEXT');
+
+    const legacyJobTablePresent = JOB_DATA_TABLES.some((tableName) => databaseHasTable(database, tableName));
+    if (legacyJobTablePresent) {
+      const authorityBackupPath = path.join(databaseFolderPath, 'ProgramData.before-job-db-authority.db');
+      if (!isNewDatabase && !fs.existsSync(authorityBackupPath)) {
+        fs.copyFileSync(prototypeDatabasePath, authorityBackupPath);
+      }
+      prepareJobDatabaseShape(database);
+      const legacyRowCount = JOB_DATA_TABLES.reduce((total, tableName) => {
+        return total + Number(rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM ${tableName};`)[0]?.count || 0);
+      }, 0);
+      if (legacyRowCount > 0) {
+        const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;');
+        for (const jobRow of jobRows) {
+          await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+        }
+      }
+      dropJobDataTables(database);
     }
+
+    migrateExistingIdTemplateFiles(database);
+    ensureEventPackageProducts(database);
+    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
   } finally {
     database.close();
   }
 }
 
 async function querySql(sql) {
-  const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const database = new SQL.Database(databaseBytes);
+  const database = await openWorkingDatabase();
 
   try {
     return rowsFromResult(database.exec(sql));
@@ -1500,16 +1412,41 @@ async function querySql(sql) {
   }
 }
 
-async function mutateSql(callback) {
+async function queryJobSql(jobIdValue, sql) {
+  const jobId = numericId(jobIdValue);
   const SQL = await getSqlModule();
-  const databaseBytes = fs.existsSync(prototypeDatabasePath) ? fs.readFileSync(prototypeDatabasePath) : null;
-  const database = databaseBytes ? new SQL.Database(databaseBytes) : new SQL.Database();
+  const programDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+  let databasePath;
+
   try {
-    callback(database);
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    const jobRows = rowsFromDatabase(programDatabase, `
+      SELECT root_path AS rootPath
+      FROM jobs
+      WHERE id = ${jobId}
+      LIMIT 1;
+    `);
+    if (!jobRows.length) {
+      throw new Error('Job not found');
+    }
+    databasePath = path.join(resolveProjectPath(jobRows[0].rootPath), 'Database', 'job.db');
+  } finally {
+    programDatabase.close();
+  }
+
+  if (!fs.existsSync(databasePath)) {
+    throw new Error(`Job database was not found at ${databasePath}`);
+  }
+
+  const database = new SQL.Database(fs.readFileSync(databasePath));
+  try {
+    return rowsFromResult(database.exec(sql));
   } finally {
     database.close();
   }
+}
+
+async function mutateSql(callback) {
+  return writeSql(callback);
 }
 
 function safeFolderName(value) {
@@ -2971,11 +2908,8 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   fs.mkdirSync(setupCroppedMedFolder, { recursive: true });
   fs.mkdirSync(setupExportsFolder, { recursive: true });
 
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId, { imageScope: 'cropped_med' });
   const setupDatabasePath = path.join(setupDatabaseFolder, 'job.db');
-  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
-    fs.copyFileSync(jobDatabasePath, setupDatabasePath);
-  }
+  await writeJobDatabaseSnapshot(jobId, { imageScope: 'cropped_med', outputPath: setupDatabasePath });
 
   const jobRoot = resolveProjectPath(job.rootPath);
   const croppedMedSource = path.join(jobRoot, 'CroppedMed');
@@ -2996,7 +2930,7 @@ async function prepareLaptopPackage(_event, jobIdValue) {
     app: 'TRECS',
     createdAt: createdAt.toISOString(),
     workstation: process.env.COMPUTERNAME || os.hostname(),
-    sourceDatabasePath: prototypeDatabasePath,
+    sourceDatabasePath: path.join(resolveProjectPath(job.rootPath), 'Database', 'job.db'),
     school: {
       name: job.clientName,
       folderName: job.trecsName,
@@ -3220,7 +3154,7 @@ function parseImageMetadata(metadataJson) {
 
 async function buildEndOfDayPreview(jobId) {
   const SQL = await getSqlModule();
-  const sourceDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+  const sourceDatabase = await openWorkingDatabase();
 
   try {
     const jobRows = rowsFromDatabase(sourceDatabase, `
@@ -3625,7 +3559,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     workstation: process.env.COMPUTERNAME || os.hostname(),
     photographerNames: preview.photographerNames || [],
     workstationNames: preview.workstationNames || [],
-    sourceDatabasePath: prototypeDatabasePath,
+    sourceDatabasePath: path.join(resolveProjectPath(preview.job.rootPath), 'Database', 'job.db'),
     job: preview.job,
     counts: adjustedCounts,
     copiedImages,
@@ -3686,13 +3620,11 @@ async function writeSql(updateDatabase) {
   let database;
 
   try {
-    const SQL = await getSqlModule();
-    const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-    database = new SQL.Database(databaseBytes);
+    database = await openWorkingDatabase();
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
     database.run('COMMIT');
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    await persistWorkingDatabase(database);
     return result;
   } catch (error) {
     try {
@@ -8820,6 +8752,7 @@ async function adminJobSummary(jobId) {
   const rows = await querySql(`
     SELECT
       j.id,
+      j.client_id AS clientId,
       j.name AS job,
       j.type,
       j.root_path AS rootPath,
@@ -9666,6 +9599,29 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
       };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  if (type === 'camera_cards') {
+    queueTrecsLogEvent('CAMERA_CARDS.CREATED', {
+      message: `Camera cards created for ${job.clientName} / ${job.job}`,
+      jobId: job.id,
+      jobName: job.job,
+      schoolId: job.clientId,
+      schoolName: job.clientName,
+      recordCount: Number(result.subjects || 0),
+      studentCount: Number(result.subjects || 0),
+      fileCount: options.cameraCardPdfOnly ? 1 : result.renderedFiles.length,
+      sourceLocation: job.rootPath,
+      destinationLocation: result.absoluteOutputPath,
+      details: {
+        batchId: result.id,
+        shootStage: stage,
+        source: options.cameraCardSource,
+        sourceValue: options.cameraCardSourceValue || options.cameraCardListName || null,
+        sortMethod: options.cameraCardSortMethod,
+        pdfOnly: options.cameraCardPdfOnly,
+        renderedFiles: result.renderedFiles
+      }
+    });
+  }
   return result;
 }
 
@@ -9775,7 +9731,6 @@ async function createClient(_event, input = {}) {
       trecsName
     };
   });
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -9904,6 +9859,23 @@ async function readPreviousTrecsAccessData(studentsDatabasePath) {
   return JSON.parse(output);
 }
 
+async function readLegacyTrecsSchools(programDataPath) {
+  await ensureAccessJobImportReader();
+  const output = await processOutput('java', [
+    '-cp',
+    [
+      'tools',
+      path.join('JARS', 'jackcess-4.0.0.jar'),
+      path.join('JARS', 'commons-lang3-3.11.jar'),
+      path.join('JARS', 'commons-logging-1.2.jar')
+    ].join(path.delimiter),
+    'AccessJobImportJson',
+    programDataPath,
+    'schools'
+  ], { cwd: bundledResourceRoot });
+  return JSON.parse(output).schools || [];
+}
+
 function oldTrecsText(row, column) {
   const value = row ? row[column] : null;
   return value === null || value === undefined ? '' : String(value).trim();
@@ -9930,6 +9902,152 @@ function oldTrecsOnlineOrderReference(notes) {
   const match = String(notes || '').match(/ONLINE ORDER\s*:?\s*(\d+)/i);
   return match ? match[1] : '';
 }
+
+async function importLegacyTrecsSchools(event, input = {}) {
+  const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+  const configuredCandidate = path.join(projectRoot, 'ProgramData.accdb');
+  const suppliedCandidate = 'T:\\2026_2027 TRECS_new\\ProgramData.accdb';
+  const defaultPath = [configuredCandidate, suppliedCandidate].find((candidate) => fs.existsSync(candidate));
+  let sourcePath = process.env.TRECS_UI_TEST === '1' && input.sourcePath
+    ? path.resolve(String(input.sourcePath))
+    : null;
+  if (!sourcePath) {
+    const selection = await dialog.showOpenDialog(ownerWindow, {
+      title: 'Import Schools from Previous TRECS ProgramData',
+      ...(defaultPath ? { defaultPath } : {}),
+      properties: ['openFile'],
+      filters: [
+        { name: 'Microsoft Access Database', extensions: ['accdb', 'mdb'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (selection.canceled || !selection.filePaths.length) {
+      return { canceled: true };
+    }
+    sourcePath = selection.filePaths[0];
+  }
+  if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    throw new Error('The selected ProgramData Access file was not found.');
+  }
+
+  const sourceRows = await readLegacyTrecsSchools(sourcePath);
+  const schools = sourceRows.map((row) => {
+    const displayName = oldTrecsText(row, 'SchoolName') || oldTrecsText(row, 'TrecsName');
+    const trecsName = oldTrecsText(row, 'TrecsName') || (displayName ? safeFolderName(displayName) : '');
+    return {
+      referenceNumber: oldTrecsText(row, 'ReferenceNumber'),
+      displayName,
+      trecsName,
+      phone: oldTrecsText(row, 'Phone'),
+      address: oldTrecsText(row, 'Address'),
+      city: oldTrecsText(row, 'City'),
+      state: oldTrecsText(row, 'State'),
+      zip: oldTrecsText(row, 'Zipcode'),
+      notes: oldTrecsText(row, 'Notes')
+    };
+  }).filter((school) => school.displayName || school.trecsName);
+
+  if (!schools.length) {
+    throw new Error('No usable records were found in the Schools table.');
+  }
+
+  if (!(process.env.TRECS_UI_TEST === '1' && input.skipConfirmation === true)) {
+    const confirmation = await dialog.showMessageBox(ownerWindow, {
+      type: 'question',
+      title: 'Import Previous TRECS Schools',
+      message: `Import ${schools.length} school${schools.length === 1 ? '' : 's'} from ${path.basename(sourcePath)}?`,
+      detail: 'Existing schools are matched by TRECS name or reference number and updated. Unmatched schools are added.',
+      buttons: ['Import Schools', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    });
+    if (confirmation.response !== 0) {
+      return { canceled: true, sourcePath, sourceRows: schools.length };
+    }
+  }
+
+  const result = await writeSql((database) => {
+    let added = 0;
+    let updated = 0;
+    let skipped = 0;
+    const updatedIds = new Set();
+    const insertStatement = database.prepare(`
+      INSERT INTO clients (
+        reference_number, display_name, trecs_name, phone,
+        address, city, state, zip, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    const updateStatement = database.prepare(`
+      UPDATE clients
+      SET reference_number = COALESCE(NULLIF(?, ''), reference_number),
+          display_name = COALESCE(NULLIF(?, ''), display_name),
+          trecs_name = COALESCE(NULLIF(?, ''), trecs_name),
+          phone = COALESCE(NULLIF(?, ''), phone),
+          address = COALESCE(NULLIF(?, ''), address),
+          city = COALESCE(NULLIF(?, ''), city),
+          state = COALESCE(NULLIF(?, ''), state),
+          zip = COALESCE(NULLIF(?, ''), zip),
+          notes = COALESCE(NULLIF(?, ''), notes)
+      WHERE id = ?;
+    `);
+
+    try {
+      schools.forEach((school) => {
+        const matches = rowsFromDatabase(database, `
+          SELECT id
+          FROM clients
+          WHERE lower(COALESCE(trecs_name, '')) = lower(${sqlLiteral(school.trecsName)})
+             OR (${sqlLiteral(school.referenceNumber)} != '' AND lower(COALESCE(reference_number, '')) = lower(${sqlLiteral(school.referenceNumber)}))
+          ORDER BY CASE WHEN lower(COALESCE(trecs_name, '')) = lower(${sqlLiteral(school.trecsName)}) THEN 0 ELSE 1 END, id
+          LIMIT 1;
+        `);
+        const values = [
+          school.referenceNumber,
+          school.displayName,
+          school.trecsName,
+          school.phone,
+          school.address,
+          school.city,
+          school.state,
+          school.zip,
+          school.notes
+        ];
+        if (matches.length) {
+          const clientId = Number(matches[0].id);
+          updateStatement.run([...values, clientId]);
+          if (!updatedIds.has(clientId)) {
+            updatedIds.add(clientId);
+            updated += 1;
+          } else {
+            skipped += 1;
+          }
+        } else {
+          insertStatement.run(values);
+          added += 1;
+        }
+      });
+    } finally {
+      insertStatement.free();
+      updateStatement.free();
+    }
+
+    database.run(`
+      INSERT INTO migration_sources (source_type, source_path, imported_at, metadata_json)
+      VALUES ('old_program_schools', ?, CURRENT_TIMESTAMP, ?)
+      ON CONFLICT(source_type, source_path) DO UPDATE SET
+        imported_at = CURRENT_TIMESTAMP,
+        metadata_json = excluded.metadata_json;
+    `, [sourcePath, JSON.stringify({ table: 'Schools', sourceRows: schools.length, added, updated, skipped })]);
+
+    return { added, updated, skipped, total: schools.length };
+  });
+
+  return { canceled: false, sourcePath, ...result };
+}
+
+ipcMain.handle('clients:import-legacy-schools', importLegacyTrecsSchools);
 
 function isImportableImage(filePath) {
   return ['.jpg', '.jpeg', '.png'].includes(path.extname(filePath).toLowerCase());
@@ -10360,6 +10478,39 @@ function upsertImportedRowsById(database, tableName, rows) {
   }
 }
 
+function nextDatabaseId(database, tableName) {
+  const rows = rowsFromDatabase(database, `SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ${tableName};`);
+  return Number(rows[0]?.id || 1);
+}
+
+function mergeImportedSubjectCodeRows(database, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const statement = database.prepare(`
+    INSERT OR IGNORE INTO subject_codes (
+      subject_id,
+      code_type,
+      code,
+      created_at
+    )
+    VALUES (?, ?, ?, ?);
+  `);
+  try {
+    rows.forEach((row) => {
+      statement.run([
+        row.subject_id,
+        row.code_type,
+        row.code,
+        row.created_at || null
+      ]);
+    });
+  } finally {
+    statement.free();
+  }
+}
+
 function mergeImportedImageVersionRows(database, rows) {
   if (!rows.length) {
     return;
@@ -10520,13 +10671,11 @@ function clearImportedJobRows(database, jobIdValue) {
     );
     DELETE FROM event_entries WHERE event_job_id = ${jobId};
     DELETE FROM job_links WHERE source_job_id = ${jobId} OR target_job_id = ${jobId};
-    DELETE FROM sync_record_mappings WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
-    DELETE FROM sync_conflicts WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
-    DELETE FROM sync_packages WHERE job_id = ${jobId};
-    DELETE FROM render_tasks WHERE render_batch_id IN (SELECT id FROM render_batches WHERE job_id = ${jobId});
     DELETE FROM render_batches WHERE job_id = ${jobId};
-    DELETE FROM exports WHERE job_id = ${jobId};
     DELETE FROM admin_item_batches WHERE job_id = ${jobId};
+    DELETE FROM end_of_day_imports WHERE job_id = ${jobId};
+    DELETE FROM job_milestones WHERE job_id = ${jobId};
+    DELETE FROM capture_image_actions WHERE job_id = ${jobId};
     DELETE FROM envelope_scans WHERE job_id = ${jobId};
     DELETE FROM image_import_events WHERE job_id = ${jobId};
     DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE job_id = ${jobId});
@@ -10540,11 +10689,10 @@ function clearImportedJobRows(database, jobIdValue) {
     DELETE FROM capture_sessions WHERE job_id = ${jobId};
     DELETE FROM subject_group_members WHERE group_id IN (SELECT id FROM subject_groups WHERE job_id = ${jobId});
     DELETE FROM subject_groups WHERE job_id = ${jobId};
+    DELETE FROM staff_assignments WHERE job_id = ${jobId};
+    DELETE FROM duplicate_record_reviews WHERE job_id = ${jobId};
+    DELETE FROM composite_grade_titles WHERE job_id = ${jobId};
     DELETE FROM subject_codes WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId});
-    DELETE FROM subject_field_values
-    WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId})
-       OR field_definition_id IN (SELECT id FROM job_field_definitions WHERE job_id = ${jobId});
-    DELETE FROM job_field_definitions WHERE job_id = ${jobId};
     DELETE FROM subjects WHERE job_id = ${jobId};
     DELETE FROM jobs WHERE id = ${jobId};
   `);
@@ -10739,10 +10887,21 @@ async function approveEndOfDayPackage(_event, input = {}) {
         throw new Error('The matching job is not loaded on this computer');
       }
 
+      const previousImports = rowsFromDatabase(database, `
+        SELECT id
+        FROM end_of_day_imports
+        WHERE job_id = ${jobId}
+          AND package_folder = ${sqlLiteral(packageFolder)}
+        LIMIT 1;
+      `);
+      if (previousImports.length) {
+        throw new Error('This End of Day package has already been loaded for this job');
+      }
+
       ensureJobFolders(jobRows[0].rootPath);
       const imageCopyResult = copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, jobRows[0].rootPath);
-      const imageRows = imageCopyResult.rows;
-      const imageVersionRows = packageTables.image_versions.map((row) => {
+      const copiedImageRows = imageCopyResult.rows;
+      const copiedImageVersionRows = packageTables.image_versions.map((row) => {
         const importedPath = imageCopyResult.importedPathByImageId.get(Number(row.image_asset_id));
         return importedPath && row.version_type === 'original'
           ? { ...row, path: importedPath }
@@ -10750,21 +10909,66 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
       const copiedFiles = imageCopyResult.copied;
 
+      const subjectIdMap = new Map();
+      let nextSubjectId = nextDatabaseId(database, 'subjects');
+      newSubjectIds.forEach((sourceSubjectId) => {
+        subjectIdMap.set(Number(sourceSubjectId), nextSubjectId);
+        nextSubjectId += 1;
+      });
+
+      const referencedCaptureSessionIds = new Set(copiedImageRows
+        .map((row) => Number(row.capture_session_id))
+        .filter(Boolean));
+      const captureSessionIdMap = new Map();
+      let nextCaptureSessionId = nextDatabaseId(database, 'capture_sessions');
+      packageTables.capture_sessions
+        .filter((row) => referencedCaptureSessionIds.has(Number(row.id)))
+        .forEach((row) => {
+          captureSessionIdMap.set(Number(row.id), nextCaptureSessionId);
+          nextCaptureSessionId += 1;
+        });
+
+      const imageIdMap = new Map();
+      let nextImageId = nextDatabaseId(database, 'image_assets');
+      copiedImageRows.forEach((row) => {
+        imageIdMap.set(Number(row.id), nextImageId);
+        nextImageId += 1;
+      });
+
       const newSubjectRows = subjectRowsToImport
         .filter((row) => newSubjectIds.has(Number(row.id)))
         .map((row) => {
-      const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
+          const sourceSubjectId = Number(row.id);
+          const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
             .find((subject) => Number(subject.id) === Number(row.id));
           return {
             ...row,
+            id: subjectIdMap.get(sourceSubjectId),
+            job_id: jobId,
+            primary_image_asset_id: imageIdMap.get(Number(row.primary_image_asset_id)) || null,
             display_name: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'name') ? manifestSubject.name : row.display_name,
             grade: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'grade') ? manifestSubject.grade : row.grade,
             homeroom: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'homeroom') ? manifestSubject.homeroom : row.homeroom
           };
         });
       upsertImportedRowsById(database, 'subjects', newSubjectRows);
-      upsertImportedRowsById(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
-      upsertImportedRowsById(database, 'capture_sessions', packageTables.capture_sessions);
+      mergeImportedSubjectCodeRows(database, packageTables.subject_codes
+        .filter((row) => newSubjectIds.has(Number(row.subject_id)))
+        .map((row) => ({
+          ...row,
+          subject_id: subjectIdMap.get(Number(row.subject_id))
+        })));
+
+      const captureSessionRows = packageTables.capture_sessions
+        .filter((row) => captureSessionIdMap.has(Number(row.id)))
+        .map((row) => ({
+          ...row,
+          id: captureSessionIdMap.get(Number(row.id)),
+          job_id: jobId,
+          active_subject_id: subjectIdMap.get(Number(row.active_subject_id)) || row.active_subject_id || null,
+          latest_image_asset_id: imageIdMap.get(Number(row.latest_image_asset_id)) || null
+        }));
+      upsertImportedRowsById(database, 'capture_sessions', captureSessionRows);
 
       editedSubjects.forEach((subject) => {
         const updates = [];
@@ -10780,17 +10984,35 @@ async function approveEndOfDayPackage(_event, input = {}) {
         if (!updates.length) {
           return;
         }
-        values.push(Number(subject.id));
+        values.push(Number(subject.id), jobId);
         database.run(`
           UPDATE subjects
           SET ${updates.join(', ')}
-          WHERE id = ?;
+          WHERE id = ?
+            AND job_id = ?;
         `, values);
       });
 
+      const imageRows = copiedImageRows.map((row) => ({
+        ...row,
+        id: imageIdMap.get(Number(row.id)),
+        job_id: jobId,
+        capture_session_id: captureSessionIdMap.get(Number(row.capture_session_id)) || null
+      }));
+      const imageVersionRows = copiedImageVersionRows.map((row) => ({
+        ...row,
+        id: undefined,
+        image_asset_id: imageIdMap.get(Number(row.image_asset_id))
+      }));
+      const subjectImageRows = packageTables.subject_images.map((row) => ({
+        ...row,
+        id: undefined,
+        subject_id: subjectIdMap.get(Number(row.subject_id)) || Number(row.subject_id),
+        image_asset_id: imageIdMap.get(Number(row.image_asset_id))
+      }));
       upsertImportedRowsById(database, 'image_assets', imageRows);
       mergeImportedImageVersionRows(database, imageVersionRows);
-      mergeImportedSubjectImageRows(database, packageTables.subject_images);
+      mergeImportedSubjectImageRows(database, subjectImageRows);
       const manifestCounts = approvedManifest.counts || {};
       const photographerName = (approvedManifest.photographerNames || []).join(', ')
         || approvedManifest.photographerName
@@ -10805,15 +11027,18 @@ async function approveEndOfDayPackage(_event, input = {}) {
       subjectRowsToImport
         .filter((row) => !newSubjectIds.has(Number(row.id)))
         .forEach((row) => {
+          const mappedPrimaryImageId = imageIdMap.get(Number(row.primary_image_asset_id));
           database.run(`
             UPDATE subjects
             SET primary_image_asset_id = ?,
                 photographed_status = ?
-            WHERE id = ?;
+            WHERE id = ?
+              AND job_id = ?;
           `, [
-            row.primary_image_asset_id || null,
+            mappedPrimaryImageId || null,
             row.photographed_status || null,
-            row.id
+            row.id,
+            jobId
           ]);
         });
 
@@ -10864,7 +11089,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
           images: imageRows.length,
           newSubjects: newSubjectRows.length,
           editedSubjects: editedSubjects.length,
-          subjectImageLinks: packageTables.subject_images.length
+          subjectImageLinks: subjectImageRows.length
         }
       };
     });
@@ -10873,7 +11098,6 @@ async function approveEndOfDayPackage(_event, input = {}) {
   }
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   queueTrecsLogEvent('END_OF_DAY.SERVER_LOADED', {
     message: `End of Day loaded to server for ${(approvedManifest.job && approvedManifest.job.clientName) || 'school'} / ${(approvedManifest.job && approvedManifest.job.name) || jobId}`,
     photographerName: (approvedManifest.photographerNames || []).join(', ') || approvedManifest.photographerName || null,
@@ -10935,11 +11159,16 @@ async function loadOnsiteSetup(_event, input = {}) {
     const importedTables = {
       subjects: rowsFromOptionalTable(setupDatabase, 'subjects'),
       subject_codes: rowsFromOptionalTable(setupDatabase, 'subject_codes'),
+      staff_assignments: rowsFromOptionalTable(setupDatabase, 'staff_assignments'),
+      composite_grade_titles: rowsFromOptionalTable(setupDatabase, 'composite_grade_titles'),
+      duplicate_record_reviews: rowsFromOptionalTable(setupDatabase, 'duplicate_record_reviews'),
       subject_groups: rowsFromOptionalTable(setupDatabase, 'subject_groups'),
       subject_group_members: rowsFromOptionalTable(setupDatabase, 'subject_group_members'),
       image_assets: rowsFromOptionalTable(setupDatabase, 'image_assets'),
       capture_sessions: rowsFromOptionalTable(setupDatabase, 'capture_sessions'),
+      capture_image_actions: rowsFromOptionalTable(setupDatabase, 'capture_image_actions'),
       image_versions: rowsFromOptionalTable(setupDatabase, 'image_versions'),
+      image_import_events: rowsFromOptionalTable(setupDatabase, 'image_import_events'),
       subject_images: rowsFromOptionalTable(setupDatabase, 'subject_images'),
       orders: rowsFromOptionalTable(setupDatabase, 'orders'),
       order_items: rowsFromOptionalTable(setupDatabase, 'order_items').map((row) => ({
@@ -10953,7 +11182,11 @@ async function loadOnsiteSetup(_event, input = {}) {
         capture_session_id: null,
         image_import_event_id: null
       })),
-      admin_item_batches: rowsFromOptionalTable(setupDatabase, 'admin_item_batches')
+      event_entries: rowsFromOptionalTable(setupDatabase, 'event_entries'),
+      event_subject_links: rowsFromOptionalTable(setupDatabase, 'event_subject_links'),
+      admin_item_batches: rowsFromOptionalTable(setupDatabase, 'admin_item_batches'),
+      end_of_day_imports: rowsFromOptionalTable(setupDatabase, 'end_of_day_imports'),
+      job_milestones: rowsFromOptionalTable(setupDatabase, 'job_milestones')
     };
 
     result = await writeSql((database) => {
@@ -11031,17 +11264,26 @@ async function loadOnsiteSetup(_event, input = {}) {
       [
         'subjects',
         'subject_codes',
+        'staff_assignments',
+        'composite_grade_titles',
+        'duplicate_record_reviews',
         'subject_groups',
         'subject_group_members',
         'image_assets',
         'capture_sessions',
+        'capture_image_actions',
         'image_versions',
+        'image_import_events',
         'subject_images',
         'orders',
         'order_items',
         'payments',
         'envelope_scans',
-        'admin_item_batches'
+        'event_entries',
+        'event_subject_links',
+        'admin_item_batches',
+        'end_of_day_imports',
+        'job_milestones'
       ].forEach((tableName) => {
         insertImportedRows(database, tableName, importedTables[tableName]);
       });
@@ -11069,7 +11311,6 @@ async function loadOnsiteSetup(_event, input = {}) {
   // when the old main job was deleted before reloading the setup.
   clearLocalCaptureDatabase(result.id);
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   queueTrecsLogEvent('ONSITE_SETUP.LOADED', {
     message: `Onsite setup loaded for ${(manifest.school && manifest.school.name) || 'school'} / ${(manifest.job && manifest.job.name) || result.id}`,
     jobId: result.id,
@@ -11164,7 +11405,6 @@ async function createJob(_event, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   queueTrecsLogEvent('JOB.CREATED', {
     message: `Job created: ${result.clientName} / ${result.name}`,
     jobId: result.id,
@@ -11245,7 +11485,6 @@ async function updateJob(_event, jobIdValue, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -11531,6 +11770,11 @@ async function importPreviousTrecsJob(_event, input = {}) {
 
     return {
       id: jobId,
+      name,
+      type,
+      clientId,
+      clientName: clientRows[0].displayName,
+      schoolName: clientRows[0].trecsName || clientRows[0].displayName,
       rootPath,
       sourceFolder,
       counts: {
@@ -11543,7 +11787,25 @@ async function importPreviousTrecsJob(_event, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('JOB.PREVIOUS_TRECS_IMPORTED', {
+    message: `Previous TRECS job imported: ${result.clientName} / ${result.name}`,
+    jobId: result.id,
+    jobName: result.name,
+    schoolId: result.clientId,
+    schoolName: result.clientName,
+    recordCount: Number(result.counts.students || 0),
+    studentCount: Number(result.counts.students || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.copiedImages || 0),
+    sourceLocation: result.sourceFolder,
+    destinationLocation: result.rootPath,
+    details: {
+      jobType: result.type,
+      trecsSchoolName: result.schoolName,
+      lists: Number(result.counts.lists || 0),
+      sourceDatabase: studentsDatabasePath
+    }
+  });
   return result;
 }
 
@@ -12044,7 +12306,6 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   queueTrecsLogEvent('DATA.LOADED', {
     message: `School data loaded for ${result.schoolName} / ${result.jobName}`,
     jobId,
@@ -12293,7 +12554,6 @@ async function markDuplicateRecordReviewed(_event, jobIdValue, input = {}) {
     return { jobId, reviewed };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -12513,7 +12773,6 @@ async function applyRosterVerification(_event, jobIdValue, input = {}) {
     return { jobId, created, updated, removed, unenrolled, sourceFilePath: copiedSourcePath };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -12644,7 +12903,6 @@ async function saveStaffVerification(_event, jobIdValue, input = []) {
     return { jobId, saved };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -13200,6 +13458,7 @@ async function createSubject(_event, jobIdValue, input = {}) {
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     return { id: idRows[0].id };
   });
+  return result;
 }
 
 function normalizeRecordCount(value) {
@@ -15108,7 +15367,32 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       WHERE id = ?;
     `, [subjectId, imageId, captureSessionId]);
 
+    const captureCounts = rowsFromDatabase(database, `
+      SELECT
+        (SELECT COUNT(*) FROM image_assets WHERE job_id = ${jobId}) AS images,
+        (SELECT COUNT(*) FROM subject_images si JOIN subjects s ON s.id = si.subject_id WHERE s.job_id = ${jobId}) AS subjectImages,
+        (SELECT COUNT(*) FROM subjects WHERE job_id = ${jobId} AND primary_image_asset_id IS NOT NULL) AS subjectsWithPrimaryImage,
+        (
+          SELECT COUNT(DISTINCT si.subject_id)
+          FROM subject_images si
+          JOIN subjects s ON s.id = si.subject_id
+          JOIN image_assets ia ON ia.id = si.image_asset_id
+          WHERE s.job_id = ${jobId}
+            AND ia.job_id = ${jobId}
+            AND ia.source = 'capture_hot_folder'
+            AND ia.status NOT IN ('packaged', 'rejected')
+        ) AS activeCaptureSubjects,
+        (
+          SELECT COUNT(DISTINCT ia.id)
+          FROM image_assets ia
+          WHERE ia.job_id = ${jobId}
+            AND ia.source = 'capture_hot_folder'
+            AND ia.status NOT IN ('packaged', 'rejected')
+        ) AS activeCaptureImages
+    `)[0] || {};
+
     return {
+      counts: captureCounts,
       image: {
         id: imageId,
         captureSessionId,
@@ -15139,7 +15423,6 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     cr3Path: result.image.rawPath,
     filename: result.image.filename
   });
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   return result;
 }
 
@@ -15151,6 +15434,33 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   const hotFolder = captureHotFolder;
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
+  }
+
+  const webContentsId = event.sender.id;
+  const existingState = captureWatchers.get(webContentsId);
+  if (existingState
+    && existingState.jobId === jobId
+    && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
+    // Capture anything already written under the previous student before the UI
+    // changes the active subject. Each queued image keeps this subject snapshot.
+    existingState.queueAvailableFiles();
+    existingState.subjectId = subjectId;
+    existingState.fileMode = fileMode;
+    existingState.shootStage = shootStage;
+    existingState.photographerName = optionalText(options.photographerName, 255);
+    existingState.workstationName = optionalText(options.workstationName, 255);
+    existingState.queueAvailableFiles();
+    existingState.scheduleProcessing(0);
+    return {
+      jobId,
+      subjectId,
+      hotFolder,
+      fileMode,
+      shootStage,
+      shootStageLabel: shootStageLabel(shootStage),
+      captureSessionId: existingState.captureSessionId,
+      queuedCaptures: existingState.pendingCaptures.length
+    };
   }
 
   let captureSessionId = null;
@@ -15166,34 +15476,6 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     });
     return { captureSessionId };
   });
-
-  const webContentsId = event.sender.id;
-  const existingState = captureWatchers.get(webContentsId);
-  if (existingState
-    && existingState.jobId === jobId
-    && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
-    // Capture anything already written under the previous student before the UI
-    // changes the active subject. Each queued image keeps this subject snapshot.
-    existingState.queueAvailableFiles();
-    existingState.subjectId = subjectId;
-    existingState.fileMode = fileMode;
-    existingState.shootStage = shootStage;
-    existingState.photographerName = optionalText(options.photographerName, 255);
-    existingState.workstationName = optionalText(options.workstationName, 255);
-    existingState.captureSessionId = captureSessionId;
-    existingState.queueAvailableFiles();
-    existingState.scheduleProcessing(0);
-    return {
-      jobId,
-      subjectId,
-      hotFolder,
-      fileMode,
-      shootStage,
-      shootStageLabel: shootStageLabel(shootStage),
-      captureSessionId,
-      queuedCaptures: existingState.pendingCaptures.length
-    };
-  }
 
   closeCaptureWatcher(webContentsId);
 
@@ -15342,6 +15624,10 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
         }
       });
     } catch (error) {
+      logStartup(
+        `capture import failed jobId=${pending.jobId} subjectId=${pending.subjectId} source=${pending.sourcePath}`,
+        error
+      );
       sendCaptureStatus({ error: error.message || 'Image capture import failed' });
       if (!fs.existsSync(pending.sourcePath)) {
         watcherState.pendingCaptures.shift();
@@ -15397,35 +15683,44 @@ async function stopCaptureWatcher(event) {
   return { stopped: true };
 }
 
-async function getCaptureSubjectImages(_event, subjectIdValue) {
+async function getCaptureSubjectImages(_event, jobIdValue, subjectIdValue) {
+  const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
-  const rows = await querySql(`
-    SELECT
-      ia.id,
-      ia.filename,
-      ia.current_path AS currentPath,
-      ia.source,
-      ia.status,
-      ia.captured_at AS capturedAt,
-      ia.metadata_json AS metadataJson,
-      MAX(si.selected) AS selected,
-      MIN(si.sort_order) AS sortOrder,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
-        ia.current_path
-      ) AS versionPath
-    FROM subject_images si
-    JOIN image_assets ia ON ia.id = si.image_asset_id
-    LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
-    WHERE si.subject_id = ${subjectId}
-      AND ia.status != 'rejected'
-      AND ia.status != 'packaged'
-    GROUP BY ia.id
-    ORDER BY ia.id DESC;
-  `);
+  let rows;
+  try {
+    rows = await queryJobSql(jobId, `
+      SELECT
+        ia.id,
+        ia.filename,
+        ia.current_path AS currentPath,
+        ia.source,
+        ia.status,
+        ia.captured_at AS capturedAt,
+        ia.metadata_json AS metadataJson,
+        MAX(si.selected) AS selected,
+        MIN(si.sort_order) AS sortOrder,
+        COALESCE(
+          MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
+          ia.current_path
+        ) AS versionPath
+      FROM subject_images si
+      JOIN subjects s ON s.id = si.subject_id
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
+      WHERE s.job_id = ${jobId}
+        AND si.subject_id = ${subjectId}
+        AND ia.status != 'rejected'
+        AND ia.status != 'packaged'
+      GROUP BY ia.id
+      ORDER BY ia.id DESC;
+    `);
+  } catch (error) {
+    logStartup(`capture:subject-images failed jobId=${jobId} subjectId=${subjectId}`, error);
+    throw error;
+  }
 
   return rows.map((row) => {
     const fullPath = resolveProjectPath(row.versionPath || row.currentPath);
@@ -16241,6 +16536,7 @@ function menuActionMap(window) {
   return {
     newSchool: menuAction(window, 'New School', 'new-school'),
     newJob: menuAction(window, 'New Job', 'new-job'),
+    importLegacySchools: menuAction(window, 'Import Schools from Previous TRECS', 'import-legacy-schools'),
     importPreviousJob: menuAction(window, 'Import Previous TRECS Job', 'import-previous-job'),
     loadOnsiteSetup: menuAction(window, 'Load Onsite Setup', 'load-onsite-setup'),
     loadEndOfDay: menuAction(window, 'Load End of Day', 'load-end-of-day'),
@@ -16296,6 +16592,8 @@ function createContextMenus(window, context) {
         label: 'Job',
         submenu: [
           actions.newSchool,
+          actions.importLegacySchools,
+          { type: 'separator' },
           actions.newJob,
           actions.importPreviousJob,
           actions.loadEndOfDay
@@ -16468,6 +16766,9 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     logStartup(`did-fail-load ${errorCode} ${errorDescription}`);
   });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logStartup(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+  });
   createApplicationMenu(mainWindow);
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
@@ -16490,6 +16791,7 @@ app.whenReady().then(async () => {
   });
 }).catch((error) => {
   logStartup('whenReady failed', error);
+  console.error(error);
   app.quit();
 });
 

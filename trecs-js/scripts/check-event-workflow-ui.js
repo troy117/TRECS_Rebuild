@@ -17,7 +17,6 @@ function dataRootFromPathFile() {
 }
 const dataRoot = dataRootFromPathFile();
 const databasePath = path.join(dataRoot, 'database', 'ProgramData.db');
-const programDatabasePath = path.join(dataRoot, 'database', 'program.db');
 const outputFolder = path.join(workspaceRoot, 'exports', 'ui-tests');
 const temporaryRoot = path.join(workspaceRoot, 'exports', '_event-workflow-smoke-temp');
 
@@ -104,7 +103,6 @@ async function run() {
   window.setSize(1680, 1020);
   const fixture = await findPhotographedFallStudent(window);
   const databaseBackup = fs.readFileSync(databasePath);
-  const programDatabaseBackup = fs.existsSync(programDatabasePath) ? fs.readFileSync(programDatabasePath) : null;
   let eventJobId = null;
   let report;
 
@@ -219,7 +217,6 @@ async function run() {
       try { await window.webContents.executeJavaScript(`window.trecs.releaseJobSession([${eventJobId}])`); } catch (_error) { /* Cleanup continues. */ }
     }
     restoreFile(databasePath, databaseBackup);
-    restoreFile(programDatabasePath, programDatabaseBackup);
     removeTemporaryRoot();
   }
 

@@ -4334,7 +4334,10 @@ async function loadCaptureImages(options = {}) {
   }
 
   try {
-    jobsState.captureImages = await trecsApi('getCaptureSubjectImages').getCaptureSubjectImages(jobsState.captureSubject.id);
+    jobsState.captureImages = await trecsApi('getCaptureSubjectImages').getCaptureSubjectImages(
+      jobsState.selectedJobId,
+      jobsState.captureSubject.id
+    );
     if (!options.preserveSlots) {
       jobsState.captureCompareSlotIds = null;
     }
@@ -4501,7 +4504,43 @@ async function handleCaptureImageImported(payload) {
 
   captureEntryStatus.textContent = `Captured ${payload.image.filename}`;
   await loadCaptureImages();
-  await reloadCurrentJobDetail();
+  const detail = jobsState.detail || {};
+  const detailSubject = findById(detail.subjects || [], payload.image.subjectId);
+  if (detailSubject) {
+    detailSubject.photographedStatus = 'photographed';
+    if (payload.image.selected) {
+      detailSubject.imageAssetId = payload.image.id;
+    }
+  }
+  jobsState.captureSubject = {
+    ...jobsState.captureSubject,
+    photographedStatus: 'photographed',
+    ...(payload.image.selected ? { imageAssetId: payload.image.id } : {})
+  };
+
+  const counts = payload.counts || {};
+  if (detail.summary) {
+    ['images', 'subjectImages', 'subjectsWithPrimaryImage', 'activeCaptureSubjects', 'activeCaptureImages']
+      .forEach((key) => {
+        if (counts[key] !== undefined) detail.summary[key] = Number(counts[key] || 0);
+      });
+  }
+  if (detail.capture && detail.capture.summary) {
+    if (counts.images !== undefined) detail.capture.summary.images = Number(counts.images || 0);
+    if (counts.subjectsWithPrimaryImage !== undefined) {
+      const photographed = Number(counts.subjectsWithPrimaryImage || 0);
+      detail.capture.summary.linkedSubjects = photographed;
+      detail.capture.summary.noPhotoSubjects = Math.max(0, Number(detail.capture.summary.subjects || 0) - photographed);
+      detail.capture.noPhotoSubjects = (detail.capture.noPhotoSubjects || [])
+        .filter((subject) => Number(subject.id) !== Number(payload.image.subjectId));
+    }
+  }
+
+  renderCaptureSubject();
+  renderCapturePhotoCount();
+  if (jobsState.captureRosterOpen) {
+    renderCaptureRoster();
+  }
 }
 
 async function selectCaptureImage(imageId, control) {
@@ -7793,6 +7832,25 @@ async function handleTrecsMenuAction(action) {
   if (action === 'new-school') {
     showJobsForAction();
     setNewSchoolFormVisible(!jobsState.showNewSchoolForm);
+    return;
+  }
+
+  if (action === 'import-legacy-schools') {
+    const result = await trecsApi('importLegacySchools').importLegacySchools();
+    if (!result || result.canceled) {
+      return;
+    }
+    showJobsForAction();
+    await loadJobs();
+    await showMessage('Previous TRECS schools imported successfully.', {
+      title: 'School Import Complete',
+      detail: [
+        `${formatNumber(result.added)} added`,
+        `${formatNumber(result.updated)} updated`,
+        result.skipped ? `${formatNumber(result.skipped)} duplicate source row${Number(result.skipped) === 1 ? '' : 's'} skipped` : '',
+        result.sourcePath ? `Source: ${result.sourcePath}` : ''
+      ].filter(Boolean).join('\n')
+    });
     return;
   }
 

@@ -844,3 +844,6 @@ Notes:
 - League sample databases when available.
 - Exact render output file naming conventions.
 - Online order import files and formats.
+# Historical design note
+
+This document contains proposed tables that were not all implemented. See [PROGRAM_DATABASE_TABLE_AUDIT.md](./PROGRAM_DATABASE_TABLE_AUDIT.md) for the audited current schema and the tables removed on 2026-08-14.
