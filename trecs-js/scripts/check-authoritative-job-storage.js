@@ -217,6 +217,24 @@ async function run() {
       throw new Error(JSON.stringify({ firstJobImageCountAfterCollision, importedCollisionImage, collisionImport }));
     }
 
+    const firstJobBytesBeforeDetail = fs.readFileSync(jobPath);
+    const secondJobBytesBeforeDetail = fs.readFileSync(secondJobPath);
+    const jobDetailReadStartedAt = Date.now();
+    const readOnlyJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`);
+    const jobDetailReadMs = Date.now() - jobDetailReadStartedAt;
+    const detailChangedFirstJob = !firstJobBytesBeforeDetail.equals(fs.readFileSync(jobPath));
+    const detailChangedSecondJob = !secondJobBytesBeforeDetail.equals(fs.readFileSync(secondJobPath));
+    if (!readOnlyJobDetail?.summary
+      || Number(readOnlyJobDetail.summary.id) !== Number(job.id)
+      || detailChangedFirstJob
+      || detailChangedSecondJob) {
+      throw new Error(JSON.stringify({
+        detailJobId: readOnlyJobDetail?.summary?.id,
+        detailChangedFirstJob,
+        detailChangedSecondJob
+      }));
+    }
+
     fs.rmSync(jobPath, { force: true });
     const wipedJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`);
     const untouchedJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(secondJob.id)})`);
@@ -239,6 +257,8 @@ async function run() {
       captureStressImages,
       captureReadIterations,
       collisionImageRemappedTo: Number(importedCollisionImage[0]),
+      jobDetailReadMs,
+      jobDetailDatabaseWrites: 0,
       wipedJobSubjects: wipedJobDetail.subjects.length,
       untouchedJobSubjects: untouchedJobDetail.subjects.length,
       jobDatabases: [jobPath, secondJobPath]

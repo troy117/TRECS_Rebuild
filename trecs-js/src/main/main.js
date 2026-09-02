@@ -1206,18 +1206,27 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
   }
 }
 
-async function openWorkingDatabase() {
+async function openWorkingDatabase(options = {}) {
   const SQL = await getSqlModule();
   const database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
   prepareJobDatabaseShape(database);
   database.run('PRAGMA foreign_keys = OFF;');
 
   try {
-    const jobRows = rowsFromDatabase(database, 'SELECT id, root_path FROM jobs ORDER BY id;');
+    const requestedJobIds = Array.isArray(options.jobIds)
+      ? new Set(options.jobIds.map((id) => numericId(id)))
+      : null;
+    const jobRows = rowsFromDatabase(database, 'SELECT id, root_path FROM jobs ORDER BY id;')
+      .filter((jobRow) => !requestedJobIds || requestedJobIds.has(Number(jobRow.id)));
     for (const jobRow of jobRows) {
-      ensureJobFolders(jobRow.root_path);
+      if (!options.readOnly) {
+        ensureJobFolders(jobRow.root_path);
+      }
       const databasePath = jobDatabasePathForRow(jobRow);
       if (!fs.existsSync(databasePath)) {
+        if (options.readOnly) {
+          throw new Error(`Job database was not found at ${databasePath}`);
+        }
         await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
       }
 
@@ -1404,6 +1413,17 @@ async function ensurePrototypeDatabaseShape() {
 
 async function querySql(sql) {
   const database = await openWorkingDatabase();
+
+  try {
+    return rowsFromResult(database.exec(sql));
+  } finally {
+    database.close();
+  }
+}
+
+async function queryProgramSql(sql) {
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
 
   try {
     return rowsFromResult(database.exec(sql));
@@ -3639,6 +3659,31 @@ async function writeSql(updateDatabase) {
   }
 }
 
+async function writeProgramSql(updateDatabase) {
+  acquireDatabaseWriteLock();
+  let database;
+
+  try {
+    const SQL = await getSqlModule();
+    database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+    database.run('BEGIN TRANSACTION');
+    const result = updateDatabase(database);
+    database.run('COMMIT');
+    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    return result;
+  } catch (error) {
+    try {
+      if (database) database.run('ROLLBACK');
+    } catch (_rollbackError) {
+      // The original database error is more useful than a rollback failure.
+    }
+    throw error;
+  } finally {
+    if (database) database.close();
+    releaseDatabaseWriteLock();
+  }
+}
+
 function jobLockExpirySql() {
   return `datetime('now', '+${JOB_LOCK_TTL_SECONDS} seconds')`;
 }
@@ -3703,7 +3748,7 @@ function expireAbandonedLocalJobSessions(database, jobId) {
 async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
   const jobId = numericId(jobIdValue);
   const scope = ['job_write', 'batch_render'].includes(String(scopeValue)) ? String(scopeValue) : 'job_write';
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP
       WHERE session_status = 'open' AND (expires_at IS NULL OR expires_at <= CURRENT_TIMESTAMP);`);
     expireAbandonedLocalJobSessions(database, jobId);
@@ -3731,7 +3776,7 @@ async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
 async function heartbeatJobSessions(_event, jobIdsValue = []) {
   const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   if (!jobIds.length) return { refreshed: 0 };
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET last_seen_at = CURRENT_TIMESTAMP, expires_at = ${jobLockExpirySql()}
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
     return { refreshed: database.getRowsModified() };
@@ -3741,7 +3786,7 @@ async function heartbeatJobSessions(_event, jobIdsValue = []) {
 async function releaseJobSession(_event, jobIdsValue = []) {
   const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   if (!jobIds.length) return { released: 0 };
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
     return { released: database.getRowsModified() };
@@ -3749,7 +3794,7 @@ async function releaseJobSession(_event, jobIdsValue = []) {
 }
 
 async function releaseAllOwnedJobSessions() {
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open';`);
     return { released: database.getRowsModified() };
@@ -3757,7 +3802,7 @@ async function releaseAllOwnedJobSessions() {
 }
 
 async function getJobSessions() {
-  return querySql(`SELECT js.id, js.job_id AS jobId, j.name AS jobName, c.display_name AS clientName,
+  return queryProgramSql(`SELECT js.id, js.job_id AS jobId, j.name AS jobName, c.display_name AS clientName,
     js.workstation_name AS workstationName, js.user_name AS userName, js.lock_scope AS scope,
     js.opened_at AS openedAt, js.last_seen_at AS lastSeenAt, js.expires_at AS expiresAt
     FROM job_sessions js JOIN jobs j ON j.id = js.job_id JOIN clients c ON c.id = j.client_id
@@ -12916,8 +12961,11 @@ ipcMain.handle('staff-verification:save', saveStaffVerification);
 async function getJobDetail(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
+  const database = await openWorkingDatabase({ jobIds: [jobId] });
+  const query = (sql) => rowsFromResult(database.exec(sql));
 
-  const summary = await querySql(`
+  try {
+  const summary = query(`
     WITH
       subject_counts AS (
         SELECT
@@ -12997,7 +13045,7 @@ async function getJobDetail(_event, jobIdValue) {
     WHERE j.id = ${jobId}
   `);
 
-  const subjects = await querySql(`
+  const subjects = query(`
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -13036,7 +13084,7 @@ async function getJobDetail(_event, jobIdValue) {
       s.id;
   `);
 
-  const orders = await querySql(`
+  const orders = query(`
     SELECT
       o.id,
       o.source,
@@ -13077,7 +13125,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const subjectCodes = await querySql(`
+  const subjectCodes = query(`
     SELECT
       sc.subject_id AS subjectId,
       sc.code_type AS codeType,
@@ -13088,7 +13136,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY sc.code_type, sc.code;
   `);
 
-  const subjectOrders = await querySql(`
+  const subjectOrders = query(`
     SELECT
       o.id,
       o.subject_id AS subjectId,
@@ -13107,7 +13155,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY o.id;
   `);
 
-  const subjectImages = await querySql(`
+  const subjectImages = query(`
     SELECT
       si.subject_id AS subjectId,
       ia.id AS imageAssetId,
@@ -13161,7 +13209,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY MAX(si.selected) DESC, MIN(si.sort_order), ia.filename;
   `);
 
-  const orderItems = await querySql(`
+  const orderItems = query(`
     SELECT
       oi.id,
       oi.order_id AS orderId,
@@ -13186,7 +13234,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY oi.order_id, oi.id;
   `);
 
-  const payments = await querySql(`
+  const payments = query(`
     SELECT
       p.id,
       p.order_id AS orderId,
@@ -13201,7 +13249,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY p.created_at, p.id;
   `);
 
-  const images = await querySql(`
+  const images = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -13221,7 +13269,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const products = await querySql(`
+  const products = query(`
     SELECT
       pc.code,
       pc.name AS codeName,
@@ -13237,7 +13285,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const captureSummary = await querySql(`
+  const captureSummary = query(`
     SELECT
       (SELECT COUNT(*) FROM subjects WHERE job_id = ${jobId}) AS subjects,
       (
@@ -13273,7 +13321,7 @@ async function getJobDetail(_event, jobIdValue) {
       ) AS orderedNoPhotoSubjects;
   `);
 
-  const noPhotoSubjects = await querySql(`
+  const noPhotoSubjects = query(`
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -13294,7 +13342,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 150;
   `);
 
-  const recentImages = await querySql(`
+  const recentImages = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -13315,7 +13363,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 80;
   `);
 
-  const reviewCandidates = await querySql(`
+  const reviewCandidates = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -13347,7 +13395,9 @@ async function getJobDetail(_event, jobIdValue) {
     captureSummary[0].activeCaptureEvents = Number(captureSummary[0].activeCaptureImages || 0);
   }
 
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const jobDatabasePath = summary[0]?.rootPath
+    ? path.join(resolveProjectPath(summary[0].rootPath), 'Database', 'job.db')
+    : null;
 
   return {
     summary: summary[0] || null,
@@ -13370,6 +13420,9 @@ async function getJobDetail(_event, jobIdValue) {
       jobDatabasePath
     }
   };
+  } finally {
+    database.close();
+  }
 }
 
 ipcMain.handle('job:detail', getJobDetail);
