@@ -352,3 +352,6 @@ Sample rows:
 ```powershell
 java -cp "tools;JARS\jackcess-4.0.0.jar;JARS\commons-lang3-3.11.jar;JARS\commons-logging-1.2.jar" AccessTableSampler ProgramData.accdb PackagePlans 12
 ```
+# Historical inventory note
+
+This inventory predates the 2026-08-14 database cleanup. See [PROGRAM_DATABASE_TABLE_AUDIT.md](./PROGRAM_DATABASE_TABLE_AUDIT.md) for the current table usage and storage decisions.

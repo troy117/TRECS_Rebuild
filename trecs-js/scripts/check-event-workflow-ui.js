@@ -16,8 +16,7 @@ function dataRootFromPathFile() {
   return path.isAbsolute(configured) ? configured : path.resolve(workspaceRoot, configured);
 }
 const dataRoot = dataRootFromPathFile();
-const databasePath = path.join(dataRoot, 'database', 'migration_prototype.db');
-const programDatabasePath = path.join(dataRoot, 'database', 'program.db');
+const databasePath = path.join(dataRoot, 'database', 'ProgramData.db');
 const outputFolder = path.join(workspaceRoot, 'exports', 'ui-tests');
 const temporaryRoot = path.join(workspaceRoot, 'exports', '_event-workflow-smoke-temp');
 
@@ -104,7 +103,6 @@ async function run() {
   window.setSize(1680, 1020);
   const fixture = await findPhotographedFallStudent(window);
   const databaseBackup = fs.readFileSync(databasePath);
-  const programDatabaseBackup = fs.existsSync(programDatabasePath) ? fs.readFileSync(programDatabasePath) : null;
   let eventJobId = null;
   let report;
 
@@ -194,13 +192,13 @@ async function run() {
       storedPackageCodes: storedLink?.packageCodes || '',
       paidStatus: storedLink?.paidStatus || ''
     };
-    const pass = backend.imported && backend.queueCount === 1 && backend.confirmationRequired
+    const pass = backend.imported && backend.queueCount === 1 && !backend.confirmationRequired
       && backend.savedStatus === 'coded' && Number(backend.storedSubjectId) === Number(fixture.subject.id)
       && Number(backend.storedOrderId) > 0 && backend.storedPackageCodes === '1' && backend.paidStatus === 'paid'
       && sidebar.active && sidebar.title === 'Events' && sidebar.eventJobId === eventJobId
       && sidebar.fallJobId === Number(fixture.job.id) && sidebar.queueCards === 1 && sidebar.activeQueueCards === 1
       && sidebar.eventPreview && sidebar.fallPreview && sidebar.candidateCount === 1 && sidebar.existingLinks === 1
-      && sidebar.currentStatus.toLowerCase() === 'order coded' && sidebar.hasIdentityConfirmation && sidebar.hasOrderEntry
+      && sidebar.currentStatus.toLowerCase() === 'order coded' && !sidebar.hasIdentityConfirmation && sidebar.hasOrderEntry
       && sidebar.orderCodes === '1' && sidebar.hasFastImageJump && sidebar.hasFilters && sidebar.hasAddPerson
       && menu.active && menu.eventJobId === eventJobId && menu.eventPreview && menu.fallPreview && lockIntegrated;
     report = {
@@ -219,7 +217,6 @@ async function run() {
       try { await window.webContents.executeJavaScript(`window.trecs.releaseJobSession([${eventJobId}])`); } catch (_error) { /* Cleanup continues. */ }
     }
     restoreFile(databasePath, databaseBackup);
-    restoreFile(programDatabasePath, programDatabaseBackup);
     removeTemporaryRoot();
   }
 

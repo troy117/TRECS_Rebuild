@@ -74,7 +74,11 @@ async function run() {
 
   const actualFeature = await window.webContents.executeJavaScript(`(async () => {
     const setup = await window.trecs.getCompositeSetup(${Number(selected.jobId)});
-    const group = setup.classes.find((item) => item.homeroom === ${JSON.stringify(selected.homeroom)}) || setup.classes[0];
+    const selectedGroup = setup.classes.find((item) => item.homeroom === ${JSON.stringify(selected.homeroom)});
+    const group = (selectedGroup?.featuredStudents || []).length
+      ? selectedGroup
+      : setup.classes.find((item) => (item.featuredStudents || []).length);
+    if (!group) throw new Error('No composite class has a featured student fixture.');
     const featured = group?.featuredStudents.find((student) => student.hasPhoto) || group?.featuredStudents[0];
     const preview = await window.trecs.previewComposite({ jobId: ${Number(selected.jobId)}, homeroom: group.homeroom, type: 'star', featuredSubjectId: featured.id, schoolName: setup.job.clientName, schoolYear: setup.job.schoolYear, includeNames: true, includeStaff: true });
     return { dataUrl: preview.dataUrl, homeroom: group.homeroom, featuredName: featured.name, hasPhoto: featured.hasPhoto, width: preview.width, height: preview.height };

@@ -23,8 +23,8 @@ The start script clears `ELECTRON_RUN_AS_NODE` before launching Electron. This m
 ## Current Implementation
 
 - Electron shell launches.
-- Dashboard reads counts and job rows from `../database/migration_prototype.db`.
-- Jobs screen reads job metrics from `../database/migration_prototype.db`.
+- Dashboard reads counts and job rows from `../database/ProgramData.db`.
+- Jobs screen reads job metrics from `../database/ProgramData.db`.
 - Job detail workflow tabs read subjects, orders, images, and package/product data.
 - Image previews are loaded through the preload bridge.
 - Database access currently uses `sql.js` through Electron's main process.
