@@ -246,6 +246,44 @@ async function run() {
       }));
     }
 
+    await new Promise((resolve) => {
+      window.webContents.once('did-finish-load', resolve);
+      window.reload();
+    });
+    const dashboardOpenResult = await window.webContents.executeJavaScript(`new Promise((resolve) => {
+      const deadline = Date.now() + 15000;
+      let opened = false;
+      const inspect = () => {
+        const row = document.querySelector('[data-dashboard-job-id="${Number(secondJob.id)}"]');
+        if (!opened && row) {
+          opened = true;
+          row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+        }
+        const workspace = document.getElementById('jobStudentWorkspace');
+        const jobsView = document.getElementById('jobsView');
+        const workspaceTitle = document.getElementById('workspaceJobTitle')?.textContent || '';
+        if (opened && workspace && !workspace.hidden && jobsView?.classList.contains('active-view')) {
+          resolve({ ok: true, workspaceTitle });
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve({
+            ok: false,
+            rowFound: Boolean(row),
+            workspaceHidden: workspace?.hidden,
+            jobsViewActive: jobsView?.classList.contains('active-view'),
+            workspaceTitle
+          });
+          return;
+        }
+        setTimeout(inspect, 50);
+      };
+      inspect();
+    })`);
+    if (!dashboardOpenResult.ok || !dashboardOpenResult.workspaceTitle.includes(secondJob.name)) {
+      throw new Error(JSON.stringify({ dashboardOpenResult }));
+    }
+
     const report = {
       programTables: programTables.size,
       programClients: clientCount,
@@ -259,6 +297,7 @@ async function run() {
       collisionImageRemappedTo: Number(importedCollisionImage[0]),
       jobDetailReadMs,
       jobDetailDatabaseWrites: 0,
+      dashboardDoubleClickJob: dashboardOpenResult.workspaceTitle,
       wipedJobSubjects: wipedJobDetail.subjects.length,
       untouchedJobSubjects: untouchedJobDetail.subjects.length,
       jobDatabases: [jobPath, secondJobPath]

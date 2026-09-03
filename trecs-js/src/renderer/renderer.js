@@ -776,15 +776,35 @@ function renderMetrics(counts) {
 function renderJobs(jobs) {
   jobsTableBody.innerHTML = jobs
     .map((job) => `
-      <tr>
-        <td>${job.location}</td>
-        <td>${job.job}</td>
-        <td>${formatType(job.type)}</td>
-        <td>${job.packagePlan}</td>
-        <td><span class="status ready">${job.status}</span></td>
+      <tr data-dashboard-job-id="${job.id}" title="Double-click to open this job">
+        <td>${escapeHtml(job.location)}</td>
+        <td>${escapeHtml(job.job)}</td>
+        <td>${escapeHtml(formatType(job.type))}</td>
+        <td>${escapeHtml(job.packagePlan)}</td>
+        <td><span class="status ready">${escapeHtml(job.status)}</span></td>
       </tr>
     `)
     .join('');
+
+  jobsTableBody.querySelectorAll('[data-dashboard-job-id]').forEach((row) => {
+    row.addEventListener('dblclick', async () => {
+      if (row.dataset.opening === '1') return;
+      row.dataset.opening = '1';
+      const jobId = Number(row.dataset.dashboardJobId);
+      try {
+        jobsState.selectedTab = 'subjects';
+        if (!jobsState.jobs.some((job) => Number(job.id) === jobId)) {
+          await loadJobs();
+        }
+        setView('jobs');
+        await openJob(jobId);
+      } catch (error) {
+        showJobsLoadError(error);
+      } finally {
+        delete row.dataset.opening;
+      }
+    });
+  });
 }
 
 function renderMigration(items) {

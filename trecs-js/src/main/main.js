@@ -1197,8 +1197,28 @@ async function writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, option
   }
 }
 
+let recentlyPersistedJobDatabasePaths = new Map();
+
+function rememberPersistedJobDatabasePaths(paths) {
+  recentlyPersistedJobDatabasePaths = paths;
+  setImmediate(() => {
+    if (recentlyPersistedJobDatabasePaths === paths) {
+      recentlyPersistedJobDatabasePaths = new Map();
+    }
+  });
+}
+
 async function writeJobDatabaseSnapshot(jobId, options = {}) {
-  const sourceDatabase = await openWorkingDatabase();
+  const recentPath = Object.keys(options).length === 0
+    ? recentlyPersistedJobDatabasePaths.get(Number(jobId))
+    : null;
+  if (recentPath && fs.existsSync(recentPath)) {
+    return recentPath;
+  }
+  closeCachedQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
+  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId] });
   try {
     return await writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options);
   } finally {
@@ -1225,7 +1245,10 @@ async function openWorkingDatabase(options = {}) {
       const databasePath = jobDatabasePathForRow(jobRow);
       if (!fs.existsSync(databasePath)) {
         if (options.readOnly) {
-          throw new Error(`Job database was not found at ${databasePath}`);
+          if (options.requireExisting) {
+            throw new Error(`Job database was not found at ${databasePath}`);
+          }
+          continue;
         }
         await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
       }
@@ -1262,10 +1285,17 @@ async function openWorkingDatabase(options = {}) {
   return database;
 }
 
-async function persistWorkingDatabase(database) {
-  const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;');
+async function persistWorkingDatabase(database, options = {}) {
+  const requestedJobIds = Array.isArray(options.jobIds)
+    ? new Set(options.jobIds.map((id) => numericId(id)))
+    : null;
+  const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;')
+    .filter((jobRow) => !requestedJobIds || requestedJobIds.has(Number(jobRow.id)));
+  const persistedPaths = new Map();
   for (const jobRow of jobRows) {
-    await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+    const jobId = Number(jobRow.id);
+    const databasePath = await writeJobDatabaseFromWorkingDatabase(database, jobId);
+    if (databasePath) persistedPaths.set(jobId, databasePath);
   }
 
   const SQL = await getSqlModule();
@@ -1276,6 +1306,7 @@ async function persistWorkingDatabase(database) {
   } finally {
     programDatabase.close();
   }
+  rememberPersistedJobDatabasePaths(persistedPaths);
 }
 
 
@@ -1411,62 +1442,198 @@ async function ensurePrototypeDatabaseShape() {
   }
 }
 
-async function querySql(sql) {
-  const database = await openWorkingDatabase();
+let cachedQueryDatabasePromise = null;
+let cachedQueryDatabase = null;
+let cachedQueryDatabaseCloseScheduled = false;
 
-  try {
-    return rowsFromResult(database.exec(sql));
-  } finally {
-    database.close();
+function closeCachedQueryDatabase() {
+  if (cachedQueryDatabase) {
+    cachedQueryDatabase.close();
   }
+  cachedQueryDatabase = null;
+  cachedQueryDatabasePromise = null;
+  cachedQueryDatabaseCloseScheduled = false;
+}
+
+async function getCachedQueryDatabase() {
+  if (!cachedQueryDatabasePromise) {
+    cachedQueryDatabasePromise = openWorkingDatabase({ readOnly: true })
+      .then((database) => {
+        cachedQueryDatabase = database;
+        return database;
+      })
+      .catch((error) => {
+        cachedQueryDatabasePromise = null;
+        throw error;
+      });
+  }
+
+  const database = await cachedQueryDatabasePromise;
+  if (!cachedQueryDatabaseCloseScheduled) {
+    cachedQueryDatabaseCloseScheduled = true;
+    setImmediate(() => {
+      if (cachedQueryDatabase === database) {
+        closeCachedQueryDatabase();
+      }
+    });
+  }
+  return database;
+}
+
+async function querySql(sql) {
+  const database = await getCachedQueryDatabase();
+  return rowsFromResult(database.exec(sql));
+}
+
+let cachedProgramQueryDatabasePromise = null;
+let cachedProgramQueryDatabase = null;
+let cachedProgramQueryDatabaseCloseScheduled = false;
+
+function closeCachedProgramQueryDatabase() {
+  if (cachedProgramQueryDatabase) {
+    cachedProgramQueryDatabase.close();
+  }
+  cachedProgramQueryDatabase = null;
+  cachedProgramQueryDatabasePromise = null;
+  cachedProgramQueryDatabaseCloseScheduled = false;
+}
+
+async function getCachedProgramQueryDatabase() {
+  if (!cachedProgramQueryDatabasePromise) {
+    cachedProgramQueryDatabasePromise = getSqlModule()
+      .then((SQL) => new SQL.Database(fs.readFileSync(prototypeDatabasePath)))
+      .then((database) => {
+        cachedProgramQueryDatabase = database;
+        return database;
+      })
+      .catch((error) => {
+        cachedProgramQueryDatabasePromise = null;
+        throw error;
+      });
+  }
+
+  const database = await cachedProgramQueryDatabasePromise;
+  if (!cachedProgramQueryDatabaseCloseScheduled) {
+    cachedProgramQueryDatabaseCloseScheduled = true;
+    setImmediate(() => {
+      if (cachedProgramQueryDatabase === database) {
+        closeCachedProgramQueryDatabase();
+      }
+    });
+  }
+  return database;
 }
 
 async function queryProgramSql(sql) {
-  const SQL = await getSqlModule();
-  const database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
-
-  try {
-    return rowsFromResult(database.exec(sql));
-  } finally {
-    database.close();
-  }
+  const database = await getCachedProgramQueryDatabase();
+  return rowsFromResult(database.exec(sql));
 }
 
-async function queryJobSql(jobIdValue, sql) {
-  const jobId = numericId(jobIdValue);
-  const SQL = await getSqlModule();
-  const programDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
-  let databasePath;
+const cachedJobQueryDatabases = new Map();
 
-  try {
-    const jobRows = rowsFromDatabase(programDatabase, `
-      SELECT root_path AS rootPath
-      FROM jobs
-      WHERE id = ${jobId}
-      LIMIT 1;
-    `);
-    if (!jobRows.length) {
-      throw new Error('Job not found');
+function closeCachedJobQueryDatabases() {
+  cachedJobQueryDatabases.forEach((entry) => {
+    if (entry.database) {
+      entry.database.close();
     }
-    databasePath = path.join(resolveProjectPath(jobRows[0].rootPath), 'Database', 'job.db');
-  } finally {
-    programDatabase.close();
+  });
+  cachedJobQueryDatabases.clear();
+}
+
+async function getCachedJobQueryDatabase(jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const existing = cachedJobQueryDatabases.get(jobId);
+  if (existing) {
+    return existing.promise;
   }
+
+  const jobRows = await queryProgramSql(`
+    SELECT root_path AS rootPath
+    FROM jobs
+    WHERE id = ${jobId}
+    LIMIT 1;
+  `);
+  if (!jobRows.length) {
+    throw new Error('Job not found');
+  }
+  const databasePath = path.join(resolveProjectPath(jobRows[0].rootPath), 'Database', 'job.db');
 
   if (!fs.existsSync(databasePath)) {
     throw new Error(`Job database was not found at ${databasePath}`);
   }
 
-  const database = new SQL.Database(fs.readFileSync(databasePath));
-  try {
-    return rowsFromResult(database.exec(sql));
-  } finally {
-    database.close();
+  const entry = { database: null, promise: null };
+  entry.promise = getSqlModule().then((SQL) => {
+    entry.database = new SQL.Database(fs.readFileSync(databasePath));
+    return entry.database;
+  });
+  cachedJobQueryDatabases.set(jobId, entry);
+  setImmediate(() => {
+    if (cachedJobQueryDatabases.get(jobId) === entry) {
+      if (entry.database) entry.database.close();
+      cachedJobQueryDatabases.delete(jobId);
+    }
+  });
+  return entry.promise;
+}
+
+async function queryJobSql(jobIdValue, sql) {
+  const database = await getCachedJobQueryDatabase(jobIdValue);
+  return rowsFromResult(database.exec(sql));
+}
+
+const cachedScopedQueryDatabases = new Map();
+
+function closeCachedScopedQueryDatabases() {
+  cachedScopedQueryDatabases.forEach((entry) => {
+    if (entry.database) {
+      entry.database.close();
+    }
+  });
+  cachedScopedQueryDatabases.clear();
+}
+
+async function getCachedScopedQueryDatabase(jobIdsValue) {
+  const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(numericId))).sort((a, b) => a - b);
+  const cacheKey = jobIds.join(',');
+  const existing = cachedScopedQueryDatabases.get(cacheKey);
+  if (existing) {
+    return existing.promise;
   }
+
+  const entry = { database: null, promise: null };
+  entry.promise = openWorkingDatabase({ jobIds, readOnly: true, requireExisting: true }).then((database) => {
+    entry.database = database;
+    return database;
+  });
+  cachedScopedQueryDatabases.set(cacheKey, entry);
+  setImmediate(() => {
+    if (cachedScopedQueryDatabases.get(cacheKey) === entry) {
+      if (entry.database) entry.database.close();
+      cachedScopedQueryDatabases.delete(cacheKey);
+    }
+  });
+  return entry.promise;
+}
+
+async function queryScopedSql(jobIds, sql) {
+  const database = await getCachedScopedQueryDatabase(jobIds);
+  return rowsFromResult(database.exec(sql));
 }
 
 async function mutateSql(callback) {
   return writeSql(callback);
+}
+
+async function writeJobSql(jobIds, callback) {
+  const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
+  return writeSql(callback, { jobIds: ids });
+}
+
+async function writeResultJobSql(callback) {
+  return writeSql(callback, {
+    jobIds: (result) => result && result.jobId ? [result.jobId] : undefined
+  });
 }
 
 function safeFolderName(value) {
@@ -1626,7 +1793,7 @@ function normalizeStudentFieldSettings(settings = {}) {
 }
 
 async function getStudentFieldSettings() {
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT value_json AS valueJson
     FROM app_settings
     WHERE key = '${STUDENT_FIELD_SETTINGS_KEY}';
@@ -1645,7 +1812,7 @@ async function getStudentFieldSettings() {
 
 async function saveStudentFieldSettings(_event, input = {}) {
   const settings = normalizeStudentFieldSettings(input);
-  await writeSql((database) => {
+  await writeProgramSql((database) => {
     const statement = database.prepare(`
       INSERT OR REPLACE INTO app_settings (
         key,
@@ -2272,7 +2439,7 @@ function normalizeProductionSyncSettings(input = {}) {
 }
 
 async function getProductionSyncSettings() {
-  const rows = await querySql(`SELECT value_json AS valueJson FROM app_settings WHERE key = '${PRODUCTION_SYNC_SETTINGS_KEY}';`);
+  const rows = await queryProgramSql(`SELECT value_json AS valueJson FROM app_settings WHERE key = '${PRODUCTION_SYNC_SETTINGS_KEY}';`);
   if (!rows.length) return defaultProductionSyncSettings();
   try {
     return normalizeProductionSyncSettings(JSON.parse(rows[0].valueJson));
@@ -2283,7 +2450,7 @@ async function getProductionSyncSettings() {
 
 async function saveProductionSyncSettings(_event, input = {}) {
   const settings = normalizeProductionSyncSettings(input);
-  await writeSql((database) => {
+  await writeProgramSql((database) => {
     database.run(`
       INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP);
@@ -2566,7 +2733,7 @@ async function saveProductionMilestone(_event, input = {}) {
     : null;
   const completedBy = optionalText(input.completedBy, 120);
   const notes = optionalText(input.notes, 1000);
-  await writeSql((database) => {
+  await writeJobSql(jobId, (database) => {
     database.run(`
       INSERT INTO job_milestones (job_id, milestone_key, status, completed_at, completed_by, source, notes, updated_at)
       VALUES (?, ?, ?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
@@ -2866,7 +3033,7 @@ function createCapturePackageSchema(database) {
 
 async function prepareLaptopPackage(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const jobRows = await querySql(`
+  const jobRows = await queryScopedSql(jobId, `
     WITH
       subject_counts AS (
         SELECT job_id, COUNT(*) AS subjects
@@ -2981,7 +3148,7 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   };
   const manifestPath = path.join(setupPath, 'onsite-setup.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  await writeSql((database) => {
+  await writeJobSql(jobId, (database) => {
     const statement = database.prepare(`
       INSERT INTO admin_item_batches (
         job_id,
@@ -3527,7 +3694,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     });
   });
 
-  await writeSql((database) => {
+  await writeJobSql(jobId, (database) => {
     copiedImages.forEach((image) => {
       const currentPath = image.jpgPath || null;
       const metadata = {
@@ -3598,7 +3765,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  const cleanup = await writeSql((database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
+  const cleanup = await writeJobSql(jobId, (database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
   const refreshedJobDatabasePath = await writeJobDatabaseSnapshot(jobId);
 
   queueTrecsLogEvent('END_OF_DAY.CREATED', {
@@ -3635,16 +3802,26 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
 ipcMain.handle('end-of-day:preview', getEndOfDayPreview);
 ipcMain.handle('end-of-day:create', createEndOfDayPackage);
 
-async function writeSql(updateDatabase) {
+async function writeSql(updateDatabase, options = {}) {
+  closeCachedQueryDatabase();
+  closeCachedProgramQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
   acquireDatabaseWriteLock();
   let database;
 
   try {
+    // Writes still load all job databases so newly allocated row IDs remain
+    // globally unique. The persistence scope below prevents rewriting jobs that
+    // were not changed.
     database = await openWorkingDatabase();
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
     database.run('COMMIT');
-    await persistWorkingDatabase(database);
+    const requestedJobIds = typeof options.jobIds === 'function'
+      ? options.jobIds(result)
+      : options.jobIds;
+    await persistWorkingDatabase(database, { jobIds: requestedJobIds });
     return result;
   } catch (error) {
     try {
@@ -3660,6 +3837,10 @@ async function writeSql(updateDatabase) {
 }
 
 async function writeProgramSql(updateDatabase) {
+  closeCachedQueryDatabase();
+  closeCachedProgramQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
   acquireDatabaseWriteLock();
   let database;
 
@@ -3825,6 +4006,7 @@ async function getDashboardData() {
 
   const jobs = await querySql(`
     SELECT
+      j.id,
       COALESCE(c.trecs_name, c.display_name, '') AS location,
       j.name AS job,
       j.type,
@@ -3870,13 +4052,13 @@ ipcMain.handle('dashboard:get', getDashboardData);
 
 async function getPackageEditorData(_event, packagePlanIdValue = null) {
   const requestedPlanId = packagePlanIdValue ? numericId(packagePlanIdValue) : null;
-  const plans = await querySql(`
+  const plans = await queryProgramSql(`
     SELECT id, name, version, active, legacy_name AS legacyName
     FROM package_plans
     ORDER BY active DESC, name, version DESC;
   `);
   const selectedPlanId = requestedPlanId || (plans.length ? Number(plans[0].id) : null);
-  let products = await querySql(`
+  let products = await queryProgramSql(`
     SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
     FROM products
     ORDER BY category, name;
@@ -3889,14 +4071,14 @@ async function getPackageEditorData(_event, packagePlanIdValue = null) {
     product.reviewNotes = metadata.review_notes || '';
     product.renderStatus = productRenderSupport(product);
   });
-  const codes = selectedPlanId ? await querySql(`
+  const codes = selectedPlanId ? await queryProgramSql(`
     SELECT id, code, name, active, legacy_code_name AS legacyCodeName, metadata_json AS metadataJson
     FROM package_codes
     WHERE package_plan_id = ${selectedPlanId}
     ORDER BY CAST(code AS INTEGER), code;
   `) : [];
   const codeIds = codes.map((row) => Number(row.id));
-  const items = codeIds.length ? await querySql(`
+  const items = codeIds.length ? await queryProgramSql(`
     SELECT pci.id, pci.package_code_id AS packageCodeId, pci.raw_value AS rawValue,
            pci.product_id AS productId, pci.quantity, pci.sort_order AS sortOrder,
            p.name AS productName, p.category
@@ -3919,7 +4101,7 @@ async function createPackagePlan(_event, input = {}) {
   const name = optionalText(input.name, 255);
   if (!name) throw new Error('Package plan name is required');
   const version = Math.max(1, Number.parseInt(input.version || '1', 10) || 1);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`INSERT INTO package_plans (name, version, active) VALUES (?, ?, 1);`, [name, version]);
     return { id: Number(database.exec('SELECT last_insert_rowid() AS id;')[0].values[0][0]), name, version };
   });
@@ -3931,7 +4113,7 @@ async function savePackageCode(_event, input = {}) {
   if (!code) throw new Error('Package code is required');
   const name = optionalText(input.name, 255) || '';
   const incomingItems = Array.isArray(input.items) ? input.items : [];
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     let packageCodeId = input.id ? numericId(input.id) : null;
     if (packageCodeId) {
       database.run(`UPDATE package_codes SET code = ?, name = ?, active = ?, legacy_code_name = COALESCE(legacy_code_name, ?) WHERE id = ? AND package_plan_id = ?;`,
@@ -3955,7 +4137,7 @@ async function savePackageCode(_event, input = {}) {
 
 async function deletePackageCode(_event, packageCodeIdValue) {
   const packageCodeId = numericId(packageCodeIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run('DELETE FROM package_codes WHERE id = ?;', [packageCodeId]);
     return { deleted: packageCodeId };
   });
@@ -4030,7 +4212,7 @@ async function createProduct(_event, input = {}) {
   const productId = normalized.id;
   const { name, category, size, requiresImage } = normalized;
   if (!name) throw new Error('Product name is required');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     if (productId) {
       const existing = rowsFromDatabase(database, `SELECT id, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
       if (!existing) throw new Error('Product was not found.');
@@ -4103,7 +4285,7 @@ function csvCell(value) {
 
 async function saveProductsBatch(_event, products = []) {
   if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const saved = saveProductRows(database, products);
     return { saved: saved.length };
   });
@@ -4111,7 +4293,7 @@ async function saveProductsBatch(_event, products = []) {
 
 async function saveProductsAsDefault(_event, products = []) {
   if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     saveProductRows(database, products);
     const rows = rowsFromDatabase(database, `
       SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
@@ -4139,7 +4321,7 @@ SELECT id, '${sqlQuote(alias.alias)}', '${sqlQuote(alias.notes || 'Default produ
 
 async function deleteProduct(_event, productIdValue) {
   const productId = numericId(productIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const product = rowsFromDatabase(database, `SELECT id, name FROM products WHERE id = ${productId} LIMIT 1;`)[0];
     if (!product) throw new Error('Product was not found.');
     const usage = rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM package_code_items WHERE product_id = ${productId};`)[0]?.count || 0;
@@ -4158,7 +4340,7 @@ async function seedDefaultProducts() {
   ];
   const seedPath = candidates.find((candidate) => fs.existsSync(candidate));
   if (!seedPath) throw new Error('Could not find database/product_seed.sql.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const before = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
     const seedSql = fs.readFileSync(seedPath, 'utf8').replace(/^\s*BEGIN TRANSACTION;\s*/i, '').replace(/\s*COMMIT;\s*$/i, '');
     database.run(seedSql);
@@ -4489,7 +4671,7 @@ async function writeDigitalDownloadTest(webContents, product, outputFolder, opti
 
 async function testProductRender(event, productIdValue) {
   const productId = numericId(productIdValue);
-  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  const rows = await queryProgramSql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
   if (!rows.length) throw new Error('Product was not found.');
   const outputFolder = path.join(projectRoot, 'exports', 'product-render-tests', safeFolderName(rows[0].name) || `product-${productId}`);
   return rasterizeProductRenderTest(event.sender, rows[0], outputFolder);
@@ -4497,7 +4679,7 @@ async function testProductRender(event, productIdValue) {
 
 async function testPackageItemRender(event, input = {}) {
   const productId = numericId(input.productId);
-  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  const rows = await queryProgramSql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
   if (!rows.length) throw new Error('Product was not found.');
   const product = rows[0];
   const quantity = Math.max(1, Math.min(999, Number.parseInt(input.quantity || '1', 10) || 1));
@@ -4597,9 +4779,9 @@ function formatStatusForError(status) {
 
 async function testPackageCodeRender(event, packageCodeIdValue) {
   const packageCodeId = numericId(packageCodeIdValue);
-  const codeRows = await querySql(`SELECT id, code, name FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`);
+  const codeRows = await queryProgramSql(`SELECT id, code, name FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`);
   if (!codeRows.length) throw new Error('Package code was not found.');
-  const items = await querySql(`
+  const items = await queryProgramSql(`
     SELECT pci.id, pci.quantity, p.id AS productId, p.name, p.category, p.size, p.metadata_json AS metadataJson
     FROM package_code_items pci
     JOIN products p ON p.id = pci.product_id
@@ -4765,7 +4947,7 @@ async function testPackageCodeRender(event, packageCodeIdValue) {
 
 async function markProductReviewed(_event, productIdValue, reviewedValue = true) {
   const productId = numericId(productIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const row = rowsFromDatabase(database, `SELECT id, name, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
     if (!row) throw new Error('Product was not found.');
     const metadata = parseProductMetadata(row.metadataJson);
@@ -4778,7 +4960,7 @@ async function markProductReviewed(_event, productIdValue, reviewedValue = true)
 
 async function markPackageCodeReviewed(_event, packageCodeIdValue, reviewedValue = true) {
   const packageCodeId = numericId(packageCodeIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const row = rowsFromDatabase(database, `SELECT id, code, name, metadata_json AS metadataJson FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`)[0];
     if (!row) throw new Error('Package code was not found.');
     const metadata = parseProductMetadata(row.metadataJson);
@@ -5879,7 +6061,7 @@ async function runUnitRender(event, input = {}) {
   if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
-  const selectedJobRows = await querySql(`
+  const selectedJobRows = await queryProgramSql(`
     SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
     FROM jobs j JOIN clients c ON c.id = j.client_id
     WHERE j.id = ${jobId}
@@ -5889,7 +6071,7 @@ async function runUnitRender(event, input = {}) {
   if (['event', 'qr_event'].includes(String(selectedJob?.type || '').toLowerCase())) {
     return runEventUnitRender(event, input, selectedJob);
   }
-  const orders = await querySql(`
+  const orders = await queryScopedSql(jobId, `
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
            GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
@@ -5900,19 +6082,13 @@ async function runUnitRender(event, input = {}) {
     GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
   `);
   const selectedOrders = orders;
-  const jobSummaryRows = await querySql(`
-    SELECT c.display_name AS clientName, j.name AS jobName
-    FROM jobs j JOIN clients c ON c.id = j.client_id
-    WHERE j.id = ${jobId}
-    LIMIT 1;
-  `);
-  const jobSummary = jobSummaryRows[0] || {};
+  const jobSummary = selectedJob || {};
   const job = await adminJobSummary(jobId);
   const schoolName = selectedOrders[0]?.clientName || jobSummary.clientName || 'School';
   const runDate = new Date().toISOString().slice(0, 10);
   const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`));
   fs.mkdirSync(outputFolder, { recursive: true });
-  const itemRows = selectedOrders.length ? await querySql(`
+  const itemRows = selectedOrders.length ? await queryScopedSql(jobId, `
     SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue, p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN jobs j ON j.id = o.job_id
     LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
@@ -6171,7 +6347,7 @@ async function saveStudentList(_event, input = {}) {
   const listId = input.id ? numericId(input.id) : null;
   const name = normalizeText(input.name, 'List name', 120);
   const memberIds = Array.from(new Set((Array.isArray(input.memberIds) ? input.memberIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const subjects = memberIds.length ? rowsFromDatabase(database, `SELECT id FROM subjects WHERE job_id = ${jobId} AND id IN (${memberIds.join(',')});`) : [];
     if (subjects.length !== memberIds.length) throw new Error('One or more selected students do not belong to this job.');
     let id = listId;
@@ -6192,12 +6368,12 @@ async function saveStudentList(_event, input = {}) {
 
 async function deleteStudentList(_event, listIdValue) {
   const listId = numericId(listIdValue);
-  return writeSql((database) => {
-    const existing = rowsFromDatabase(database, `SELECT id FROM subject_groups WHERE id = ${listId} AND group_type = 'list';`)[0];
+  return writeResultJobSql((database) => {
+    const existing = rowsFromDatabase(database, `SELECT id, job_id AS jobId FROM subject_groups WHERE id = ${listId} AND group_type = 'list';`)[0];
     if (!existing) throw new Error('Student list not found.');
     database.run('DELETE FROM subject_group_members WHERE group_id = ?;', [listId]);
     database.run('DELETE FROM subject_groups WHERE id = ?;', [listId]);
-    return { id: listId, deleted: true };
+    return { id: listId, jobId: Number(existing.jobId), deleted: true };
   });
 }
 
@@ -6263,7 +6439,7 @@ async function onlineOrderPreviewData(jobIdValue, filePathValue, mappingValue = 
   if (rows.length < 2) throw new Error('Online order file has no data rows.');
   const columns = onlineOrderColumns(rows);
   const mapping = mappingValue || guessedOnlineOrderMapping(columns);
-  const subjects = await querySql(`SELECT id, legacy_ref_num AS ref, external_id AS externalId, first_name AS firstName, last_name AS lastName, primary_image_asset_id AS primaryImageId FROM subjects WHERE job_id = ${jobId};`);
+  const subjects = await queryJobSql(jobId, `SELECT id, legacy_ref_num AS ref, external_id AS externalId, first_name AS firstName, last_name AS lastName, primary_image_asset_id AS primaryImageId FROM subjects WHERE job_id = ${jobId};`);
   const seen = new Set();
   const previewRows = rows.slice(1).map((row, index) => {
     const values = Object.fromEntries(ONLINE_ORDER_FIELDS.map((field) => [field.key, importRowValue(row, mapping, field.key)]));
@@ -6293,7 +6469,7 @@ async function importOnlineOrders(_event, input = {}) {
   const validRows = preview.rows.filter((row) => row.status === 'ready');
   if (!validRows.length) throw new Error('There are no matched online orders ready to import.');
   const importedAt = new Date().toISOString();
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(preview.jobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT package_plan_id AS packagePlanId, root_path AS rootPath FROM jobs WHERE id = ${preview.jobId};`)[0];
     if (!job) throw new Error('Job not found.');
     let inserted = 0; let updated = 0; const orderIds = [];
@@ -6327,7 +6503,7 @@ async function importOnlineOrders(_event, input = {}) {
 
 async function getBatchRenderSetup() {
   const setup = await getUnitRenderSetup(null, null);
-  const history = await querySql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
+  const history = await queryProgramSql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
     COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status = 'failed' THEN 1 ELSE 0 END) AS failedJobs
     FROM render_batches rb LEFT JOIN render_batch_jobs rbj ON rbj.render_batch_id = rb.id
     GROUP BY rb.id ORDER BY rb.id DESC LIMIT 20;`);
@@ -6346,10 +6522,10 @@ async function runBatchRender(event, input = {}) {
       if (!lock.acquired) throw new Error(`${lock.job.clientName} / ${lock.job.name} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
       acquired.push(jobId);
     }
-    const jobs = await querySql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
+    const jobs = await queryProgramSql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
     const name = optionalText(input.name, 160) || `Production Batch ${new Date().toLocaleString()}`;
     const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom') };
-    const batch = await writeSql((database) => {
+    const batch = await writeProgramSql((database) => {
       database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, started_at, created_by) VALUES (?, ?, 'running', ?, ?, CURRENT_TIMESTAMP, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
       const batchId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
       const statement = database.prepare(`INSERT INTO render_batch_jobs (render_batch_id, job_id, sort_order, status) VALUES (?, ?, ?, 'queued');`);
@@ -6360,21 +6536,21 @@ async function runBatchRender(event, input = {}) {
     for (let index = 0; index < jobs.length; index += 1) {
       const job = jobs[index]; const jobOutput = path.join(outputFolder, safeFolderName(`${job.clientName}_${job.jobName}`)); fs.mkdirSync(jobOutput, { recursive: true });
       event.sender.send('batch-render:progress', { current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
-      await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batch.id, job.id]));
+      await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batch.id, job.id]));
       try {
         const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options });
         results.push({ job, status: 'completed', result });
-        await writeSql((database) => {
+        await writeJobSql(job.id, (database) => {
           database.run(`UPDATE render_batch_jobs SET status = 'completed', result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [JSON.stringify(result), batch.id, job.id]);
           database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ? AND paid_status = 'paid' AND subject_id IN (SELECT id FROM subjects WHERE job_id = ? AND primary_image_asset_id IS NOT NULL);`, [job.id, job.id]);
         });
       } catch (error) {
         failed += 1; results.push({ job, status: 'failed', error: error.message });
-        await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batch.id, job.id]));
+        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batch.id, job.id]));
       }
     }
     const status = failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed';
-    await writeSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batch.id]));
+    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batch.id]));
     event.sender.send('batch-render:progress', { current: jobs.length, total: jobs.length, message: 'Batch render complete' });
     return { batchId: batch.id, name: batch.name, status, outputFolder, results };
   } finally {
@@ -6458,7 +6634,7 @@ async function getEventWorkflowSetup(_event, eventJobIdValue = null, entryIdValu
 
 async function configureEventFallJob(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const fallJobId = numericId(input.fallJobId);
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const rows = rowsFromDatabase(database, `SELECT e.id AS eventJobId, e.client_id AS eventClientId, f.id AS fallJobId, f.client_id AS fallClientId FROM jobs e JOIN jobs f ON f.id = ${fallJobId} WHERE e.id = ${eventJobId};`);
     if (!rows.length || Number(rows[0].eventClientId) !== Number(rows[0].fallClientId)) throw new Error('The event and fall jobs must belong to the same school.');
     const current = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
@@ -6477,7 +6653,7 @@ async function importEventImageFolderCore(eventJobIdValue, folderPathValue) {
   const eventJobId = numericId(eventJobIdValue); const sourceFolder = path.resolve(normalizeText(folderPathValue, 'Event image folder', 1000));
   if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) throw new Error('Event image folder was not found.');
   const files = eventImageFiles(sourceFolder); if (!files.length) throw new Error('The selected folder does not contain JPG, JPEG, or PNG event images.');
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT id, root_path AS rootPath FROM jobs WHERE id = ${eventJobId};`)[0]; if (!job) throw new Error('Event job not found.');
     const fallLink = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
     const destinationFolder = path.join(resolveProjectPath(job.rootPath), 'EventImages'); fs.mkdirSync(destinationFolder, { recursive: true });
@@ -6530,7 +6706,7 @@ async function searchEventFallStudents(_event, input = {}) {
 async function saveEventMatch(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const entryId = numericId(input.entryId); const fallSubjectId = numericId(input.fallSubjectId);
   const orderText = optionalText(input.orderCodes, 500); const paidStatus = normalizePaidStatus(input.paidStatus || 'unknown'); const notes = optionalText(input.notes, 2000);
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const row = rowsFromDatabase(database, `SELECT ee.id, ee.event_image_asset_id AS eventImageId, ee.fall_job_id AS fallJobId, j.package_plan_id AS packagePlanId,
       s.id AS subjectId FROM event_entries ee JOIN jobs j ON j.id = ee.event_job_id JOIN subjects s ON s.id = ${fallSubjectId}
       WHERE ee.id = ${entryId} AND ee.event_job_id = ${eventJobId} AND s.job_id = ee.fall_job_id LIMIT 1;`)[0];
@@ -6567,7 +6743,7 @@ async function saveEventMatch(_event, input = {}) {
 
 async function removeEventSubjectLink(_event, linkIdValue) {
   const linkId = numericId(linkIdValue);
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const link = rowsFromDatabase(database, `SELECT esl.id, esl.event_entry_id AS entryId, esl.order_id AS orderId, ee.event_job_id AS eventJobId FROM event_subject_links esl JOIN event_entries ee ON ee.id = esl.event_entry_id WHERE esl.id = ${linkId};`)[0];
     if (!link) throw new Error('Event student link not found.');
     if (link.orderId) { database.run('DELETE FROM payments WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM order_items WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM orders WHERE id = ?;', [link.orderId]); }
@@ -6575,7 +6751,7 @@ async function removeEventSubjectLink(_event, linkIdValue) {
     const counts = rowsFromDatabase(database, `SELECT COUNT(*) AS links, SUM(CASE WHEN order_id IS NOT NULL THEN 1 ELSE 0 END) AS orders FROM event_subject_links WHERE event_entry_id = ${Number(link.entryId)};`)[0];
     const status = Number(counts.orders || 0) > 0 ? 'coded' : Number(counts.links || 0) > 0 ? 'linked' : 'unlinked';
     database.run(`UPDATE event_entries SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, link.entryId]);
-    return { id: linkId, entryId: link.entryId, eventJobId: link.eventJobId, status };
+    return { id: linkId, jobId: Number(link.eventJobId), entryId: link.entryId, eventJobId: link.eventJobId, status };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.eventJobId);
   return result;
@@ -6661,10 +6837,7 @@ function ensureCompositeGradeTitleTable(database) {
 }
 
 async function compositeGradeTitleRows(jobId) {
-  await mutateSql((database) => {
-    ensureCompositeGradeTitleTable(database);
-  });
-  return querySql(`SELECT homeroom, grade_title AS gradeTitle, reviewed FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
+  return queryJobSql(jobId, `SELECT homeroom, grade_title AS gradeTitle, reviewed FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
 }
 
 async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
@@ -6672,7 +6845,7 @@ async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
     .map(([homeroom, title]) => [String(homeroom || '').trim(), String(title || '').trim()])
     .filter(([homeroom, title]) => homeroom && title);
   if (!entries.length) return;
-  await mutateSql((database) => {
+  await writeJobSql(jobId, (database) => {
     ensureCompositeGradeTitleTable(database);
     entries.forEach(([homeroom, title]) => {
       database.run(`
@@ -6694,13 +6867,13 @@ function compositeSchoolYear(jobName) {
 async function compositeJobData(jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const jobs = await querySql(`
+  const jobs = await queryProgramSql(`
     SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
     FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId};
   `);
   if (!jobs.length) throw new Error('Job was not found.');
   const job = jobs[0];
-  const subjects = await querySql(`
+  const subjects = await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
@@ -6717,7 +6890,7 @@ async function compositeJobData(jobIdValue) {
     subject.photoPath = compositeImagePath(subject, job.rootPath);
     subject.hasPhoto = Boolean(subject.photoPath);
   });
-  const orderProducts = await querySql(`
+  const orderProducts = await queryScopedSql(jobId, `
     SELECT o.id AS orderId, o.subject_id AS subjectId, o.paid_status AS paidStatus,
            COALESCE(pm.name, pd.name, pci.raw_value, '') AS productName, COALESCE(pci.quantity, oi.quantity, 1) AS quantity
     FROM orders o JOIN jobs j ON j.id = o.job_id JOIN order_items oi ON oi.order_id = o.id
@@ -6737,7 +6910,7 @@ async function compositeJobData(jobIdValue) {
   });
   subjects.forEach((subject) => { subject.purchases = purchases.get(Number(subject.id)) || { traditional: 0, star: 0 }; });
   const gradeTitles = new Map((await compositeGradeTitleRows(jobId)).map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
-  const allStaff = await querySql(`
+  const allStaff = await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
@@ -6763,7 +6936,7 @@ async function compositeJobData(jobIdValue) {
     classMap.get(subject.homeroom)[subject.staff ? 'staff' : 'students'].push(subject);
   });
   const staffById = new Map(allStaff.map((subject) => [Number(subject.id), subject]));
-  const staffAssignments = await querySql(`SELECT subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, sort_order AS sortOrder FROM staff_assignments WHERE job_id = ${jobId} ORDER BY sort_order, id;`);
+  const staffAssignments = await queryJobSql(jobId, `SELECT subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, sort_order AS sortOrder FROM staff_assignments WHERE job_id = ${jobId} ORDER BY sort_order, id;`);
   const teacherCompositeTitles = new Map();
   staffAssignments.forEach((assignment) => {
     if (assignment.role !== 'teacher' || !assignment.homeroom || Number(assignment.includeInComposites || 0) === 0) return;
@@ -6803,7 +6976,7 @@ async function getCompositeSetup(_event, jobIdValue = null) {
   const selectedJobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.classes) > 0)?.id || jobs[0]?.id || null);
   if (!selectedJobId) return { jobs, selectedJobId: null, job: null, classes: [] };
   const data = await compositeJobData(selectedJobId);
-  const keyStaffRows = await querySql(`
+  const keyStaffRows = await queryJobSql(selectedJobId, `
     SELECT subject_id AS subjectId, role
     FROM staff_assignments
     WHERE job_id = ${Number(selectedJobId)}
@@ -7162,7 +7335,7 @@ async function testCompositeLayouts(event) {
 
 async function testPackagePlanRenders(event, packagePlanIdValue) {
   const packagePlanId = numericId(packagePlanIdValue);
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT DISTINCT p.id, p.name, p.category, p.size, p.metadata_json AS metadataJson
     FROM package_code_items pci
     JOIN package_codes pc ON pc.id = pci.package_code_id
@@ -8417,7 +8590,7 @@ function idCardJavaClasspath() {
 
 async function activeIdCardTemplate(templateType, preferredId = null) {
   const idFilter = preferredId ? `AND id = ${numericId(preferredId)}` : '';
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -8455,7 +8628,7 @@ async function activeIdCardTemplateById(templateId) {
   if (!id) {
     return null;
   }
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -8794,7 +8967,7 @@ async function renderCameraCardSheets(job, subjects, options, outputPath, absolu
 }
 
 async function adminJobSummary(jobId) {
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       j.id,
       j.client_id AS clientId,
@@ -8842,7 +9015,7 @@ function normalizeIdTemplateType(value) {
 async function listIdTemplates(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
   const { job, folder } = await idTemplateFolderForJob(jobId);
-  const templateRows = await querySql(`
+  const templateRows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -8906,7 +9079,7 @@ async function chooseIdTemplateBackground(event, jobIdValue) {
 async function loadIdTemplate(_event, jobIdValue, fileNameValue) {
   numericId(jobIdValue);
   const templateId = numericId(fileNameValue);
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -8949,7 +9122,7 @@ async function saveIdTemplate(_event, jobIdValue, input = {}) {
     elements: template.elements || {},
     updatedAt: new Date().toISOString()
   };
-  const savedId = await writeSql((database) => {
+  const savedId = await writeProgramSql((database) => {
     const existingId = input.id
       ? Number(input.id)
       : Number(rowsFromDatabase(database, `
@@ -9000,7 +9173,7 @@ async function saveIdTemplate(_event, jobIdValue, input = {}) {
 }
 
 async function adminSubjectRows(jobId) {
-  return querySql(`
+  return queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -9098,7 +9271,7 @@ async function adminSubjectRows(jobId) {
 }
 
 async function adminListNames(jobId) {
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT name
     FROM subject_groups
     WHERE job_id = ${jobId}
@@ -9123,7 +9296,7 @@ async function adminListSubjectIds(jobId, listName) {
     return new Set();
   }
 
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT sgm.subject_id AS subjectId
     FROM subject_group_members sgm
     JOIN subject_groups sg ON sg.id = sgm.group_id
@@ -9390,7 +9563,7 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
     adminJobSummary(jobId),
     adminSubjectRows(jobId),
     adminListNames(jobId),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         shoot_stage AS shootStage,
@@ -9437,7 +9610,7 @@ async function getPictureDayPrep(_event, jobIdValue) {
   const [job, listNames, adminBatches, endOfDayImports] = await Promise.all([
     adminJobSummary(jobId),
     adminListNames(jobId),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         shoot_stage AS shootStage,
@@ -9455,7 +9628,7 @@ async function getPictureDayPrep(_event, jobIdValue) {
       ORDER BY created_at DESC, id DESC
       LIMIT 25;
     `),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         package_name AS packageName,
@@ -9602,7 +9775,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     fs.writeFileSync(absoluteOutputPath, content);
   }
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const statement = database.prepare(`
       INSERT INTO admin_item_batches (
         job_id,
@@ -9737,7 +9910,7 @@ async function createClient(_event, input = {}) {
   const zip = optionalText(input.zip, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeProgramSql((database) => {
     const statement = database.prepare(`
       INSERT INTO clients (
         reference_number,
@@ -10013,7 +10186,7 @@ async function importLegacyTrecsSchools(event, input = {}) {
     }
   }
 
-  const result = await writeSql((database) => {
+  const result = await writeProgramSql((database) => {
     let added = 0;
     let updated = 0;
     let skipped = 0;
@@ -10216,7 +10389,7 @@ async function syncCroppedImages(_event, jobIdValue) {
     throw new Error('Job folder was not found');
   }
 
-  const imageRows = await querySql(`
+  const imageRows = await queryJobSql(jobId, `
     SELECT
       id,
       filename,
@@ -10229,7 +10402,7 @@ async function syncCroppedImages(_event, jobIdValue) {
     scanCroppedImageFolder(jobRoot, folder.folder, folder.versionType, imageRows)
   ));
   const entries = scanned.flatMap((result) => result.entries);
-  const syncResult = await writeSql((database) => {
+  const syncResult = await writeJobSql(jobId, (database) => {
     const deleteStatement = database.prepare(`
       DELETE FROM image_versions
       WHERE image_asset_id = ?
@@ -10921,7 +11094,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
       .map((id) => packageSubjectsById.get(Number(id)))
       .filter(Boolean);
 
-    result = await writeSql((database) => {
+    result = await writeJobSql(jobId, (database) => {
       const jobRows = rowsFromDatabase(database, `
         SELECT id, root_path AS rootPath
         FROM jobs
@@ -11385,7 +11558,7 @@ async function createJob(_event, input = {}) {
   const retakeDate = optionalText(input.retakeDate, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeProgramSql((database) => {
     const clientRows = rowsFromDatabase(database, `
       SELECT id, display_name AS displayName, trecs_name AS trecsName
       FROM clients
@@ -11480,7 +11653,7 @@ async function updateJob(_event, jobIdValue, input = {}) {
   const retakeDate = optionalText(input.retakeDate, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT id
       FROM jobs
@@ -12043,7 +12216,7 @@ async function previewSchoolData(filePath) {
 
 async function chooseSchoolDataFile(event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const jobRows = await querySql(`
+  const jobRows = await queryProgramSql(`
     SELECT root_path AS rootPath
     FROM jobs
     WHERE id = ${jobId}
@@ -12143,7 +12316,7 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
   const dataRows = hasHeader ? allRows.slice(1) : allRows;
   const importedAt = new Date().toISOString();
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT
         j.id,
@@ -12499,7 +12672,7 @@ function duplicateSubjectIdsKey(subjects) {
 async function getDuplicateRecordReview(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const subjects = await querySql(`
+  const subjects = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -12540,7 +12713,7 @@ async function getDuplicateRecordReview(_event, jobIdValue) {
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key).push(subject);
   });
-  const reviews = await querySql(`SELECT name_key AS nameKey, subject_ids_key AS subjectIdsKey, reviewed_at AS reviewedAt FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
+  const reviews = await queryJobSql(jobId, `SELECT name_key AS nameKey, subject_ids_key AS subjectIdsKey, reviewed_at AS reviewedAt FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
   const reviewedKeys = new Map(reviews.map((row) => [`${row.nameKey}::${row.subjectIdsKey}`, row.reviewedAt]));
   const groups = [...byName.entries()]
     .filter(([_key, rows]) => rows.length > 1)
@@ -12585,7 +12758,7 @@ async function markDuplicateRecordReviewed(_event, jobIdValue, input = {}) {
   const nameKey = normalizeText(input.nameKey, 'Duplicate name key', 255);
   const subjectIdsKey = normalizeText(input.subjectIdsKey, 'Duplicate subject list', 1000);
   const reviewed = input.reviewed !== false;
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     if (reviewed) {
       database.run(`
         INSERT INTO duplicate_record_reviews (job_id, name_key, subject_ids_key, reviewed_at, notes)
@@ -12680,7 +12853,7 @@ async function previewRosterVerification(_event, jobIdValue, input = {}) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
   const imported = schoolDataImportRowsFromInput(input);
-  const subjects = (await querySql(`
+  const subjects = (await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.display_name AS displayName, s.external_id AS externalId, s.grade, s.homeroom,
            s.field1 AS field1, s.field2 AS field2,
@@ -12756,7 +12929,7 @@ async function applyRosterVerification(_event, jobIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
   const filePath = normalizeText(input.filePath, 'School data file', 1000);
   const importedAt = new Date().toISOString();
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT root_path AS rootPath FROM jobs WHERE id = ${jobId} LIMIT 1;`)[0];
     if (!job) throw new Error('Job not found');
     const copiedSourcePath = copySchoolDataSourceFile(filePath, resolveProjectPath(job.rootPath));
@@ -12824,10 +12997,10 @@ async function applyRosterVerification(_event, jobIdValue, input = {}) {
 async function getStaffVerificationSetup(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const jobs = await querySql(`SELECT j.id, c.display_name AS clientName, j.name AS jobName FROM jobs j JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;`);
+  const jobs = await queryProgramSql(`SELECT j.id, c.display_name AS clientName, j.name AS jobName FROM jobs j JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;`);
   const selectedJobId = jobId || jobs[0]?.id || null;
   if (!selectedJobId) return { jobs, selectedJobId: null, staff: [], homerooms: [], assignments: [] };
-  const staff = await querySql(`
+  const staff = await queryJobSql(selectedJobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.display_name AS displayName,
            s.grade, s.homeroom, s.subject_type AS subjectType, CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END AS hasPhoto
     FROM subjects s
@@ -12835,7 +13008,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND (LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff', 'teacher') OR UPPER(COALESCE(s.grade, '')) = 'FAC')
     ORDER BY s.last_name, s.first_name, s.legacy_ref_num;
   `);
-  const homerooms = (await querySql(`
+  const homerooms = (await queryJobSql(selectedJobId, `
     SELECT DISTINCT homeroom AS value
     FROM subjects
     WHERE job_id = ${Number(selectedJobId)}
@@ -12843,7 +13016,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
     ORDER BY homeroom;
   `)).map((row) => row.value);
-  const homeroomGradeRows = await querySql(`
+  const homeroomGradeRows = await queryJobSql(selectedJobId, `
     SELECT homeroom, grade
     FROM subjects
     WHERE job_id = ${Number(selectedJobId)}
@@ -12851,7 +13024,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
     ORDER BY homeroom, grade;
   `);
-  const assignments = await querySql(`SELECT id, subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, include_in_exports AS includeInExports, sort_order AS sortOrder, notes FROM staff_assignments WHERE job_id = ${Number(selectedJobId)} ORDER BY sort_order, role, homeroom;`);
+  const assignments = await queryJobSql(selectedJobId, `SELECT id, subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, include_in_exports AS includeInExports, sort_order AS sortOrder, notes FROM staff_assignments WHERE job_id = ${Number(selectedJobId)} ORDER BY sort_order, role, homeroom;`);
   const gradeTitleRows = await compositeGradeTitleRows(selectedJobId);
   const gradeTitles = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
   const reviewedByHomeroom = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), Number(row.reviewed || 0) > 0]));
@@ -12911,7 +13084,7 @@ async function saveStaffVerification(_event, jobIdValue, input = []) {
   const jobId = numericId(jobIdValue);
   const rows = Array.isArray(input) ? input : input.rows;
   const gradeTitles = Array.isArray(input) ? {} : input.gradeTitles || {};
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     database.run('DELETE FROM staff_assignments WHERE job_id = ?;', [jobId]);
     ensureCompositeGradeTitleTable(database);
     database.run('DELETE FROM composite_grade_titles WHERE job_id = ?;', [jobId]);
@@ -13457,7 +13630,7 @@ async function createSubject(_event, jobIdValue, input = {}) {
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `SELECT id FROM jobs WHERE id = ${jobId};`);
     if (!jobRows.length) {
       throw new Error('Job not found');
@@ -13539,7 +13712,7 @@ async function createBlankSubjects(_event, jobIdValue, countValue) {
   const jobId = numericId(jobIdValue);
   const count = normalizeRecordCount(countValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT
         j.id,
@@ -13614,7 +13787,9 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
   const enrollmentStatus = normalizeEnrollmentStatus(input.enrollmentStatus);
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Subject not found');
     const statement = database.prepare(`
       UPDATE subjects
       SET subject_type = ?,
@@ -13659,13 +13834,10 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
       throw new Error('Subject not found');
     }
 
-    return { id: subjectId };
+    return { id: subjectId, jobId };
   });
 
-  const rows = await querySql(`SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId};`);
-  if (rows.length) {
-    result.jobDatabasePath = await writeJobDatabaseSnapshot(rows[0].jobId);
-  }
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
@@ -13673,7 +13845,9 @@ async function updateSubjectNotes(_event, subjectIdValue, notesValue) {
   const subjectId = numericId(subjectIdValue);
   const notes = normalizeNotes(notesValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Subject not found');
     const statement = database.prepare(`
       UPDATE subjects
       SET notes = ?, updated_at = CURRENT_TIMESTAMP
@@ -13690,13 +13864,10 @@ async function updateSubjectNotes(_event, subjectIdValue, notesValue) {
       throw new Error('Subject not found');
     }
 
-    return { id: subjectId, notes };
+    return { id: subjectId, jobId, notes };
   });
 
-  const rows = await querySql(`SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId};`);
-  if (rows.length) {
-    result.jobDatabasePath = await writeJobDatabaseSnapshot(rows[0].jobId);
-  }
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
@@ -13704,7 +13875,9 @@ async function updateOrderNotes(_event, orderIdValue, notesValue) {
   const orderId = numericId(orderIdValue);
   const notes = normalizeNotes(notesValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM orders WHERE id = ${orderId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Order not found');
     const statement = database.prepare(`
       UPDATE orders
       SET notes = ?, updated_at = CURRENT_TIMESTAMP
@@ -13721,7 +13894,7 @@ async function updateOrderNotes(_event, orderIdValue, notesValue) {
       throw new Error('Order not found');
     }
 
-    return { id: orderId, notes };
+    return { id: orderId, jobId, notes };
   });
 }
 
@@ -13744,7 +13917,9 @@ async function updateOrderRenderStatus(_event, orderIdValue, statusValue) {
   const orderId = numericId(orderIdValue);
   const renderStatus = normalizeRenderStatus(statusValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM orders WHERE id = ${orderId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Order not found');
     if (renderStatus === 'queued') {
       const readiness = database.exec(`
         SELECT
@@ -13786,7 +13961,7 @@ async function updateOrderRenderStatus(_event, orderIdValue, statusValue) {
       throw new Error('Order not found');
     }
 
-    return { id: orderId, renderStatus };
+    return { id: orderId, jobId, renderStatus };
   });
 }
 
@@ -13798,9 +13973,9 @@ async function updateOrder(_event, orderIdValue, input = {}) {
   const notes = normalizeNotes(input.notes);
   const { raw, codes } = orderCodesFromInput(input.orderCodes);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const orderRows = rowsFromDatabase(database, `
-      SELECT id, subject_id AS subjectId
+      SELECT id, job_id AS jobId, subject_id AS subjectId
       FROM orders
       WHERE id = ${orderId};
     `);
@@ -13849,6 +14024,7 @@ async function updateOrder(_event, orderIdValue, input = {}) {
 
     return {
       id: orderId,
+      jobId: Number(orderRows[0].jobId),
       paidStatus,
       notes,
       packageCodes: raw,
@@ -13860,9 +14036,9 @@ async function updateOrder(_event, orderIdValue, input = {}) {
 async function deleteOrder(_event, orderIdValue) {
   const orderId = numericId(orderIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const orderRows = rowsFromDatabase(database, `
-      SELECT id
+      SELECT id, job_id AS jobId
       FROM orders
       WHERE id = ${orderId};
     `);
@@ -13883,7 +14059,7 @@ async function deleteOrder(_event, orderIdValue) {
     database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
     database.run('DELETE FROM orders WHERE id = ?;', [orderId]);
 
-    return { id: orderId, deleted: true };
+    return { id: orderId, jobId: Number(orderRows[0].jobId), deleted: true };
   });
 }
 
@@ -13941,7 +14117,7 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
   const jobId = numericId(jobIdValue);
   const barcode = normalizeBarcode(barcodeValue);
   const barcodeSql = sqlLiteral(barcode);
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -14023,7 +14199,7 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue
             OR COALESCE(s.grade, '') LIKE ${likeSql}
             OR COALESCE(s.homeroom, '') LIKE ${likeSql}
           )`;
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -14285,7 +14461,7 @@ const captureWatchers = new Map();
 async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourcePath = null) {
   const sourcePath = explicitSourcePath || latestImageInFolder(hotFolder);
 
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,
@@ -14337,6 +14513,7 @@ async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourc
 
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     return {
+      jobId: Number(row.jobId),
       scan: {
         id: idRows[0].id,
         subjectId,
@@ -14349,7 +14526,7 @@ async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourc
 }
 
 async function envelopeScanCount(jobId, subjectId) {
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT COUNT(*) AS scanCount
     FROM envelope_scans
     WHERE job_id = ${jobId}
@@ -14531,7 +14708,7 @@ async function createEnvelopeOrder(_event, jobIdValue, subjectIdValue, input = {
   const notes = normalizeNotes(input.notes);
   const { raw, codes } = orderCodesFromInput(input.orderCodes);
 
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const subjectRows = rowsFromDatabase(database, `
       SELECT id, primary_image_asset_id AS primaryImageAssetId
       FROM subjects
@@ -14728,7 +14905,7 @@ async function getEnvelopeScanPreview(_event, scanIdValue) {
 
 async function getUnlinkedEnvelopeScans(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  return querySql(`
+  return queryJobSql(jobId, `
     SELECT
       es.id,
       es.subject_id AS subjectId,
@@ -14753,7 +14930,7 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
   const scanId = numericId(scanIdValue);
   const subjectId = numericId(subjectIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         es.id,
@@ -14830,6 +15007,7 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
     }
 
     return {
+      jobId: Number(row.jobId),
       scan: {
         id: scanId,
         subjectId,
@@ -14846,9 +15024,9 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
 async function deleteEnvelopeScan(_event, scanIdValue) {
   const scanId = numericId(scanIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
-      SELECT id, order_id AS orderId, scan_path AS scanPath, status
+      SELECT id, job_id AS jobId, order_id AS orderId, scan_path AS scanPath, status
       FROM envelope_scans
       WHERE id = ${scanId}
       LIMIT 1;
@@ -14869,7 +15047,7 @@ async function deleteEnvelopeScan(_event, scanIdValue) {
       fs.unlinkSync(fullPath);
     }
 
-    return { id: scanId, deleted: true };
+    return { id: scanId, jobId: Number(row.jobId), deleted: true };
   });
 }
 
@@ -15231,7 +15409,7 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
   const sourcePath = pair.imagePath;
   const rawSourcePath = pair.rawPath;
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,
@@ -15517,7 +15695,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   }
 
   let captureSessionId = null;
-  await writeSql((database) => {
+  await writeJobSql(jobId, (database) => {
     captureSessionId = getOrCreateCaptureSession(database, {
       jobId,
       subjectId,
@@ -15798,7 +15976,7 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
@@ -15938,7 +16116,7 @@ async function resolveCaptureImage(_event, input = {}) {
     throw new Error('Choose a different student');
   }
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     // Capture stations can open databases created by older TRECS builds, or a
     // shared database can be replaced by an older station after startup.
     // Repair this feature's schema in the same transaction as the action.
@@ -16089,7 +16267,7 @@ async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue
   const rejected = Boolean(rejectedValue);
   const reason = rejected ? (optionalText(reasonValue, 500) || 'Rejected in linked image manager') : null;
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
       SELECT ia.id, ia.job_id AS jobId
       FROM image_assets ia
@@ -16168,7 +16346,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
       SELECT s.job_id AS jobId, s.legacy_ref_num AS ref, si.selected
       FROM subjects s
@@ -16230,7 +16408,7 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, s.legacy_ref_num AS ref, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
