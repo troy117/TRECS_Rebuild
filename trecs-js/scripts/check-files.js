@@ -3,10 +3,12 @@ const path = require('path');
 
 const required = [
   'src/main/main.js',
+  'src/main/portable-updater.js',
   'src/preload/preload.js',
   'src/renderer/index.html',
   'src/renderer/styles.css',
-  'src/renderer/renderer.js'
+  'src/renderer/renderer.js',
+  'scripts/publish-lab-update.js'
 ];
 
 let missing = 0;

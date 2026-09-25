@@ -48,7 +48,7 @@ Exposed API:
 - `getDashboardData()`
 - `getJobsData()`
 - `getJobDetail(jobId)`
-- `getImagePreview(imageId)`
+- `getImagePreview(jobId, imageId)`
 
 ### Renderer
 

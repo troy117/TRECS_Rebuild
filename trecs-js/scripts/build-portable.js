@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { atomicJson, createReleaseManifest, UPDATE_MANIFEST_NAME } = require('../src/main/portable-updater');
 
 const appRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(appRoot, '..');
@@ -93,7 +94,7 @@ function compileCameraCardSheetRenderer() {
   ]);
 }
 
-function main() {
+async function main() {
   compileAccessReader();
   compileDeliveryEnvelopeCoverRenderer();
   compileSchoolDirectoryRenderer();
@@ -110,7 +111,16 @@ function main() {
     '--x64',
     `--config.directories.output=${configuredOutput}`
   ], { cwd: appRoot });
-  console.log(`Single EXE created at ${path.join(configuredOutput, 'TRECS-Portable.exe')}`);
+  const executablePath = path.join(configuredOutput, 'TRECS-Portable.exe');
+  const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+  const manifest = createReleaseManifest(executablePath, packageJson.version);
+  const manifestPath = path.join(configuredOutput, UPDATE_MANIFEST_NAME);
+  await atomicJson(manifestPath, manifest);
+  console.log(`Single EXE created at ${executablePath}`);
+  console.log(`Verified update manifest created at ${manifestPath} (${manifest.buildId})`);
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

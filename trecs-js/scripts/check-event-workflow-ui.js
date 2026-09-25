@@ -59,7 +59,7 @@ async function findPhotographedFallStudent(window) {
   for (const job of fallJobs) {
     const detail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`);
     for (const subject of detail.subjects.filter((row) => row.imageAssetId)) {
-      const preview = await window.webContents.executeJavaScript(`window.trecs.getImagePreview(${Number(subject.imageAssetId)})`);
+      const preview = await window.webContents.executeJavaScript(`window.trecs.getImagePreview(${Number(job.id)}, ${Number(subject.imageAssetId)})`);
       if (preview?.dataUrl && !preview.missing) {
         const client = jobsData.clients.find((row) => row.displayName === detail.summary.clientName || row.trecsName === detail.summary.location);
         const packagePlan = jobsData.packagePlans.find((row) => row.name === detail.summary.packagePlan);

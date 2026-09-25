@@ -5,10 +5,11 @@ const workspaceRoot = path.resolve(__dirname, '../..');
 const temporaryRoot = path.join(workspaceRoot, 'exports', '_database-authority-smoke');
 const allowedParent = path.join(workspaceRoot, 'exports');
 const resultPath = path.join(workspaceRoot, 'exports', '_database-authority-smoke-result.json');
+let diagnostics = {};
 
 function writeFailure(error) {
   fs.mkdirSync(path.dirname(resultPath), { recursive: true });
-  fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: error?.stack || error?.message || String(error) }, null, 2));
+  fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: error?.stack || error?.message || String(error), diagnostics }, null, 2));
 }
 
 process.on('uncaughtException', writeFailure);
@@ -27,7 +28,7 @@ process.env.TRECS_DATA_ROOT = temporaryRoot;
 process.env.TRECS_UI_TEST = '1';
 fs.writeFileSync(resultPath, JSON.stringify({ ok: false, stage: 'starting' }, null, 2));
 
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, nativeImage } = require('electron');
 const initSqlJs = require('sql.js');
 require('../src/main/main.js');
 
@@ -112,42 +113,88 @@ async function run() {
       throw new Error(JSON.stringify({ misplaced, clientCount, jobCount, subjectCount, secondSubjectCount, storedSubject, storedSecondSubject }));
     }
 
-    const captureStressImages = 60;
+    const realisticStress = process.env.TRECS_CAPTURE_STRESS === '1';
+    const captureStressImages = realisticStress ? Math.max(2, Number(process.env.TRECS_CAPTURE_STRESS_IMAGES || 12)) : 60;
+    const extraSubjectsPerJob = realisticStress ? 2500 : 0;
+    if (realisticStress) {
+      for (const [fixturePath, fixtureJobId] of [[jobPath, Number(job.id)], [secondJobPath, Number(secondJob.id)]]) {
+        const database = new SQL.Database(fs.readFileSync(fixturePath));
+        const firstId = Number(rows(database, 'SELECT COALESCE(MAX(id), 0) + 1 FROM subjects;')[0][0]);
+        database.run('BEGIN');
+        const insert = database.prepare('INSERT INTO subjects (id, job_id, legacy_ref_num, first_name, last_name, grade, homeroom) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        for (let index = 0; index < extraSubjectsPerJob; index += 1) insert.run([firstId + index, fixtureJobId, `STRESS-${index}`, 'Synthetic', `Student ${index}`, String(index % 12), `Room ${index % 80}`]);
+        insert.free(); database.run('COMMIT');
+        fs.writeFileSync(fixturePath, Buffer.from(database.export())); database.close();
+      }
+    }
+    const fixtureWidth = realisticStress ? 6000 : 480;
+    const fixtureHeight = realisticStress ? 4000 : 600;
+    const bitmap = Buffer.alloc(fixtureWidth * fixtureHeight * 4, 255);
+    for (let index = 0; index < bitmap.length; index += 4) {
+      const shade = ((index * 1103515245) >>> 16) & 255;
+      bitmap[index] = shade; bitmap[index + 1] = (shade + 60) % 256; bitmap[index + 2] = (shade + 120) % 256;
+    }
+    const fixtureJpeg = nativeImage.createFromBitmap(bitmap, { width: fixtureWidth, height: fixtureHeight }).toJPEG(realisticStress ? 93 : 75);
+    if (nativeImage.createFromBuffer(fixtureJpeg).isEmpty()) throw new Error('Could not create the decodable camera fixture.');
+    const fixtureRaw = realisticStress ? Buffer.alloc(25 * 1024 * 1024, 0x5a) : Buffer.from([0x49, 0x49, 0x2a, 0x00]);
     const captureHotFolder = path.join(temporaryRoot, 'CaptureHotFolder');
     fs.mkdirSync(captureHotFolder, { recursive: true });
     await window.webContents.executeJavaScript(
       `window.trecs.startCaptureWatcher(${Number(job.id)}, ${Number(subject.id)}, ${JSON.stringify({ fileMode: 'jpg_raw', shootStage: 'main' })})`
     );
+    const programBeforeCapture = fs.readFileSync(programPath);
+    const programMtimeBeforeCapture = fs.statSync(programPath).mtimeMs;
+    const secondJobBeforeCapture = fs.readFileSync(secondJobPath);
+    const secondJobMtimeBeforeCapture = fs.statSync(secondJobPath).mtimeMs;
     for (let index = 1; index <= captureStressImages; index += 1) {
       const baseName = `stress-${String(index).padStart(3, '0')}`;
       const imagePath = path.join(captureHotFolder, `${baseName}.jpg`);
       const rawPath = path.join(captureHotFolder, `${baseName}.cr3`);
-      fs.writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
-      fs.writeFileSync(rawPath, Buffer.from([0x49, 0x49, 0x2a, 0x00]));
+      fs.writeFileSync(imagePath, fixtureJpeg);
+      fs.writeFileSync(rawPath, fixtureRaw);
       const stableTime = new Date(Date.now() - 2000);
       fs.utimesSync(imagePath, stableTime, stableTime);
       fs.utimesSync(rawPath, stableTime, stableTime);
     }
 
     let capturedImages = [];
-    const captureDeadline = Date.now() + 90000;
+    const captureStartedAt = Date.now();
+    const mainThreadDelays = [];
+    let previousTick = performance.now();
+    const heartbeat = setInterval(() => { const now = performance.now(); mainThreadDelays.push(Math.max(0, now - previousTick - 25)); previousTick = now; }, 25);
+    const captureDeadline = Date.now() + (realisticStress ? 240000 : 90000);
     while (Date.now() < captureDeadline) {
       capturedImages = await window.webContents.executeJavaScript(
-        `window.trecs.getCaptureSubjectImages(${Number(job.id)}, ${Number(subject.id)})`
+        `window.trecs.getCaptureSubjectImages(${Number(job.id)}, ${Number(subject.id)}, {metadataOnly: true})`
       );
       if (capturedImages.length === captureStressImages) break;
       await wait(250);
     }
+    clearInterval(heartbeat);
+    const captureElapsedMs = Date.now() - captureStartedAt;
     await window.webContents.executeJavaScript('window.trecs.stopCaptureWatcher()');
     if (capturedImages.length !== captureStressImages) {
       throw new Error(JSON.stringify({ expectedCaptureImages: captureStressImages, captureImageCount: capturedImages.length }));
     }
+    const programChangedByCapture = !programBeforeCapture.equals(fs.readFileSync(programPath)) || programMtimeBeforeCapture !== fs.statSync(programPath).mtimeMs;
+    const secondJobChangedByCapture = !secondJobBeforeCapture.equals(fs.readFileSync(secondJobPath)) || secondJobMtimeBeforeCapture !== fs.statSync(secondJobPath).mtimeMs;
+    if (programChangedByCapture || secondJobChangedByCapture) throw new Error(JSON.stringify({ programChangedByCapture, secondJobChangedByCapture }));
+    diagnostics = { realisticStress, captureStressImages, captureElapsedMs, averageCaptureMs: Math.round(captureElapsedMs / captureStressImages), programChangedByCapture, secondJobChangedByCapture,
+      fixture: { width: fixtureWidth, height: fixtureHeight, jpegBytes: fixtureJpeg.length, rawBytes: fixtureRaw.length },
+      mainThreadDelayP95Ms: Math.round(mainThreadDelays.sort((a, b) => a - b)[Math.floor(mainThreadDelays.length * 0.95)] || 0), mainThreadDelayMaxMs: Math.round(Math.max(0, ...mainThreadDelays)) };
 
-    const captureReadIterations = 150;
+    const captureReadIterations = realisticStress ? 30 : 150;
+    let maximumDecodedCapturePreviews = 0;
+    const previewReadTimings = [];
     for (let iteration = 0; iteration < captureReadIterations; iteration += 1) {
+      const readStartedAt = performance.now();
       const captureImages = await window.webContents.executeJavaScript(
         `window.trecs.getCaptureSubjectImages(${Number(job.id)}, ${Number(subject.id)})`
       );
+      previewReadTimings.push(performance.now() - readStartedAt);
+      const decodedPreviews = captureImages.filter((image) => Boolean(image.dataUrl)).length;
+      maximumDecodedCapturePreviews = Math.max(maximumDecodedCapturePreviews, decodedPreviews);
+      if (decodedPreviews < 1 || decodedPreviews > 2) throw new Error(JSON.stringify({ iteration, decodedPreviews, expected: 'one or two decodable previews' }));
       if (captureImages.length !== captureStressImages) {
         throw new Error(JSON.stringify({ iteration, captureImageCount: captureImages.length }));
       }
@@ -159,7 +206,7 @@ async function run() {
     fs.mkdirSync(collisionPackageDatabaseFolder, { recursive: true });
     fs.mkdirSync(collisionPackageImagesFolder, { recursive: true });
     const collisionImageName = '20001-collision.jpg';
-    fs.writeFileSync(path.join(collisionPackageImagesFolder, collisionImageName), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    fs.writeFileSync(path.join(collisionPackageImagesFolder, collisionImageName), fixtureJpeg);
     const collisionDatabase = new SQL.Database(fs.readFileSync(secondJobPath));
     collisionDatabase.run(`
       INSERT INTO image_assets (id, job_id, current_path, original_path, filename, source, status, captured_at)
@@ -207,6 +254,13 @@ async function run() {
       JOIN subjects s ON s.primary_image_asset_id = ia.id
       WHERE s.id = ${Number(secondSubject.id)};
     `)[0];
+    const foreignPreviewPath = rows(firstJobAfterCollision, 'SELECT current_path FROM image_assets ORDER BY id LIMIT 1;')[0]?.[0];
+    const importedCollisionImageId = Number(importedCollisionImage?.[0]);
+    secondJobAfterCollision.run(`
+      INSERT INTO image_versions (image_asset_id, version_type, path, width, height)
+      VALUES (?, 'cropped_med', ?, 640, 800);
+    `, [importedCollisionImageId, foreignPreviewPath]);
+    fs.writeFileSync(secondJobPath, Buffer.from(secondJobAfterCollision.export()));
     firstJobAfterCollision.close();
     secondJobAfterCollision.close();
     if (firstJobImageCountAfterCollision !== captureStressImages
@@ -217,6 +271,31 @@ async function run() {
       throw new Error(JSON.stringify({ firstJobImageCountAfterCollision, importedCollisionImage, collisionImport }));
     }
 
+    const isolatedPreview = await window.webContents.executeJavaScript(
+      `window.trecs.getImagePreview(${Number(secondJob.id)}, ${importedCollisionImageId})`
+    );
+    if (!isolatedPreview
+      || isolatedPreview.versionType !== 'original'
+      || isolatedPreview.path === foreignPreviewPath) {
+      throw new Error(JSON.stringify({ isolatedPreview, foreignPreviewPath }));
+    }
+
+    await window.webContents.executeJavaScript(`window.trecs.createSubject(${Number(secondJob.id)}, ${JSON.stringify({
+      ref: '20002',
+      firstName: 'ISOLATION',
+      lastName: 'CHECK'
+    })})`);
+    const secondJobAfterIsolationSave = new SQL.Database(fs.readFileSync(secondJobPath));
+    const foreignVersionsAfterSave = Number(rows(secondJobAfterIsolationSave, `
+      SELECT COUNT(*)
+      FROM image_versions
+      WHERE path = ${JSON.stringify(foreignPreviewPath)};
+    `)[0]?.[0] || 0);
+    secondJobAfterIsolationSave.close();
+    if (foreignVersionsAfterSave !== 0) {
+      throw new Error(JSON.stringify({ foreignVersionsAfterSave, foreignPreviewPath }));
+    }
+
     const firstJobBytesBeforeDetail = fs.readFileSync(jobPath);
     const secondJobBytesBeforeDetail = fs.readFileSync(secondJobPath);
     const jobDetailReadStartedAt = Date.now();
@@ -224,6 +303,16 @@ async function run() {
     const jobDetailReadMs = Date.now() - jobDetailReadStartedAt;
     const detailChangedFirstJob = !firstJobBytesBeforeDetail.equals(fs.readFileSync(jobPath));
     const detailChangedSecondJob = !secondJobBytesBeforeDetail.equals(fs.readFileSync(secondJobPath));
+    if (detailChangedFirstJob) {
+      const before = new SQL.Database(firstJobBytesBeforeDetail);
+      const after = new SQL.Database(fs.readFileSync(jobPath));
+      diagnostics.detailTableChanges = rows(after, "SELECT name FROM sqlite_master WHERE type = 'table'").map(([name]) => {
+        const query = `SELECT * FROM "${String(name).replace(/"/g, '""')}"`;
+        const oldRows = rows(before, query); const newRows = rows(after, query);
+        return JSON.stringify(oldRows) === JSON.stringify(newRows) ? null : { table: name, before: oldRows.slice(0, 2), after: newRows.slice(0, 2), beforeCount: oldRows.length, afterCount: newRows.length };
+      }).filter(Boolean);
+      before.close(); after.close();
+    }
     if (!readOnlyJobDetail?.summary
       || Number(readOnlyJobDetail.summary.id) !== Number(job.id)
       || detailChangedFirstJob
@@ -235,14 +324,24 @@ async function run() {
       }));
     }
 
+    const recoveryBytes = fs.readFileSync(jobPath);
+    await require('../src/main/storage-safety').atomicWriteFile(jobPath, recoveryBytes, { backup: true, backupIntervalMs: 0 });
+    const backupList = await window.webContents.executeJavaScript(`window.trecs.listStorageBackups(${Number(job.id)})`);
+    const recoveryBackup = backupList.backups.find((backup) => fs.readFileSync(backup.path).equals(recoveryBytes));
+    if (!recoveryBackup) throw new Error('The expected recovery checkpoint was not listed.');
     fs.rmSync(jobPath, { force: true });
-    const wipedJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`);
+    let missingDatabaseBlocked = false;
+    try { await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`); }
+    catch (error) { missingDatabaseBlocked = /database|backup|restore/i.test(error.message); }
+    if (!missingDatabaseBlocked || fs.existsSync(jobPath)) throw new Error('A missing job with recovery backups must not silently become an empty database.');
+    const restoreResult = await window.webContents.executeJavaScript(`window.trecs.restoreStorageBackup(${JSON.stringify({ jobId: Number(job.id), backupPath: recoveryBackup.path })})`);
+    const restoredJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(job.id)})`);
     const untouchedJobDetail = await window.webContents.executeJavaScript(`window.trecs.getJobDetail(${Number(secondJob.id)})`);
-    if (wipedJobDetail.subjects.length !== 0 || untouchedJobDetail.subjects.length !== 1 || !fs.existsSync(jobPath)) {
+    if (!restoreResult.restored || restoredJobDetail.subjects.length !== 1 + extraSubjectsPerJob || untouchedJobDetail.subjects.length !== 2 + extraSubjectsPerJob || !fs.existsSync(jobPath)) {
       throw new Error(JSON.stringify({
-        wipedSubjects: wipedJobDetail.subjects.length,
+        restoredSubjects: restoredJobDetail.subjects.length,
         untouchedSubjects: untouchedJobDetail.subjects.length,
-        recreatedDatabase: fs.existsSync(jobPath)
+        restoredDatabase: fs.existsSync(jobPath)
       }));
     }
 
@@ -294,11 +393,25 @@ async function run() {
       endOfDayHasBaseline: endOfDayPreview.hasBaseline,
       captureStressImages,
       captureReadIterations,
+      maximumDecodedCapturePreviews,
+      programDataWritesDuringCapture: 0,
+      unrelatedJobWritesDuringCapture: 0,
+      realisticStress,
+      extraSubjectsPerJob,
+      fixture: { width: fixtureWidth, height: fixtureHeight, jpegBytes: fixtureJpeg.length, rawBytes: fixtureRaw.length },
+      captureElapsedMs,
+      averageCaptureMs: Math.round(captureElapsedMs / captureStressImages),
+      previewReadAverageMs: Math.round(previewReadTimings.reduce((sum, value) => sum + value, 0) / previewReadTimings.length),
+      mainThreadDelayP95Ms: Math.round(mainThreadDelays.sort((a, b) => a - b)[Math.floor(mainThreadDelays.length * 0.95)] || 0),
+      mainThreadDelayMaxMs: Math.round(Math.max(0, ...mainThreadDelays)),
       collisionImageRemappedTo: Number(importedCollisionImage[0]),
+      isolatedPreviewVersion: isolatedPreview.versionType,
+      foreignVersionsAfterSave,
       jobDetailReadMs,
       jobDetailDatabaseWrites: 0,
       dashboardDoubleClickJob: dashboardOpenResult.workspaceTitle,
-      wipedJobSubjects: wipedJobDetail.subjects.length,
+      missingDatabaseBlocked,
+      restoredJobSubjects: restoredJobDetail.subjects.length,
       untouchedJobSubjects: untouchedJobDetail.subjects.length,
       jobDatabases: [jobPath, secondJobPath]
     };

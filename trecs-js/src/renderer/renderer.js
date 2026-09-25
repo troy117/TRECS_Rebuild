@@ -505,6 +505,7 @@ let jobsState = {
   lastCroppedImageSync: null,
   lastCroppedMediumGeneration: null,
   imagePreviewCache: new Map(),
+  jobDetailRequestId: 0,
   imageHoverToken: 0,
   lightboxImageIds: [],
   lightboxImageId: null,
@@ -625,6 +626,10 @@ if (window.trecs && typeof window.trecs.onBatchRenderProgress === 'function') {
     const total = Number(payload.total || 0); const current = Number(payload.current || 0);
     batchRenderProgress.max = total || 100; batchRenderProgress.value = total ? current : 0;
     batchRenderStatus.textContent = payload.message || 'Batch rendering...';
+    if (payload.batchId && jobsState.activeProductionBatchId !== payload.batchId) {
+      jobsState.activeProductionBatchId = payload.batchId;
+      loadBatchRenderSetup().catch(() => {});
+    }
   });
 }
 
@@ -1071,9 +1076,13 @@ function renderJobsScreen() {
 }
 
 function selectJobSummary(jobId) {
+  jobsState.jobDetailRequestId += 1;
   jobsState.selectedJobId = jobId;
   jobsState.detail = null;
   jobsState.lastLaptopPackage = null;
+  jobsState.imagePreviewCache.clear();
+  hideImageHoverPreview();
+  closeImageLightbox();
 
   jobsScreenTableBody.querySelectorAll('[data-job-id]').forEach((row) => {
     row.classList.toggle('selected-row', Number(row.dataset.jobId) === jobId);
@@ -1092,7 +1101,11 @@ async function openJob(jobId) {
   }
   if (!(await acquireUiJobLock(jobId))) return;
   try {
-    await loadJobDetail(jobId);
+    const loaded = await loadJobDetail(jobId);
+    if (!loaded) {
+      await releaseUiJobLocks(jobId);
+      return;
+    }
   } catch (error) {
     await releaseUiJobLocks(jobId);
     throw error;
@@ -1164,7 +1177,8 @@ function showEndOfDaySuccess(result) {
     title: 'End of Day Complete',
     detail: [
       `${formatNumber(capturedImages)} captured image${capturedImages === 1 ? '' : 's'} included.`,
-      result?.packagePath ? `Saved to: ${result.packagePath}` : ''
+      result?.packagePath ? `Saved to: ${result.packagePath}` : '',
+      result?.counts?.retainedFiles?.length ? `${result.counts.retainedFiles.length} source file(s) are still on the laptop because cleanup could not finish. The package is complete. Run End of Day again to retry cleanup.` : ''
     ].filter(Boolean).join('\n')
   });
 }
@@ -1589,6 +1603,7 @@ function renderEndOfDayReview(review) {
   const editedSubjects = changes.editedSubjects || [];
   const includedNewSubjectCount = includedEndOfDayNewSubjectCount(newSubjects);
   const includedEditedSubjectCount = includedEndOfDayEditedSubjectCount(editedSubjects);
+  const conflicts = jobsState.endOfDayReview?.conflicts || [];
 
   endOfDayReview.innerHTML = `
     <div class="end-of-day-summary">
@@ -1601,11 +1616,21 @@ function renderEndOfDayReview(review) {
     ${review.hasBaseline ? '' : '<div class="end-of-day-warning">No onsite-start baseline was found, so student edit comparisons are not available for this job.</div>'}
     ${renderEndOfDaySection('wrongReferenceMoves', 'Images Photographed Under Wrong Reference', wrongReferenceMoves.length, renderEndOfDayWrongReferenceMoves(wrongReferenceMoves))}
     ${renderEndOfDayWrongReferenceConfirmation(wrongReferenceMoves)}
+    ${renderEndOfDaySection('newSubjects', 'New Student Records', newSubjects.length, renderEndOfDayNewSubjects(newSubjects))}
     ${renderEndOfDaySection('editedSubjects', 'Student Database Edits', editedSubjects.length, renderEndOfDayEditedSubjects(editedSubjects))}
+    ${conflicts.length ? renderEndOfDaySection('conflicts', 'Office Changes Requiring Review', conflicts.length, renderEndOfDayConflicts(conflicts)) : ''}
   `;
   confirmEndOfDayButton.disabled = wrongReferenceMoves.length > 0
     && jobsState.endOfDayReview?.wrongReferenceConfirmed !== true;
   bindEndOfDayReviewControls(review);
+}
+
+function renderEndOfDayConflicts(conflicts) {
+  const resolutions = jobsState.endOfDayReview?.resolutions || [];
+  return `<div class="end-of-day-warning">The office record changed after this laptop was prepared. Choose which value to keep for each conflict. Photo IDs identify different selections.</div><ul class="end-of-day-change-list">${conflicts.map((conflict, index) => {
+    const resolution = resolutions.find((row) => row.key === conflict.key);
+    return `<li><strong>${escapeHtml(`${conflict.ref || ''} ${conflict.name || ''}`)}</strong><p>${escapeHtml(conflict.field)}</p>${conflict.kind === 'blocked' ? '<p>Resolve this record in the job, then reopen this package.</p>' : `<p>At laptop setup: ${escapeHtml(shortChangeValue(conflict.before))}<br>Current office value: ${escapeHtml(shortChangeValue(conflict.currentLabel || conflict.current))}<br>Onsite value: ${escapeHtml(shortChangeValue(conflict.after))}</p><select data-eod-conflict="${index}"><option value="">Choose a resolution</option>${conflict.kind === 'new' ? `<option value="link" ${resolution?.choice === 'link' ? 'selected' : ''}>Use existing office record; attach the onsite photos</option>` : `<option value="keep" ${resolution?.choice === 'keep' ? 'selected' : ''}>Keep current office value</option><option value="import" ${resolution?.choice === 'import' ? 'selected' : ''}>Use onsite value</option>`}</select>`}</li>`;
+  }).join('')}</ul>`;
 }
 
 function updateEndOfDaySummaryOnly(review) {
@@ -1613,6 +1638,14 @@ function updateEndOfDaySummaryOnly(review) {
 }
 
 function bindEndOfDayReviewControls(review) {
+  endOfDayReview.querySelectorAll('[data-eod-conflict]').forEach((select) => {
+    select.addEventListener('change', () => {
+      const state = jobsState.endOfDayReview;
+      const conflict = state.conflicts[Number(select.dataset.eodConflict)];
+      state.resolutions = (state.resolutions || []).filter((row) => row.key !== conflict.key);
+      if (select.value) state.resolutions.push({ key: conflict.key, choice: select.value, expectedCurrent: conflict.current });
+    });
+  });
   const wrongReferenceConfirmation = endOfDayReview.querySelector('[data-eod-confirm-wrong-reference]');
   if (wrongReferenceConfirmation) {
     wrongReferenceConfirmation.checked = jobsState.endOfDayReview?.wrongReferenceConfirmed === true;
@@ -1756,6 +1789,8 @@ function openEndOfDayPackageReview(choice) {
     mode: 'approve',
     packageFolder: choice.folderPath,
     review,
+    conflicts: choice.importReview?.conflicts || [],
+    resolutions: [],
     wrongReferenceConfirmed: false,
     adjustments: createEndOfDayAdjustments(review)
   };
@@ -1793,8 +1828,16 @@ async function confirmEndOfDayPackage() {
     if (reviewState.mode === 'approve') {
       result = await trecsApi('approveEndOfDayPackage').approveEndOfDayPackage({
         packageFolder: reviewState.packageFolder,
-        adjustments: reviewState.adjustments || currentEndOfDayAdjustments()
+        adjustments: reviewState.adjustments || currentEndOfDayAdjustments(),
+        resolutions: reviewState.resolutions || []
       });
+      if (result.requiresReview) {
+        reviewState.conflicts = result.conflicts;
+        renderEndOfDayReview(reviewState.review);
+        confirmEndOfDayButton.textContent = 'Approve End of Day';
+        endOfDayStatus.textContent = 'Resolve the office changes shown below before approving.';
+        return;
+      }
     } else {
       result = await trecsApi('createEndOfDayPackage').createEndOfDayPackage(
         reviewState.jobId,
@@ -3114,14 +3157,53 @@ async function submitAddRecords(event) {
   }
 }
 
-async function imagePreviewForId(imageId) {
-  if (!imageId) {
+async function imagePreviewForId(imageId, jobId = jobsState.selectedJobId, size = 'display') {
+  if (!jobId || !imageId) {
     return null;
   }
-  if (!jobsState.imagePreviewCache.has(imageId)) {
-    jobsState.imagePreviewCache.set(imageId, trecsApi('getImagePreview').getImagePreview(imageId));
+  const cache = jobsState.imagePreviewCache;
+  const cacheKey = `${Number(jobId)}:${Number(imageId)}:${size}`;
+  const previous = cache.get(cacheKey);
+  // Short revalidation allows edits made by another workstation to show up;
+  // the main cache validates disk mtime/size and only decodes changed content.
+  if (previous && (!previous.loadedAt || Date.now() - previous.loadedAt < 1000)) {
+    cache.delete(cacheKey); cache.set(cacheKey, previous);
+    return previous.promise;
   }
-  return jobsState.imagePreviewCache.get(imageId);
+  cache.delete(cacheKey);
+  const entry = { loadedAt: 0, bytes: 0 };
+  entry.promise = trecsApi('getImagePreview').getImagePreview(jobId, imageId, { size }).then((preview) => {
+    if (!preview || preview.missing || !preview.dataUrl || size === 'original') {
+      if (cache.get(cacheKey) === entry) cache.delete(cacheKey);
+    } else {
+      entry.loadedAt = Date.now();
+      entry.bytes = preview.dataUrl.length * 2;
+      let total = [...cache.values()].reduce((sum, value) => sum + value.bytes, 0);
+      while (cache.size > 64 || total > 24 * 1024 * 1024) {
+        const key = cache.keys().next().value;
+        total -= cache.get(key).bytes;
+        cache.delete(key);
+      }
+    }
+    return preview;
+  }).catch((error) => {
+    if (cache.get(cacheKey) === entry) cache.delete(cacheKey);
+    throw error;
+  });
+  cache.set(cacheKey, entry);
+  return entry.promise;
+}
+
+function invalidateImagePreview(imageId, jobId = jobsState.selectedJobId) {
+  for (const key of jobsState.imagePreviewCache.keys()) {
+    if (key.startsWith(`${Number(jobId)}:${Number(imageId)}:`)) jobsState.imagePreviewCache.delete(key);
+  }
+}
+
+function imagePanelRequest(panel, jobId = jobsState.selectedJobId) {
+  const token = Symbol('preview');
+  panel.previewToken = token;
+  return () => panel.isConnected && panel.previewToken === token && Number(jobId) === Number(jobsState.selectedJobId);
 }
 
 function fitRotatedImageToFrame(image) {
@@ -3251,24 +3333,29 @@ function renderLinkedImageCard(image, options = {}) {
 
 async function loadLinkedImageThumbnails(root = document) {
   const thumbs = Array.from(root.querySelectorAll('.linked-image-thumb[data-open-linked-image]'));
-  await Promise.all(thumbs.map(async (button) => {
+  const jobId = jobsState.selectedJobId;
+  for (const button of thumbs) {
+    if (!button.isConnected || jobId !== jobsState.selectedJobId) continue;
+    const isCurrent = imagePanelRequest(button, jobId);
     const imageId = Number(button.dataset.openLinkedImage);
     if (!imageId) {
-      return;
+      continue;
     }
     try {
-      const preview = await imagePreviewForId(imageId);
+      const preview = await imagePreviewForId(imageId, jobId, 'thumbnail');
+      if (!isCurrent()) continue;
       if (!preview || preview.missing || !preview.dataUrl) {
         button.innerHTML = '<span>No preview</span>';
-        return;
+        continue;
       }
       button.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Linked image thumbnail')}">`;
       setLandscapeRotation(button.querySelector('img'));
     } catch (error) {
+      if (!isCurrent()) continue;
       button.innerHTML = '<span>No preview</span>';
       console.error(error);
     }
-  }));
+  }
 }
 
 function bindLinkedImageCards(root = document) {
@@ -3312,7 +3399,8 @@ function renderImageLightboxActions() {
   if (canSelect) {
     const linkedImage = linkedImagesForSubject(jobsState.lightboxSubjectId)
       .find((image) => Number(image.imageAssetId) === Number(jobsState.lightboxImageId));
-    selectLightboxImageButton.disabled = Boolean(linkedImage && (linkedImage.selected || linkedImage.status === 'rejected'));
+    selectLightboxImageButton.disabled = jobsState.lightboxLoadedImageId !== jobsState.lightboxImageId
+      || Boolean(linkedImage && (linkedImage.selected || linkedImage.status === 'rejected'));
     selectLightboxImageButton.textContent = linkedImage && linkedImage.status === 'rejected'
       ? 'Rejected Image'
       : linkedImage && linkedImage.selected
@@ -3329,6 +3417,9 @@ async function openImageLightbox(imageId, options = {}) {
   const subjectId = options.subjectId || jobsState.selectedSubjectId || null;
   jobsState.lightboxSubjectId = subjectId;
   jobsState.lightboxImageId = Number(imageId);
+  jobsState.lightboxLoadedImageId = null;
+  const jobId = jobsState.selectedJobId;
+  const isCurrent = imagePanelRequest(imageLightboxContent, jobId);
   jobsState.lightboxImageIds = options.imageIds && options.imageIds.length
     ? options.imageIds.map(Number)
     : lightboxImagesForSubject(subjectId, imageId);
@@ -3340,17 +3431,23 @@ async function openImageLightbox(imageId, options = {}) {
   renderImageLightboxActions();
 
   try {
-    const preview = await imagePreviewForId(imageId);
+    const preview = await imagePreviewForId(imageId, jobId, 'original');
+    if (!isCurrent() || imageLightboxModal.hidden || jobsState.lightboxImageId !== Number(imageId)) return;
     if (!preview || preview.missing || !preview.dataUrl) {
       imageLightboxContent.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
       return;
     }
 
     imageLightboxTitle.textContent = preview.filename || 'Image Preview';
+    jobsState.lightboxLoadedImageId = Number(imageId);
     imageLightboxContent.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Image preview')}">`;
-    setLandscapeRotation(imageLightboxContent.querySelector('img'));
+    // Camera originals are stored as landscape pixels and rotated for display.
+    // Fit against the post-rotation dimensions so the visual top and bottom
+    // stay inside the lightbox. Portrait crops already fit through CSS.
+    setLandscapeRotation(imageLightboxContent.querySelector('img'), { fitRotatedToFrame: true });
     renderImageLightboxActions();
   } catch (error) {
+    if (!isCurrent()) return;
     imageLightboxContent.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
   }
@@ -3361,6 +3458,8 @@ function closeImageLightbox() {
     imageLightboxModal.hidden = true;
     jobsState.lightboxImageIds = [];
     jobsState.lightboxImageId = null;
+    jobsState.lightboxLoadedImageId = null;
+    imageLightboxContent.previewToken = null;
     jobsState.lightboxSubjectId = null;
     imageLightboxContent.innerHTML = '<div class="empty-state">Loading image...</div>';
   }
@@ -3380,15 +3479,19 @@ function moveLightboxImage(offset) {
 }
 
 async function selectCurrentLightboxImage() {
-  if (!jobsState.lightboxSubjectId || !jobsState.lightboxImageId) {
+  if (!jobsState.lightboxSubjectId || !jobsState.lightboxImageId || jobsState.lightboxLoadedImageId !== jobsState.lightboxImageId) {
     return;
   }
   const originalText = selectLightboxImageButton.textContent;
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.lightboxSubjectId;
+  const imageId = jobsState.lightboxImageId;
   selectLightboxImageButton.disabled = true;
   selectLightboxImageButton.textContent = 'Saving...';
   try {
-    await saveSubjectImageLink(jobsState.lightboxSubjectId, jobsState.lightboxImageId, null);
-    await openImageLightbox(jobsState.lightboxImageId, { subjectId: jobsState.lightboxSubjectId });
+    await saveSubjectImageLink(subjectId, imageId, null);
+    if (jobsState.selectedJobId !== jobId || jobsState.lightboxSubjectId !== subjectId || jobsState.lightboxImageId !== imageId) return;
+    await openImageLightbox(imageId, { subjectId });
   } catch (error) {
     selectLightboxImageButton.textContent = 'Failed';
     console.error(error);
@@ -3480,6 +3583,9 @@ async function loadWorkspacePhoto(imageId) {
   if (!panel) {
     return;
   }
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.selectedSubjectId;
+  const isCurrent = imagePanelRequest(panel, jobId);
 
   if (!imageId) {
     panel.innerHTML = '<div class="empty-state">No photo linked.</div>';
@@ -3487,7 +3593,8 @@ async function loadWorkspacePhoto(imageId) {
   }
 
   try {
-    const preview = await imagePreviewForId(imageId);
+    const preview = await imagePreviewForId(imageId, jobId);
+    if (!isCurrent()) return;
     if (!preview || preview.missing || !preview.dataUrl) {
       panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
       return;
@@ -3497,9 +3604,10 @@ async function loadWorkspacePhoto(imageId) {
     const image = panel.querySelector('img');
     setLandscapeRotation(image);
     image.addEventListener('dblclick', () => openImageLightbox(imageId, {
-      subjectId: jobsState.selectedSubjectId
+      subjectId
     }));
   } catch (error) {
+    if (!isCurrent()) return;
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
   }
@@ -3510,6 +3618,8 @@ async function loadEnvelopeSubjectPhoto(imageId) {
   if (!panel) {
     return;
   }
+  const jobId = jobsState.selectedJobId;
+  const isCurrent = imagePanelRequest(panel, jobId);
 
   if (!imageId) {
     panel.innerHTML = '<div class="empty-state">No photo linked.</div>';
@@ -3517,7 +3627,8 @@ async function loadEnvelopeSubjectPhoto(imageId) {
   }
 
   try {
-    const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+    const preview = await imagePreviewForId(imageId, jobId, 'thumbnail');
+    if (!isCurrent()) return;
     if (!preview || preview.missing || !preview.dataUrl) {
       panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
       return;
@@ -3525,6 +3636,7 @@ async function loadEnvelopeSubjectPhoto(imageId) {
 
     panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename)}">`;
   } catch (error) {
+    if (!isCurrent()) return;
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
   }
@@ -4197,14 +4309,15 @@ function renderCaptureCompare() {
   }
   if (!selectedImage && !mostRecent) {
     selectedImage = images.find((image) => image.selected) || images[1] || images[0] || null;
-    mostRecent = images.find((image) => !selectedImage || Number(image.id) !== Number(selectedImage.id)) || null;
+    mostRecent = images[0] || null;
+    if (Number(selectedImage?.id) === Number(mostRecent?.id)) selectedImage = null;
     jobsState.captureCompareSlotIds = {
       previousId: selectedImage ? selectedImage.id : null,
       recentId: mostRecent ? mostRecent.id : null
     };
   }
   const slots = [
-    { image: selectedImage, label: 'Previous Image' },
+    { image: selectedImage, label: 'Previous Best' },
     { image: mostRecent, label: 'Most Recent Image' }
   ];
   captureCompareGrid.innerHTML = slots.map((slot) => {
@@ -4253,8 +4366,12 @@ async function loadCaptureSubjectPhoto(imageId) {
     return;
   }
 
+  const jobId = jobsState.selectedJobId;
+  const isCurrent = imagePanelRequest(panel, jobId);
   try {
-    const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+    const existing = (jobsState.captureImages || []).find((image) => Number(image.id) === Number(imageId) && image.dataUrl);
+    const preview = existing || await imagePreviewForId(imageId, jobId, 'thumbnail');
+    if (!isCurrent()) return;
     if (!preview || preview.missing || !preview.dataUrl) {
       panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
       return;
@@ -4263,6 +4380,7 @@ async function loadCaptureSubjectPhoto(imageId) {
     panel.innerHTML = `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Student photo')}">`;
     setLandscapeRotation(panel.querySelector('img'));
   } catch (error) {
+    if (!isCurrent()) return;
     panel.innerHTML = '<div class="empty-state">Preview unavailable.</div>';
     console.error(error);
   }
@@ -4346,6 +4464,8 @@ function bindCaptureSubjectForm() {
 }
 
 async function loadCaptureImages(options = {}) {
+  const requestId = (jobsState.captureLoadRequest || 0) + 1;
+  jobsState.captureLoadRequest = requestId;
   if (!jobsState.captureSubject) {
     jobsState.captureImages = [];
     jobsState.captureCompareSlotIds = null;
@@ -4353,16 +4473,26 @@ async function loadCaptureImages(options = {}) {
     return;
   }
 
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.captureSubject.id;
+  const baselineIds = new Set((jobsState.captureImages || []).map((image) => Number(image.id)));
   try {
-    jobsState.captureImages = await trecsApi('getCaptureSubjectImages').getCaptureSubjectImages(
-      jobsState.selectedJobId,
-      jobsState.captureSubject.id
-    );
+    const images = await trecsApi('getCaptureSubjectImages').getCaptureSubjectImages(jobId, subjectId);
+    if (requestId !== jobsState.captureLoadRequest || jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id) return;
+    const current = new Map((jobsState.captureImages || []).map((image) => [Number(image.id), image]));
+    jobsState.captureImages = images.map((image) => {
+      const recent = current.get(Number(image.id));
+      current.delete(Number(image.id));
+      return recent ? { ...recent, ...image, dataUrl: image.dataUrl || recent.dataUrl } : image;
+    }).concat([...current.values()].filter((image) => !baselineIds.has(Number(image.id))))
+      .sort((first, second) => Number(second.id) - Number(first.id));
     if (!options.preserveSlots) {
       jobsState.captureCompareSlotIds = null;
     }
     renderCaptureCompare();
+    retainCaptureSlotPreviews();
   } catch (error) {
+    if (requestId !== jobsState.captureLoadRequest || jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id) return;
     captureCompareGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message || 'Could not load capture images.')}</div>`;
     console.error(error);
   }
@@ -4375,10 +4505,15 @@ async function lookupCaptureSubject() {
   }
 
   captureEntryStatus.textContent = '';
+  const requestId = (jobsState.captureLookupRequest || 0) + 1;
+  jobsState.captureLookupRequest = requestId;
+  const jobId = jobsState.selectedJobId;
   try {
-    const result = await trecsApi('findSubjectByBarcode').findSubjectByBarcode(jobsState.selectedJobId, barcode);
+    const result = await trecsApi('findSubjectByBarcode').findSubjectByBarcode(jobId, barcode);
+    if (requestId !== jobsState.captureLookupRequest || jobId !== jobsState.selectedJobId) return;
     await setCaptureSubject(result.subject, true);
   } catch (error) {
+    if (requestId !== jobsState.captureLookupRequest || jobId !== jobsState.selectedJobId) return;
     jobsState.captureSubject = null;
     jobsState.captureSubjectEditId = null;
     jobsState.captureCompareSlotIds = null;
@@ -4398,14 +4533,20 @@ async function setCaptureSubject(subject, focusBarcode = false) {
   setCaptureRosterOpen(false);
   const shouldEditBlank = isBlankCaptureSubject(subject);
   jobsState.captureSubject = subject;
+  jobsState.captureImages = [];
+  const jobId = jobsState.selectedJobId;
   jobsState.captureSubjectEditId = shouldEditBlank ? subject.id : null;
   jobsState.captureCompareSlotIds = null;
   jobsState.selectedSubjectId = subject.id;
   captureEntryForm.elements.barcode.value = captureUppercase(subject.ref || subject.externalId || '');
   captureEntryStatus.textContent = '';
   renderCaptureSubject();
-  await loadCaptureImages();
+  renderCaptureCompare();
+  // Snapshot the new capture assignment before waiting for preview I/O.
   await startCaptureWatcherForCurrentSubject();
+  if (jobId !== jobsState.selectedJobId || subject.id !== jobsState.captureSubject?.id) return;
+  await loadCaptureImages();
+  if (jobId !== jobsState.selectedJobId || subject.id !== jobsState.captureSubject?.id) return;
   if (shouldEditBlank) {
     focusFirstCaptureStudentField();
   } else if (focusBarcode) {
@@ -4494,6 +4635,8 @@ async function startCaptureWatcherForCurrentSubject() {
     {
       fileMode: jobsState.captureFileMode,
       shootStage: jobsState.captureShootStage,
+      subjectRef: jobsState.captureSubject.ref,
+      subjectName: jobsState.captureSubject.name,
       photographerName: jobsState.captureSession && jobsState.captureSession.photographerName,
       workstationName: jobsState.captureSession && jobsState.captureSession.workstationName
     }
@@ -4507,6 +4650,25 @@ async function stopCaptureWatcher() {
   await trecsApi('stopCaptureWatcher').stopCaptureWatcher();
 }
 
+async function retainCaptureSlotPreviews() {
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.captureSubject?.id;
+  const slots = jobsState.captureCompareSlotIds;
+  const ids = new Set([slots?.previousId, slots?.recentId].filter(Boolean).map(Number));
+  jobsState.captureImages = (jobsState.captureImages || []).map((image) => ids.has(Number(image.id)) ? image : { ...image, dataUrl: null });
+  for (const image of jobsState.captureImages.filter((item) => ids.has(Number(item.id)) && !item.dataUrl)) {
+    try {
+      const preview = await imagePreviewForId(image.id, jobId);
+      const currentSlots = jobsState.captureCompareSlotIds;
+      if (jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id
+        || ![currentSlots?.previousId, currentSlots?.recentId].some((id) => Number(id) === Number(image.id))) continue;
+      const current = jobsState.captureImages.find((item) => Number(item.id) === Number(image.id));
+      if (current) { current.dataUrl = preview?.dataUrl || null; current.version = preview?.version; }
+      renderCaptureCompare();
+    } catch (error) { console.error(error); }
+  }
+}
+
 async function handleCaptureImageImported(payload) {
   if (!payload) {
     return;
@@ -4518,12 +4680,22 @@ async function handleCaptureImageImported(payload) {
     captureEntryStatus.textContent = payload.error;
     return;
   }
-  if (!payload.image || !jobsState.captureSubject || payload.image.subjectId !== jobsState.captureSubject.id) {
+  if (payload.recovery) captureEntryStatus.textContent = payload.recovery.message;
+  if (!payload.image || !jobsState.captureSubject || Number(payload.image.subjectId) !== Number(jobsState.captureSubject.id)
+    || (payload.image.jobId && Number(payload.image.jobId) !== Number(jobsState.selectedJobId))) {
     return;
   }
 
   captureEntryStatus.textContent = `Captured ${payload.image.filename}`;
-  await loadCaptureImages();
+  if (payload.recoveryWarning || payload.retainedFiles?.length) {
+    captureEntryStatus.textContent += ` — ${payload.recoveryWarning || 'Saved successfully; source-file cleanup is pending. Check recovery before clearing the hot folder.'}`;
+  }
+  const previousBest = jobsState.captureImages.find((image) => image.selected && Number(image.id) !== Number(payload.image.id));
+  jobsState.captureImages = [payload.image, ...jobsState.captureImages.filter((image) => Number(image.id) !== Number(payload.image.id))]
+    .sort((first, second) => Number(second.id) - Number(first.id));
+  jobsState.captureCompareSlotIds = { previousId: previousBest?.id || null, recentId: payload.image.id };
+  renderCaptureCompare();
+  retainCaptureSlotPreviews();
   const detail = jobsState.detail || {};
   const detailSubject = findById(detail.subjects || [], payload.image.subjectId);
   if (detailSubject) {
@@ -4569,12 +4741,17 @@ async function selectCaptureImage(imageId, control) {
   }
 
   const originalText = control ? control.querySelector('span')?.textContent : '';
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.captureSubject.id;
+  const requestId = (jobsState.captureSelectRequest || 0) + 1;
+  jobsState.captureSelectRequest = requestId;
   if (control) {
     control.disabled = true;
   }
 
   try {
-    await trecsApi('selectCaptureImage').selectCaptureImage(jobsState.captureSubject.id, imageId);
+    await trecsApi('selectCaptureImage').selectCaptureImage(subjectId, imageId, jobId);
+    if (requestId !== jobsState.captureSelectRequest || jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id) return;
     jobsState.captureImages = (jobsState.captureImages || []).map((image) => ({
       ...image,
       selected: Number(image.id) === Number(imageId)
@@ -4599,10 +4776,12 @@ async function selectCaptureImage(imageId, control) {
     }
     renderCaptureSubject();
     renderCaptureCompare();
+    retainCaptureSlotPreviews();
     if (!captureComparisonModal || captureComparisonModal.hidden) {
       focusCaptureBarcode(true);
     }
   } catch (error) {
+    if (jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id) return;
     captureEntryStatus.textContent = error.message || 'Could not select image';
     console.error(error);
   } finally {
@@ -5211,12 +5390,12 @@ function adminItemHelp(type, stage) {
     delivery_envelope_cover: 'Creates the delivery envelope cover summary for this stage.',
     school_directory: 'Exports a school directory using the selected sort/group option.',
     missing_photo_report: 'Lists students who still have no usable linked photo.',
-    sis_export: 'Exports student data and linked image filenames for SIS import.',
+    sis_export: 'Exports resized student photos, native SIS maps and exception reports.',
     id_cards: stage === 'makeup_day'
       ? 'Creates the makeup-day ID card work list.'
       : 'Creates the original picture-day ID card work list.',
-    sticker_prints: 'Creates the makeup-day sticker print work list.',
-    staff_picture_packages: 'Creates the staff package work list.'
+    sticker_prints: 'Creates 36-up sticker JPG sheets and a letter-size PDF.',
+    staff_picture_packages: 'Renders staff picture sheets using package plan STAFF, code 101.'
   };
   return helps[type] || '';
 }
@@ -5360,6 +5539,7 @@ function closeCaptureImageAction() {
 }
 
 function closeCaptureComparison() {
+  jobsState.captureComparisonObserver?.disconnect();
   closeCaptureImageAction();
   captureComparisonModal.hidden = true;
   appShell.inert = false;
@@ -5373,7 +5553,7 @@ function captureComparisonCardHtml(image) {
         ${image.selected ? '<span class="status ready">Selected</span>' : '<span class="status">Comparison</span>'}
         ${image.rawPath ? `<span class="status">JPG + ${rawFileTypeLabel(image.rawPath)}</span>` : '<span class="status">JPG</span>'}
       </div>
-      <div class="capture-comparison-image">
+      <div class="capture-comparison-image" data-capture-comparison-preview="${image.id}">
         ${image.dataUrl ? `<img data-capture-comparison-orient src="${image.dataUrl}" alt="${escapeHtml(image.filename || 'Captured image')}">` : '<div class="empty-state">Preview unavailable.</div>'}
       </div>
       <div class="capture-comparison-meta">
@@ -5390,6 +5570,7 @@ function captureComparisonCardHtml(image) {
 }
 
 function renderCaptureComparison() {
+  jobsState.captureComparisonObserver?.disconnect();
   const subject = jobsState.captureSubject;
   const images = jobsState.captureImages || [];
   captureComparisonSubject.textContent = subject
@@ -5419,6 +5600,39 @@ function renderCaptureComparison() {
   captureComparisonScroller.querySelectorAll('[data-capture-comparison-remove]').forEach((button) => {
     button.addEventListener('click', () => openCaptureImageAction(Number(button.dataset.captureComparisonRemove), 'keep_review'));
   });
+  loadCaptureComparisonThumbnails();
+}
+
+function loadCaptureComparisonThumbnails() {
+  const jobId = jobsState.selectedJobId;
+  const subjectId = jobsState.captureSubject?.id;
+  const queue = [];
+  let active = 0;
+  const pump = () => {
+    while (active < 2 && queue.length) {
+      const panel = queue.shift();
+      if (!panel.isConnected || jobId !== jobsState.selectedJobId || subjectId !== jobsState.captureSubject?.id) continue;
+      active += 1;
+      const isCurrent = imagePanelRequest(panel, jobId);
+      imagePreviewForId(Number(panel.dataset.captureComparisonPreview), jobId, 'thumbnail').then((preview) => {
+        if (!isCurrent() || captureComparisonModal.hidden || subjectId !== jobsState.captureSubject?.id) return;
+        panel.innerHTML = preview?.dataUrl ? `<img src="${preview.dataUrl}" alt="${escapeHtml(preview.filename || 'Captured image')}">`
+          : '<div class="empty-state">Preview unavailable.</div>';
+        const image = panel.querySelector('img');
+        if (image) setLandscapeRotation(image);
+      }).catch((error) => console.error(error)).finally(() => { active -= 1; pump(); });
+    }
+  };
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      if (!entry.target.querySelector('img')) queue.push(entry.target);
+    }
+    pump();
+  }, { root: captureComparisonScroller, rootMargin: '100px' });
+  jobsState.captureComparisonObserver = observer;
+  captureComparisonScroller.querySelectorAll('[data-capture-comparison-preview]').forEach((panel) => observer.observe(panel));
 }
 
 function openCaptureComparison() {
@@ -5531,7 +5745,7 @@ async function showCaptureActionSelectedStudent(subject) {
     captureActionStudentPhoto.innerHTML = '<div class="empty-state">No current photo</div>';
     return;
   }
-  const preview = await trecsApi('getImagePreview').getImagePreview(subject.imageAssetId);
+  const preview = await trecsApi('getImagePreview').getImagePreview(jobsState.selectedJobId, subject.imageAssetId);
   if (Number(captureImageActionForm.elements.targetSubjectId.value) !== subjectId) {
     return;
   }
@@ -8652,7 +8866,7 @@ async function saveSubjectImageLink(subjectId, imageId, control) {
     const result = await trecsApi('linkSubjectImage').linkSubjectImage(subjectId, imageId);
     jobsState.selectedSubjectId = result.subjectId;
     jobsState.selectedImageId = result.imageId;
-    jobsState.imagePreviewCache.delete(result.imageId);
+    invalidateImagePreview(result.imageId, result.jobId);
     await reloadCurrentJobDetail();
   } catch (error) {
     if (control) {
@@ -8682,7 +8896,7 @@ async function setLinkedImageRejected(imageId, rejected, control) {
 
   try {
     await trecsApi('setImageRejected').setImageRejected(imageId, rejected, rejected ? 'Rejected during linked image review' : null);
-    jobsState.imagePreviewCache.delete(imageId);
+    invalidateImagePreview(imageId);
     await reloadCurrentJobDetail();
   } catch (error) {
     if (control) {
@@ -8723,7 +8937,7 @@ async function unlinkLinkedImage(subjectId, imageId, control) {
 
   try {
     await trecsApi('unlinkSubjectImage').unlinkSubjectImage(subjectId, imageId);
-    jobsState.imagePreviewCache.delete(imageId);
+    invalidateImagePreview(imageId);
     if (Number(jobsState.lightboxImageId) === Number(imageId)) {
       closeImageLightbox();
     }
@@ -9471,7 +9685,18 @@ async function saveProductionMilestoneFromSelect(select) {
 function renderBatchRenderSetup() {
   const setup = jobsState.batchRenderSetup; if (!setup) return;
   batchRenderJobs.innerHTML = setup.jobs.map((job) => `<label><input type="checkbox" name="jobIds" value="${job.id}" ${Number(job.readyOrders) > 0 ? '' : ''}><span><strong>${escapeHtml(job.clientName)} / ${escapeHtml(job.jobName)}</strong><small>${escapeHtml(job.packagePlan || 'No package plan')}</small></span><small>${formatNumber(job.readyOrders)} ready / ${formatNumber(job.paidOrders)} paid</small></label>`).join('');
-  batchRenderHistory.innerHTML = setup.history.length ? setup.history.map((batch) => `<button type="button"><strong>${escapeHtml(batch.name)}</strong><span>${escapeHtml(formatType(batch.status))} · ${formatNumber(batch.completedJobs || 0)}/${formatNumber(batch.jobs || 0)} jobs · ${escapeHtml(formatShortDateTime(batch.createdAt))}</span><span>${escapeHtml(batch.outputPath || '')}</span></button>`).join('') : '<div class="empty-state">No batch renders have run yet.</div>';
+  batchRenderHistory.innerHTML = setup.history.length ? setup.history.map((batch) => `<article><strong>${escapeHtml(batch.name)}</strong><p>${escapeHtml(formatType(batch.status))} · ${formatNumber(batch.completedJobs || 0)}/${formatNumber(batch.jobs || 0)} complete · ${formatNumber(batch.failedJobs || 0)} need attention · ${escapeHtml(formatShortDateTime(batch.createdAt))}</p><small>${escapeHtml(batch.outputPath || '')}</small><div>${batch.activeHere ? `<button type="button" data-production-action="pause" data-batch-id="${batch.id}">Pause after current order</button><button type="button" data-production-action="cancel" data-batch-id="${batch.id}">Cancel</button>` : batch.status !== 'completed' ? `<button type="button" data-production-action="${['failed', 'completed_with_errors'].includes(batch.status) ? 'retry' : 'resume'}" data-batch-id="${batch.id}">${['failed', 'completed_with_errors'].includes(batch.status) ? 'Retry unfinished jobs' : 'Resume / recover'}</button>` : ''}</div><details><summary>Job and order results</summary>${(batch.details || []).map((job) => `<p>Job ${job.jobId}: ${escapeHtml(formatType(job.status))}${job.errorMessage ? ` — ${escapeHtml(job.errorMessage)}` : ''}</p>${(job.result?.orderResults || []).filter((order) => order.status !== 'completed').map((order) => `<p>Ref ${escapeHtml(order.ref || order.orderId)}: ${escapeHtml(order.issues.map((issue) => formatType(issue.type)).join(', ') || 'Selected outputs only')}</p>`).join('')}`).join('')}</details></article>`).join('') : '<div class="empty-state">No batch renders have run yet.</div>';
+  batchRenderHistory.querySelectorAll('[data-production-action]').forEach((button) => button.addEventListener('click', async () => {
+    button.disabled = true;
+    const action = button.dataset.productionAction;
+    batchRenderStatus.textContent = ['pause', 'cancel'].includes(action) ? 'Finishing the current order before stopping...' : 'Recovering the saved production queue...';
+    try {
+      if (['resume', 'retry'].includes(action)) jobsState.activeProductionBatchId = null;
+      const result = await trecsApi('controlProductionBatch').controlProductionBatch({ batchId: Number(button.dataset.batchId), action });
+      batchRenderStatus.textContent = `Production queue: ${formatType(result.status)}. Completed jobs are preserved.`;
+      await loadBatchRenderSetup();
+    } catch (error) { batchRenderStatus.textContent = error.message; button.disabled = false; }
+  }));
 }
 
 async function loadBatchRenderSetup() { jobsState.batchRenderSetup = await trecsApi('getBatchRenderSetup').getBatchRenderSetup(); renderBatchRenderSetup(); }
@@ -9484,7 +9709,7 @@ async function submitBatchRender(event) {
   jobsState.batchRenderRunning = true; startBatchRenderButton.disabled = true; batchRenderStatus.textContent = 'Reserving jobs and starting batch...';
   try {
     const result = await trecsApi('runBatchRender').runBatchRender({ jobIds, name: batchRenderForm.elements.name.value, sortBy: batchRenderForm.elements.sortBy.value, outputFolder: batchRenderForm.elements.outputFolder.value, includeUnits: batchRenderForm.elements.includeUnits.checked, includeEnvelopes: batchRenderForm.elements.includeEnvelopes.checked, includeLabels: batchRenderForm.elements.includeLabels.checked });
-    batchRenderStatus.textContent = `${result.name} finished: ${result.results.filter((item) => item.status === 'completed').length} completed, ${result.results.filter((item) => item.status === 'failed').length} failed.`; await loadBatchRenderSetup();
+    batchRenderStatus.textContent = `${result.name}: ${formatType(result.status)}. ${result.results.filter((item) => item.status === 'completed').length} jobs completed, ${result.results.filter((item) => ['failed', 'completed_with_errors'].includes(item.status)).length} need attention.`; await loadBatchRenderSetup();
   } catch (error) { batchRenderStatus.textContent = error.message || 'Batch render failed.'; } finally { jobsState.batchRenderRunning = false; startBatchRenderButton.disabled = false; }
 }
 
@@ -9502,13 +9727,15 @@ function selectedEventCandidate() {
     || null;
 }
 
-async function loadEventImagePreview(imageAssetId, container, missingText) {
+async function loadEventImagePreview(jobId, imageAssetId, container, missingText) {
+  const isCurrent = imagePanelRequest(container);
   if (!imageAssetId) { container.innerHTML = `<div class="empty-state">${escapeHtml(missingText)}</div>`; return; }
   container.innerHTML = '<div class="empty-state">Loading photo...</div>';
   try {
-    const preview = await imagePreviewForId(Number(imageAssetId));
+    const preview = await imagePreviewForId(Number(imageAssetId), jobId);
+    if (!isCurrent()) return;
     container.innerHTML = preview?.dataUrl && !preview.missing ? `<img src="${preview.dataUrl}" alt="Photo preview">` : `<div class="empty-state">${escapeHtml(preview?.reason || missingText)}</div>`;
-  } catch (error) { container.innerHTML = `<div class="empty-state">${escapeHtml(error.message || missingText)}</div>`; }
+  } catch (error) { if (isCurrent()) container.innerHTML = `<div class="empty-state">${escapeHtml(error.message || missingText)}</div>`; }
 }
 
 function renderEventJobSetup() {
@@ -9565,7 +9792,7 @@ function renderEventSelectedCandidate() {
   eventOrderForm.elements.orderCodes.value = existing?.packageCodes || '';
   eventOrderForm.elements.paidStatus.value = existing?.paidStatus || 'paid';
   eventOrderForm.elements.notes.value = jobsState.eventSetup?.selectedEntry?.notes || '';
-  loadEventImagePreview(candidate.fallImageAssetId, eventFallPreview, 'This fall student does not have a thumbnail.').catch((error) => console.error(error));
+  loadEventImagePreview(jobsState.eventSetup?.linkedFallJobId, candidate.fallImageAssetId, eventFallPreview, 'This fall student does not have a thumbnail.').catch((error) => console.error(error));
 }
 
 async function hydrateEventResultThumbnails(candidates) {
@@ -9573,7 +9800,7 @@ async function hydrateEventResultThumbnails(candidates) {
   await Promise.all(candidates.slice(0, 30).map(async (candidate) => {
     if (!candidate.fallImageAssetId) return;
     try {
-      const preview = await imagePreviewForId(candidate.fallImageAssetId);
+      const preview = await imagePreviewForId(candidate.fallImageAssetId, jobsState.eventSetup?.linkedFallJobId);
       if (entryId !== jobsState.eventSetup?.selectedEntry?.id || !preview?.dataUrl) return;
       const node = eventStudentResults.querySelector(`[data-event-result-thumb="${candidate.id}"]`);
       if (node) node.innerHTML = `<img src="${preview.dataUrl}" alt="Fall thumbnail">`;
@@ -9602,7 +9829,7 @@ function renderEventEntry() {
     eventPhotoPreview.innerHTML = '<div class="empty-state">Import and choose an event image.</div>'; renderEventExistingLinks(); renderEventSelectedCandidate(); return;
   }
   eventCurrentImageNumber.textContent = `Image ${entry.imageNumber}`; eventCurrentStatus.textContent = eventStatusLabel(entry.status); eventCurrentStatus.className = `status ${eventStatusClass(entry.status)}`;
-  loadEventImagePreview(entry.imageAssetId, eventPhotoPreview, 'Event photo could not be loaded.').catch((error) => console.error(error));
+  loadEventImagePreview(jobsState.eventSetup?.selectedEventJobId, entry.imageAssetId, eventPhotoPreview, 'Event photo could not be loaded.').catch((error) => console.error(error));
   renderEventExistingLinks();
   const firstLink = entry.links?.[0]; jobsState.eventSelectedCandidateId = firstLink?.subjectId || null;
   renderEventSelectedCandidate();
@@ -10128,8 +10355,14 @@ function bindPackageEditor(selected) {
 }
 
 async function loadJobDetail(jobId) {
+  const requestId = jobsState.jobDetailRequestId + 1;
+  jobsState.jobDetailRequestId = requestId;
   jobWorkflowContent.innerHTML = '<div class="empty-state">Loading job workflow data...</div>';
-  jobsState.detail = await trecsApi('getJobDetail').getJobDetail(jobId);
+  const detail = await trecsApi('getJobDetail').getJobDetail(jobId);
+  if (requestId !== jobsState.jobDetailRequestId || Number(jobsState.selectedJobId) !== Number(jobId)) {
+    return false;
+  }
+  jobsState.detail = detail;
   jobsState.selectedImageId = null;
   jobsState.selectedImageSubjectId = null;
   jobsState.selectedSubjectId = null;
@@ -10155,6 +10388,7 @@ async function loadJobDetail(jobId) {
   jobsState.adminItems = null;
   resetAdminSchoolYearForCurrentJob(true);
   renderWorkflowTab();
+  return true;
 }
 
 async function reloadCurrentJobDetail() {
@@ -10163,11 +10397,17 @@ async function reloadCurrentJobDetail() {
     return;
   }
 
+  const jobId = Number(jobsState.selectedJobId);
+
   const captureEditing = jobsState.workspaceMode === 'capture'
     && captureWorkspace
     && captureWorkspace.contains(document.activeElement)
     && activeElementAcceptsTyping();
-  jobsState.detail = await trecsApi('getJobDetail').getJobDetail(jobsState.selectedJobId);
+  const detail = await trecsApi('getJobDetail').getJobDetail(jobId);
+  if (Number(jobsState.selectedJobId) !== jobId) {
+    return;
+  }
+  jobsState.detail = detail;
   renderJobDetail(jobsState.detail.summary || jobsState.jobs.find((job) => job.id === jobsState.selectedJobId));
   if (jobsState.jobWorkspaceOpen) {
     if (jobsState.workspaceMode === 'admin') {
@@ -10201,8 +10441,12 @@ async function loadImagePreview(imageId, options = {}) {
 
   const requestId = `${imageId}:${Date.now()}:${Math.random()}`;
   panel.dataset.previewRequest = requestId;
-  const preview = await trecsApi('getImagePreview').getImagePreview(imageId);
+  const previewJobId = Number(jobsState.selectedJobId);
+  const preview = await trecsApi('getImagePreview').getImagePreview(previewJobId, imageId);
   if (!panel.isConnected || panel.dataset.previewRequest !== requestId) {
+    return;
+  }
+  if (Number(jobsState.selectedJobId) !== previewJobId) {
     return;
   }
   if (!preview || preview.missing || !preview.dataUrl) {
@@ -10366,6 +10610,7 @@ async function loadReviewSubjectPreview() {
   if (!panel) {
     return;
   }
+  const isCurrent = imagePanelRequest(panel);
   const subject = selectedImageReviewSubject();
   if (!subject) {
     panel.innerHTML = '<div class="empty-state">Select a student to preview their current photo.</div>';
@@ -10388,6 +10633,7 @@ async function loadReviewSubjectPreview() {
 
   try {
     const preview = await imagePreviewForId(subject.imageAssetId);
+    if (!isCurrent()) return;
     if (!preview || preview.missing || !preview.dataUrl) {
       panel.innerHTML = `
         <div class="image-review-subject-card">
@@ -10407,6 +10653,7 @@ async function loadReviewSubjectPreview() {
     `;
     setLandscapeRotation(panel.querySelector('img'), { fitRotatedToFrame: true });
   } catch (error) {
+    if (!isCurrent()) return;
     panel.innerHTML = `
       <div class="image-review-subject-card">
         <div class="image-review-subject-meta">${detail}</div>

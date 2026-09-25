@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('trecs', {
   getBatchRenderSetup: () => ipcRenderer.invoke('batch-render:get-setup'),
   chooseBatchRenderOutputFolder: () => ipcRenderer.invoke('batch-render:choose-output-folder'),
   runBatchRender: (input) => ipcRenderer.invoke('batch-render:run', input),
+  controlProductionBatch: (input) => ipcRenderer.invoke('batch-render:control', input),
   onBatchRenderProgress: (callback) => {
     ipcRenderer.removeAllListeners('batch-render:progress');
     ipcRenderer.on('batch-render:progress', (_event, payload) => callback(payload));
@@ -95,6 +96,13 @@ contextBridge.exposeInMainWorld('trecs', {
   showMessage: (input) => ipcRenderer.invoke('app:show-message', input),
   chooseEndOfDayPackageFolder: () => ipcRenderer.invoke('end-of-day:choose-package-folder'),
   approveEndOfDayPackage: (input) => ipcRenderer.invoke('end-of-day:approve-package', input),
+  reviewEndOfDayImport: (input) => ipcRenderer.invoke('end-of-day:review-import', input),
+  listStorageBackups: (jobId) => ipcRenderer.invoke('storage:list-backups', jobId),
+  listRecoveryJobs: () => ipcRenderer.invoke('recovery:list-jobs'),
+  restoreStorageBackup: (input) => ipcRenderer.invoke('storage:restore-backup', input),
+  inspectPhotoIntegrity: (jobId) => ipcRenderer.invoke('images:integrity', jobId),
+  listPhotoAssignmentActions: (jobId) => ipcRenderer.invoke('images:assignment-history', jobId),
+  undoPhotoAssignmentAction: (input) => ipcRenderer.invoke('images:undo-assignment', input),
   chooseSchoolDataFile: (jobId) => ipcRenderer.invoke('school-data:choose-file', jobId),
   importSchoolData: (jobId, input) => ipcRenderer.invoke('school-data:import', jobId, input),
   previewRosterVerification: (jobId, input) => ipcRenderer.invoke('roster-verification:preview', jobId, input),
@@ -137,8 +145,8 @@ contextBridge.exposeInMainWorld('trecs', {
   confirmEnvelopeScan: (accept) => ipcRenderer.invoke('envelope:confirm-scan', accept),
   startCaptureWatcher: (jobId, subjectId, options) => ipcRenderer.invoke('capture:start-watcher', jobId, subjectId, options),
   stopCaptureWatcher: () => ipcRenderer.invoke('capture:stop-watcher'),
-  getCaptureSubjectImages: (jobId, subjectId) => ipcRenderer.invoke('capture:subject-images', jobId, subjectId),
-  selectCaptureImage: (subjectId, imageId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId),
+  getCaptureSubjectImages: (jobId, subjectId, options) => ipcRenderer.invoke('capture:subject-images', jobId, subjectId, options),
+  selectCaptureImage: (subjectId, imageId, jobId) => ipcRenderer.invoke('capture:select-image', subjectId, imageId, jobId),
   resolveCaptureImage: (input) => ipcRenderer.invoke('capture:resolve-image', input),
   onCaptureImageImported: (callback) => {
     ipcRenderer.removeAllListeners('capture:image-imported');
@@ -162,7 +170,7 @@ contextBridge.exposeInMainWorld('trecs', {
   linkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:link-subject', subjectId, imageId),
   setImageRejected: (imageId, rejected, reason) => ipcRenderer.invoke('image:set-rejected', imageId, rejected, reason),
   unlinkSubjectImage: (subjectId, imageId) => ipcRenderer.invoke('image:unlink-subject', subjectId, imageId),
-  getImagePreview: (imageId) => ipcRenderer.invoke('image:preview', imageId),
+  getImagePreview: (jobId, imageId, options) => ipcRenderer.invoke('image:preview', jobId, imageId, options),
   chooseCropToolImage: () => ipcRenderer.invoke('crop-tool:choose-image'),
   chooseCropToolInputFolder: () => ipcRenderer.invoke('crop-tool:choose-input-folder'),
   chooseCropToolOutputFolder: () => ipcRenderer.invoke('crop-tool:choose-output-folder'),

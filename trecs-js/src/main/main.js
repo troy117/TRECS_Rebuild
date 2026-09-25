@@ -7,6 +7,10 @@ const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
 const XLSX = require('xlsx');
+const { writeLegacyTrecsImportWorkbook } = require('./legacy-end-of-day-export');
+const storageSafety = require('./storage-safety');
+const idReservations = require('./id-reservations');
+const portableUpdater = require('./portable-updater');
 
 const appFolderCandidate = path.resolve(__dirname, '../..');
 const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
@@ -14,6 +18,7 @@ const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase(
 const portableMode = app.isPackaged || runningFromPortableFolder;
 const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
 const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
+const portableExecutableFile = process.env.PORTABLE_EXECUTABLE_FILE || '';
 const defaultProjectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
 function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackRoot) {
   const configFile = path.join(defaultProjectRoot, fileName);
@@ -45,9 +50,14 @@ const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() 
   .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
   .replace(/[. ]+$/g, '')
   || 'workstation';
-const configuredElectronUserDataPath = path.join(projectRoot, 'TRECS-AppData', workstationStorageName);
+// Keep browser caches local, including on lab PCs using a UNC data root.
+const dataRootKey = crypto.createHash('sha256').update(projectRoot.toLowerCase()).digest('hex').slice(0, 16);
+const configuredElectronUserDataPath = process.env.TRECS_UI_TEST === '1'
+  ? path.join(projectRoot, '.test-workstation-cache')
+  : path.join(localWindowsAppDataPath, 'TRECS', 'workstations', workstationStorageName, dataRootKey);
 fs.mkdirSync(configuredElectronUserDataPath, { recursive: true });
 app.setPath('userData', configuredElectronUserDataPath);
+const portableUpdateRoot = path.join(configuredElectronUserDataPath, 'Updates');
 const localWorkstationSettingsFolder = path.join(localWindowsAppDataPath, 'TRECS', 'local-settings');
 const trecsLogSettingsPath = path.join(localWorkstationSettingsFolder, 'trecs-log.json');
 const trecsLogQueuePath = path.join(localWorkstationSettingsFolder, 'trecs-log-queue.json');
@@ -63,10 +73,6 @@ const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : d
 const databaseFolderPath = path.join(projectRoot, 'database');
 const legacyPrototypeDatabasePath = path.join(databaseFolderPath, 'migration_prototype.db');
 const prototypeDatabasePath = path.join(databaseFolderPath, 'ProgramData.db');
-if (!fs.existsSync(prototypeDatabasePath) && fs.existsSync(legacyPrototypeDatabasePath)) {
-  fs.mkdirSync(databaseFolderPath, { recursive: true });
-  fs.renameSync(legacyPrototypeDatabasePath, prototypeDatabasePath);
-}
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
@@ -75,43 +81,73 @@ const APP_SESSION_ID = crypto.randomUUID();
 const JOB_LOCK_TTL_SECONDS = 120;
 const DATABASE_WRITE_LOCK_PATH = `${prototypeDatabasePath}.write-lock`;
 
+let portableUpdateState = {
+  status: 'not_checked',
+  version: app.getVersion(),
+  buildId: '',
+  publishedAt: ''
+};
+
 let sqlModulePromise;
 
-function waitMilliseconds(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
+let databaseWriteQueue = Promise.resolve();
+let releaseLocalDatabaseWriter;
+let databaseLockHeartbeat;
 
-function acquireDatabaseWriteLock(timeoutMilliseconds = 15000) {
-  const startedAt = Date.now();
-  fs.mkdirSync(path.dirname(DATABASE_WRITE_LOCK_PATH), { recursive: true });
-  while (Date.now() - startedAt < timeoutMilliseconds) {
-    try {
-      fs.mkdirSync(DATABASE_WRITE_LOCK_PATH);
-      fs.writeFileSync(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), JSON.stringify({
-        sessionId: APP_SESSION_ID,
-        computerName: process.env.COMPUTERNAME || os.hostname() || '',
-        userName: process.env.USERNAME || os.userInfo().username || '',
-        acquiredAt: new Date().toISOString()
-      }, null, 2));
-      return;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+async function acquireDatabaseWriteLock(timeoutMilliseconds = 15000) {
+  const previous = databaseWriteQueue;
+  let releaseThisWriter;
+  databaseWriteQueue = new Promise((resolve) => { releaseThisWriter = resolve; });
+  await previous;
+  releaseLocalDatabaseWriter = releaseThisWriter;
+  try {
+    const startedAt = Date.now();
+    await fs.promises.mkdir(path.dirname(DATABASE_WRITE_LOCK_PATH), { recursive: true });
+    while (Date.now() - startedAt < timeoutMilliseconds) {
       try {
-        const stat = fs.statSync(DATABASE_WRITE_LOCK_PATH);
-        if (Date.now() - stat.mtimeMs > 60000) {
-          fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
-          continue;
+        await fs.promises.mkdir(DATABASE_WRITE_LOCK_PATH);
+        await fs.promises.writeFile(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), JSON.stringify({
+          sessionId: APP_SESSION_ID, pid: process.pid,
+          computerName: process.env.COMPUTERNAME || os.hostname() || '',
+          acquiredAt: new Date().toISOString()
+        }));
+        databaseLockHeartbeat = setInterval(() => {
+          const now = new Date();
+          fs.promises.utimes(DATABASE_WRITE_LOCK_PATH, now, now).catch(() => {});
+        }, 10000);
+        databaseLockHeartbeat.unref();
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        try {
+          const owner = JSON.parse(await fs.promises.readFile(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), 'utf8'));
+          // Do not remove a stale-looking directory automatically: two
+          // competing reapers could delete a freshly acquired writer's lock.
+          if (owner.computerName === (process.env.COMPUTERNAME || os.hostname()) && Number.isInteger(owner.pid)) {
+            try { process.kill(owner.pid, 0); }
+            catch (processError) {
+              if (processError.code === 'ESRCH') {
+                throw new Error(`A previous TRECS process stopped while holding the database lock. Have an administrator verify no workstation is saving and remove only ${DATABASE_WRITE_LOCK_PATH}, then retry.`);
+              }
+            }
+          }
+        } catch (readError) {
+          if (readError.code !== 'ENOENT' && !(readError instanceof SyntaxError)) throw readError;
         }
-      } catch (statError) {
-        if (statError.code !== 'ENOENT') throw statError;
+        await new Promise((resolve) => setTimeout(resolve, 75));
       }
-      waitMilliseconds(75);
     }
+    throw new Error('TRECS could not save because another workstation holds the shared database lock. Close TRECS on that workstation and retry. If it lost power, have the lab administrator check the lock before removing it.');
+  } catch (error) {
+    releaseLocalDatabaseWriter = null;
+    releaseThisWriter();
+    throw error;
   }
-  throw new Error('TRECS could not save because another workstation is writing the shared database. Try again in a few seconds.');
 }
 
 function releaseDatabaseWriteLock() {
+  if (databaseLockHeartbeat) clearInterval(databaseLockHeartbeat);
+  databaseLockHeartbeat = null;
   try {
     const ownerPath = path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json');
     const owner = fs.existsSync(ownerPath) ? JSON.parse(fs.readFileSync(ownerPath, 'utf8')) : null;
@@ -119,7 +155,11 @@ function releaseDatabaseWriteLock() {
       fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
     }
   } catch (_error) {
-    // A stale lock is recoverable on the next write.
+    // Keep an unremovable lock visible rather than overlap writes.
+  } finally {
+    const release = releaseLocalDatabaseWriter;
+    releaseLocalDatabaseWriter = null;
+    if (release) release();
   }
 }
 
@@ -133,8 +173,120 @@ function systemInfo() {
     pathFile: path.join(defaultProjectRoot, 'path.txt'),
     captureFile: captureConfigPath,
     captureHotFolder,
-    captureStationMode
+    captureStationMode,
+    appVersion: app.getVersion(),
+    portableBuildId: portableUpdateState.buildId || '',
+    portableUpdateStatus: portableUpdateState.status,
+    portableUpdatePublishedAt: portableUpdateState.publishedAt || ''
   };
+}
+
+function portableUpdateIneligibilityReason() {
+  if (process.env.TRECS_UI_TEST === '1') return 'ui_test';
+  if (process.env.TRECS_DISABLE_AUTO_UPDATE === '1') return 'disabled';
+  if (process.env.TRECS_SKIP_UPDATE_ONCE === '1') return 'rollback_restart';
+  if (process.platform !== 'win32') return 'not_windows';
+  if (!app.isPackaged || !portableExecutableFile) return 'not_portable';
+  if (captureStationMode) return 'capture_station';
+  if (!portableUpdater.isUncPath(projectRoot)) return 'data_root_not_unc';
+  return '';
+}
+
+async function checkForPortableUpdateAtStartup() {
+  const ineligibilityReason = portableUpdateIneligibilityReason();
+  if (ineligibilityReason) {
+    portableUpdateState = {
+      ...portableUpdateState,
+      status: ineligibilityReason === 'rollback_restart' ? 'rolled_back' : 'not_applicable',
+      reason: ineligibilityReason
+    };
+    if (ineligibilityReason === 'rollback_restart') delete process.env.TRECS_SKIP_UPDATE_ONCE;
+    return false;
+  }
+
+  const result = await portableUpdater.inspectPortableUpdate({
+    serverRoot: projectRoot,
+    currentExecutablePath: portableExecutableFile,
+    stagingRoot: portableUpdateRoot
+  });
+  portableUpdateState = {
+    status: result.status,
+    version: result.manifest?.version || app.getVersion(),
+    buildId: result.manifest?.buildId || result.currentSha256?.slice(0, 12) || '',
+    publishedAt: result.manifest?.publishedAt || ''
+  };
+  if (result.status !== 'ready') return false;
+
+  await dialog.showMessageBox({
+    type: 'info',
+    title: 'TRECS Update Ready',
+    message: `TRECS ${result.manifest.version} (${result.manifest.buildId}) is ready to install.`,
+    detail: 'The complete update has been copied from the server and verified. TRECS will close, replace the local portable executable, and restart automatically.',
+    buttons: ['Install and Restart'],
+    defaultId: 0,
+    cancelId: -1,
+    noLink: true
+  });
+  const launched = await portableUpdater.launchPortableUpdate({
+    stagingRoot: portableUpdateRoot,
+    stagedPath: result.stagedPath,
+    targetPath: result.targetPath,
+    expectedSha256: result.manifest.sha256
+  });
+  portableUpdateState = {
+    ...portableUpdateState,
+    status: 'restarting',
+    helperPid: launched.pid
+  };
+  logStartup(`portable update staged buildId=${result.manifest.buildId} helperPid=${launched.pid}`);
+  app.quit();
+  return true;
+}
+
+function markPortableUpdateStartupReady() {
+  const handshakePath = process.env.TRECS_UPDATE_HANDSHAKE;
+  if (!handshakePath) return;
+  try {
+    portableUpdater.writeStartupHandshake(handshakePath, portableUpdateRoot, {
+      ready: true,
+      pid: process.pid,
+      version: app.getVersion(),
+      buildId: portableUpdateState.buildId || '',
+      readyAt: new Date().toISOString()
+    });
+    delete process.env.TRECS_UPDATE_HANDSHAKE;
+    logStartup('portable update startup handshake completed');
+  } catch (error) {
+    logStartup('portable update startup handshake failed', error);
+  }
+}
+
+async function showPortableUpdateStartupNotice(window) {
+  if (portableUpdateState.status !== 'rolled_back' || !window || window.isDestroyed()) return;
+  let detail = 'The attempted update did not start successfully, so the previous TRECS version was restored. Tell the lab administrator before trying the update again.';
+  try {
+    const status = JSON.parse(await fs.promises.readFile(
+      path.join(portableUpdateRoot, portableUpdater.UPDATE_STATUS_NAME),
+      'utf8'
+    ));
+    if (status.message) detail = String(status.message);
+  } catch (error) {
+    if (error.code !== 'ENOENT') logStartup('portable update rollback status could not be read', error);
+  }
+  await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'TRECS Update Rolled Back',
+    message: 'TRECS restored the previous version.',
+    detail,
+    buttons: ['OK'],
+    defaultId: 0,
+    noLink: true
+  });
+}
+
+function trecsWindowTitle() {
+  const buildLabel = portableUpdateState.buildId ? ` (${portableUpdateState.buildId})` : '';
+  return `TRECS ${app.getVersion()}${buildLabel}`;
 }
 
 function focusWindow(event) {
@@ -272,8 +424,11 @@ function captureSessionRoot() {
 
 function localCaptureDatabasePath(jobId) {
   const targetPath = path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
-  const legacyPath = path.join(legacyElectronUserDataPath, 'CaptureSessions', `job-${jobId}`, 'capture.db');
-  if (!fs.existsSync(targetPath) && path.resolve(legacyPath) !== path.resolve(targetPath) && fs.existsSync(legacyPath)) {
+  const legacyPath = [
+    path.join(projectRoot, 'TRECS-AppData', workstationStorageName, 'CaptureSessions', `job-${jobId}`, 'capture.db'),
+    path.join(legacyElectronUserDataPath, 'CaptureSessions', `job-${jobId}`, 'capture.db')
+  ].find((candidate) => fs.existsSync(candidate));
+  if (process.env.TRECS_UI_TEST !== '1' && !fs.existsSync(targetPath) && legacyPath && path.resolve(legacyPath) !== path.resolve(targetPath)) {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.copyFileSync(legacyPath, targetPath);
   }
@@ -311,7 +466,13 @@ function repairMovedCaptureImageLinks(database) {
       ON si.subject_id = cia.source_subject_id
       AND si.image_asset_id = cia.image_asset_id
     WHERE cia.action_type = 'move'
-      AND cia.target_subject_id IS NOT NULL;
+      AND cia.target_subject_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM capture_image_actions newer
+        WHERE newer.image_asset_id = cia.image_asset_id
+          AND newer.id > cia.id
+          AND newer.action_type IN ('move', 'move_undone')
+      );
   `);
   staleLinks.forEach((link) => {
     database.run(`
@@ -397,7 +558,7 @@ async function appendLocalCaptureEvent(input) {
       statement.free();
     }
 
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -421,7 +582,7 @@ async function updateLocalCaptureSelection(jobId, subjectId, imageAssetId) {
       WHERE job_id = ?
         AND subject_id = ?;
     `, [imageAssetId, jobId, subjectId]);
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -455,7 +616,7 @@ async function markLocalCaptureEventsPackaged(jobId, copiedImages) {
         image.imageAssetId
       ]);
     });
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -819,7 +980,7 @@ function createJobDatabaseSchema(database) {
 
     CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
     ON event_subject_links(event_entry_id, sort_order);
-  `);
+  `.replace(/\bid INTEGER PRIMARY KEY\b/g, 'id INTEGER PRIMARY KEY AUTOINCREMENT'));
 }
 
 function migrateExistingIdTemplateFiles(database) {
@@ -976,6 +1137,50 @@ function jobDatabasePathForRow(jobRow) {
   return path.join(resolveProjectPath(jobRow.root_path), 'Database', 'job.db');
 }
 
+function pathBelongsToJobRoot(filePath, rootPathValue) {
+  if (!filePath || !rootPathValue) {
+    return false;
+  }
+
+  const jobRoot = path.resolve(resolveProjectPath(rootPathValue));
+  const resolvedPath = path.resolve(resolveProjectPath(filePath));
+  const relativePath = path.relative(jobRoot, resolvedPath);
+  return relativePath === ''
+    || (relativePath !== '..'
+      && !relativePath.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relativePath));
+}
+
+function rowsFromJobDataTable(database, tableName, jobRow) {
+  const rows = rowsFromOptionalTable(database, tableName);
+  const jobId = Number(jobRow.id);
+  if (!rows.length) {
+    return rows;
+  }
+
+  if (tableName === 'jobs') {
+    return rows.filter((row) => Number(row.id) === jobId);
+  }
+
+  if (tableName === 'image_versions') {
+    const jobImageIds = new Set(rowsFromOptionalTable(database, 'image_assets')
+      .filter((row) => Number(row.job_id) === jobId)
+      .map((row) => Number(row.id)));
+    return rows.filter((row) => jobImageIds.has(Number(row.image_asset_id))
+      && pathBelongsToJobRoot(row.path, jobRow.root_path));
+  }
+
+  const columns = tableColumnNames(database, tableName);
+  if (columns.includes('job_id')) {
+    return rows.filter((row) => Number(row.job_id) === jobId);
+  }
+  if (columns.includes('event_job_id')) {
+    return rows.filter((row) => Number(row.event_job_id) === jobId);
+  }
+
+  return rows;
+}
+
 function prepareJobDatabaseShape(database) {
   createJobDatabaseSchema(database);
   ensureCaptureImageActionsSchema(database);
@@ -986,6 +1191,8 @@ function prepareJobDatabaseShape(database) {
   ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
   ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT');
   ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT');
+  ensureColumn(database, 'subjects', 'field1', 'TEXT');
+  ensureColumn(database, 'subjects', 'field2', 'TEXT');
   repairMovedCaptureImageLinks(database);
 }
 
@@ -1141,7 +1348,7 @@ async function writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, option
       FROM image_versions
       WHERE image_asset_id IN (${imageIdList})
       ${croppedMediumOnly ? "AND version_type = 'cropped_med'" : ''};
-    `);
+    `).filter((row) => pathBelongsToJobRoot(row.path, jobRows[0].root_path));
     insertRows(jobDatabase, 'image_versions', Object.keys(imageVersionRows[0] || {}), imageVersionRows);
     const subjectImageRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
@@ -1183,7 +1390,7 @@ async function writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, option
     insertRows(jobDatabase, 'event_subject_links', Object.keys(eventLinkRows[0] || {}), eventLinkRows);
 
     jobDatabase.run('COMMIT;');
-    fs.writeFileSync(jobDatabasePath, Buffer.from(jobDatabase.export()));
+    await storageSafety.atomicWriteFile(jobDatabasePath, Buffer.from(jobDatabase.export()), { backup: !options.outputPath });
     return jobDatabasePath;
   } catch (error) {
     try {
@@ -1209,6 +1416,14 @@ function rememberPersistedJobDatabasePaths(paths) {
 }
 
 async function writeJobDatabaseSnapshot(jobId, options = {}) {
+  if (!options.outputPath) {
+    const databasePath = await storageDatabasePath(jobId);
+    if (!fs.existsSync(databasePath)) throw new Error(`Job database is missing. Use Photo Integrity & Recovery; no empty replacement was created. ${databasePath}`);
+    return databasePath;
+  }
+  const imageSnapshot = imagePersistedSignatures.get(Number(jobId));
+  if (Object.keys(options).length === 0 && imageSnapshot && fs.existsSync(imageSnapshot.path)
+      && imageSnapshot.signature === storageSafety.fileSignature(imageSnapshot.path)) return imageSnapshot.path;
   const recentPath = Object.keys(options).length === 0
     ? recentlyPersistedJobDatabasePaths.get(Number(jobId))
     : null;
@@ -1218,7 +1433,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
   closeCachedQueryDatabase();
   closeCachedJobQueryDatabases();
   closeCachedScopedQueryDatabases();
-  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId] });
+  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
   try {
     return await writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options);
   } finally {
@@ -1244,6 +1459,9 @@ async function openWorkingDatabase(options = {}) {
       }
       const databasePath = jobDatabasePathForRow(jobRow);
       if (!fs.existsSync(databasePath)) {
+        if (storageSafety.listDatabaseBackups(databasePath).length) {
+          throw new Error(`Job database is missing; recovery copies are available. Use Photo Integrity & Recovery to restore it. No empty replacement was created. ${databasePath}`);
+        }
         if (options.readOnly) {
           if (options.requireExisting) {
             throw new Error(`Job database was not found at ${databasePath}`);
@@ -1257,7 +1475,7 @@ async function openWorkingDatabase(options = {}) {
       try {
         prepareJobDatabaseShape(jobDatabase);
         JOB_DATA_TABLES.forEach((tableName) => {
-          const rows = rowsFromOptionalTable(jobDatabase, tableName);
+          const rows = rowsFromJobDataTable(jobDatabase, tableName, jobRow);
           if (!rows.length) {
             return;
           }
@@ -1302,7 +1520,7 @@ async function persistWorkingDatabase(database, options = {}) {
   const programDatabase = new SQL.Database(database.export());
   try {
     dropJobDataTables(programDatabase);
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(programDatabase.export()));
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(programDatabase.export()), { backup: true });
   } finally {
     programDatabase.close();
   }
@@ -1313,12 +1531,19 @@ async function persistWorkingDatabase(database, options = {}) {
 async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
   fs.mkdirSync(databaseFolderPath, { recursive: true });
+  // Startup calls this under the same shared lock as ordinary writes.
+  if (!fs.existsSync(prototypeDatabasePath) && fs.existsSync(legacyPrototypeDatabasePath)) {
+    fs.renameSync(legacyPrototypeDatabasePath, prototypeDatabasePath);
+  }
   fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
   fs.mkdirSync(captureHotFolder, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
 
   const isNewDatabase = !fs.existsSync(prototypeDatabasePath);
+  if (isNewDatabase && storageSafety.listDatabaseBackups(prototypeDatabasePath).length) {
+    throw new Error(`ProgramData.db is missing but recovery backups exist. TRECS will not replace the school/job directory with an empty database. Restore a validated copy from ${path.join(databaseFolderPath, '.backups', 'ProgramData.db')} to ${prototypeDatabasePath} with TRECS closed on all workstations.`);
+  }
   const database = isNewDatabase
     ? new SQL.Database()
     : new SQL.Database(fs.readFileSync(prototypeDatabasePath));
@@ -1436,7 +1661,7 @@ async function ensurePrototypeDatabaseShape() {
 
     migrateExistingIdTemplateFiles(database);
     ensureEventPackageProducts(database);
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(database.export()), { backup: true });
   } finally {
     database.close();
   }
@@ -1565,6 +1790,9 @@ async function getCachedJobQueryDatabase(jobIdValue) {
   const entry = { database: null, promise: null };
   entry.promise = getSqlModule().then((SQL) => {
     entry.database = new SQL.Database(fs.readFileSync(databasePath));
+    // Compatibility migrations on a read remain in memory. The next scoped
+    // write persists them; opening a student must never rewrite every job.
+    prepareJobDatabaseShape(entry.database);
     return entry.database;
   });
   cachedJobQueryDatabases.set(jobId, entry);
@@ -1628,6 +1856,237 @@ async function mutateSql(callback) {
 async function writeJobSql(jobIds, callback) {
   const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
   return writeSql(callback, { jobIds: ids });
+}
+
+const imageWriteDatabases = new Map();
+const imageSubjectOwners = new Map();
+const imageAssetOwners = new Map();
+const imagePersistedSignatures = new Map();
+const idAllocatorPath = path.join(databaseFolderPath, 'record-id-reservations.json');
+
+function learnImageOwners(database, jobId) {
+  for (const [table, cache] of [['subjects', imageSubjectOwners], ['image_assets', imageAssetOwners]]) {
+    for (const row of rowsFromDatabase(database, `SELECT id FROM ${table} WHERE job_id = ${jobId}`)) cache.set(Number(row.id), jobId);
+  }
+}
+
+function closeImageWriteDatabases() {
+  for (const entry of imageWriteDatabases.values()) entry.database.close();
+  imageWriteDatabases.clear();
+}
+
+async function imageJobIdForRecord(table, idValue, hint) {
+  if (hint != null) return numericId(hint);
+  const id = numericId(idValue);
+  const cache = table === 'subjects' ? imageSubjectOwners : imageAssetOwners;
+  if (cache.has(id)) return cache.get(id);
+  const jobs = await queryProgramSql('SELECT id,root_path FROM jobs ORDER BY id');
+  const SQL = await getSqlModule();
+  for (const job of jobs) {
+    const database = new SQL.Database(await fs.promises.readFile(jobDatabasePathForRow(job)));
+    try {
+      if (rowsFromDatabase(database, `SELECT id FROM ${table} WHERE id = ${id} LIMIT 1`).length) {
+        cache.set(id, Number(job.id));
+        return Number(job.id);
+      }
+    } finally { database.close(); }
+  }
+  throw new Error(table === 'subjects' ? 'Subject not found' : 'Image not found');
+}
+
+const imageJobIdForSubject = (id, hint = null) => imageJobIdForRecord('subjects', id, hint);
+const imageJobIdForAsset = (id, hint = null) => imageJobIdForRecord('image_assets', id, hint);
+
+async function reserveDatabaseRecordIds(database) {
+  idReservations.ensureAutoincrement(database, JOB_DATA_TABLES);
+  return idReservations.reserveIds(database, JOB_DATA_TABLES, idAllocatorPath, async () => {
+    const values = idReservations.maxima(database, JOB_DATA_TABLES);
+    const SQL = await getSqlModule();
+    const directory = new SQL.Database(await fs.promises.readFile(prototypeDatabasePath));
+    try {
+      for (const job of rowsFromDatabase(directory, 'SELECT id,root_path FROM jobs')) {
+        const databasePath = jobDatabasePathForRow(job);
+        if (!fs.existsSync(databasePath)) continue;
+        const jobDatabase = new SQL.Database(await fs.promises.readFile(databasePath));
+        try { idReservations.maxima(jobDatabase, JOB_DATA_TABLES, values); }
+        finally { jobDatabase.close(); }
+      }
+    } finally { directory.close(); }
+    return values;
+  });
+}
+
+function captureStageJournals(databasePath) {
+  const folder = path.join(path.dirname(databasePath), 'pending-image-imports');
+  if (!fs.existsSync(folder)) return [];
+  const jobRoot = path.dirname(path.dirname(databasePath));
+  return fs.readdirSync(folder).filter((name) => name.endsWith('.json')).map((name) => {
+    try {
+      const journalPath = path.join(folder, name);
+      const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+      if (path.resolve(journal.databasePath) !== path.resolve(databasePath) || !Array.isArray(journal.files)) return null;
+      if (!journal.files.every((file) => pathBelongsToJobRoot(file.destinationPath, jobRoot) && file.integrity?.sha256 && file.sourcePath)) return null;
+      return { ...journal, journalPath };
+    } catch (error) { logStartup('capture recovery journal unreadable', error); return null; }
+  }).filter(Boolean);
+}
+
+function captureStageIsReferenced(database, journal) {
+  return journal.files.every((file) => {
+    const relative = path.relative(projectRoot, file.destinationPath);
+    return rowsFromDatabase(database, `SELECT id FROM image_assets WHERE current_path = ${sqlLiteral(relative)} OR original_path = ${sqlLiteral(relative)} LIMIT 1`).length
+      || rowsFromDatabase(database, 'SELECT metadata_json FROM image_assets WHERE metadata_json IS NOT NULL')
+        .some((row) => metadataValue(row.metadata_json, 'rawPath') === relative);
+  });
+}
+
+async function pendingCommittedCaptureSources(jobId) {
+  const databasePath = await storageDatabasePath(jobId);
+  const journals = captureStageJournals(databasePath);
+  if (!journals.length) return [];
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(await fs.promises.readFile(databasePath));
+  try {
+    return journals.filter((journal) => captureStageIsReferenced(database, journal))
+      .flatMap((journal) => journal.files.map((file) => file.sourcePath)).filter((source) => fs.existsSync(source));
+  } finally { database.close(); }
+}
+
+async function recoverCaptureStages(database, databasePath) {
+  for (const journal of captureStageJournals(databasePath)) {
+    if (!captureStageIsReferenced(database, journal)) {
+      // A committed journal with absent metadata may follow a manual backup
+      // restore. Preserve it for integrity review instead of deleting images.
+      if (journal.phase !== 'database_committed') storageSafety.rollbackImageStage(journal);
+      continue;
+    }
+    try {
+      for (const file of journal.files) {
+        const actual = await storageSafety.fingerprintAsync(file.destinationPath);
+        if (actual.sha256 !== file.integrity.sha256 || actual.size !== file.integrity.size) throw new Error('Saved image integrity mismatch; originals retained.');
+      }
+      storageSafety.commitImageStage(journal);
+    } catch (error) { logStartup(`capture recovery pending ${journal.journalPath}`, error); }
+  }
+}
+
+// Capture mutations never materialize other jobs or export ProgramData. sql.js
+// still serializes this one job; retain its connection until another writer
+// changes the on-disk identity. Limit resident databases to two jobs.
+async function writeImageJobSql(jobIdValue, callback) {
+  const jobId = numericId(jobIdValue);
+  await acquireDatabaseWriteLock();
+  let entry;
+  let durable = false;
+  let saveAttempted = false;
+  const stages = [];
+  try {
+    closeCachedQueryDatabase();
+    closeCachedProgramQueryDatabase();
+    closeCachedJobQueryDatabases();
+    closeCachedScopedQueryDatabases();
+    const rows = await queryProgramSql(`SELECT * FROM jobs WHERE id = ${jobId}`);
+    if (!rows.length) throw new Error('Job not found');
+    const databasePath = jobDatabasePathForRow(rows[0]);
+    const signature = storageSafety.fileSignature(databasePath);
+    entry = imageWriteDatabases.get(jobId);
+    if (entry && (entry.path !== databasePath || entry.signature !== signature)) {
+      entry.database.close(); imageWriteDatabases.delete(jobId); entry = null;
+    }
+    if (!entry) {
+      const SQL = await getSqlModule();
+      const database = new SQL.Database(await fs.promises.readFile(databasePath));
+      try { prepareJobDatabaseShape(database); }
+      catch (error) { database.close(); throw error; }
+      await recoverCaptureStages(database, databasePath);
+      entry = { path: databasePath, signature, database };
+      imageWriteDatabases.set(jobId, entry);
+      learnImageOwners(database, jobId);
+    }
+    const database = entry.database;
+    const validateIds = await reserveDatabaseRecordIds(database);
+    database.stageImageFiles = async (files) => {
+      const journal = await storageSafety.stageImageFilesAsync(databasePath, files);
+      stages.push(journal);
+      return journal;
+    };
+    database.run('BEGIN;');
+    const result = await callback(database);
+    validateIds();
+    database.run('COMMIT;');
+    saveAttempted = true;
+    await storageSafety.atomicWriteFile(databasePath, Buffer.from(database.export()), { backup: true });
+    durable = true;
+    entry.signature = storageSafety.fileSignature(databasePath);
+    imagePersistedSignatures.set(jobId, { path: databasePath, signature: entry.signature });
+    rememberPersistedJobDatabasePaths(new Map([[jobId, databasePath]]));
+    if (result?.image?.id) imageAssetOwners.set(Number(result.image.id), jobId);
+    const retainedFiles = [];
+    for (const stage of stages) {
+      try { retainedFiles.push(...storageSafety.commitImageStage(stage)); }
+      catch (error) { retainedFiles.push({ path: stage.journalPath, reason: error.message }); }
+    }
+    if (retainedFiles.length && result && typeof result === 'object') result.retainedFiles = retainedFiles;
+    while (imageWriteDatabases.size > 2) {
+      const [key, older] = imageWriteDatabases.entries().next().value;
+      older.database.close(); imageWriteDatabases.delete(key);
+    }
+    return result;
+  } catch (error) {
+    if (!durable) {
+      // A network error can make replacement success ambiguous. Keep both
+      // copies and the journal until recovery inspects the actual database.
+      if (!saveAttempted) for (const stage of stages) {
+        try { storageSafety.rollbackImageStage(stage); }
+        catch (rollbackError) { logStartup('capture staged rollback requires recovery', rollbackError); }
+      }
+      if (entry) { try { entry.database.close(); } catch (_) {} imageWriteDatabases.delete(jobId); }
+    }
+    throw error;
+  } finally {
+    if (entry?.database) delete entry.database.stageImageFiles;
+    closeCachedJobQueryDatabases();
+    closeCachedScopedQueryDatabases();
+    releaseDatabaseWriteLock();
+  }
+}
+
+async function storageDatabasePath(jobId) {
+  if (jobId == null) return prototypeDatabasePath;
+  const rows = await queryProgramSql(`SELECT root_path FROM jobs WHERE id = ${numericId(jobId)}`);
+  if (!rows.length) throw new Error('Job not found');
+  return jobDatabasePathForRow(rows[0]);
+}
+
+async function listStorageBackups(jobId) {
+  const databasePath = await storageDatabasePath(jobId);
+  return { databasePath, backups: storageSafety.listDatabaseBackups(databasePath) };
+}
+
+async function restoreStorageBackup(input) {
+  await acquireDatabaseWriteLock();
+  try {
+    if (activeProductionBatches.size) throw new Error('Pause or finish production before restoring a database.');
+    closeCachedProgramQueryDatabase();
+    const scope = input.jobId == null ? '' : `AND job_id = ${numericId(input.jobId)}`;
+    const conflicts = await queryProgramSql(`SELECT workstation_name FROM job_sessions WHERE session_status = 'open' AND expires_at > CURRENT_TIMESTAMP AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)} ${scope} LIMIT 1`);
+    if (conflicts.length) throw new Error(`Close this job on ${conflicts[0].workstation_name || 'the other workstation'} before restoring its database.`);
+    const databasePath = await storageDatabasePath(input.jobId);
+    const backupPath = path.resolve(String(input.backupPath || ''));
+    if (!storageSafety.listDatabaseBackups(databasePath).some((entry) => entry.path === backupPath)) throw new Error('Choose an existing backup for this database.');
+    const bytes = await fs.promises.readFile(backupPath);
+    const SQL = await getSqlModule();
+    const database = new SQL.Database(bytes);
+    try {
+      if (rowsFromDatabase(database, 'PRAGMA quick_check;')[0]?.quick_check !== 'ok') throw new Error('Backup failed database integrity validation.');
+      if (input.jobId != null && !rowsFromDatabase(database, `SELECT id FROM jobs WHERE id = ${numericId(input.jobId)}`).length) throw new Error('Backup belongs to a different job.');
+    } finally { database.close(); }
+    closeImageWriteDatabases();
+    imageSubjectOwners.clear(); imageAssetOwners.clear(); imagePersistedSignatures.clear();
+    closeCachedQueryDatabase(); closeCachedProgramQueryDatabase(); closeCachedJobQueryDatabases(); closeCachedScopedQueryDatabases();
+    await storageSafety.atomicWriteFile(databasePath, bytes, { backup: true, backupIntervalMs: 0 });
+    return { restored: true, databasePath, backupPath };
+  } finally { releaseDatabaseWriteLock(); }
 }
 
 async function writeResultJobSql(callback) {
@@ -2973,6 +3432,8 @@ function createCapturePackageSchema(database) {
       homeroom TEXT,
       track TEXT,
       team TEXT,
+      field1 TEXT,
+      field2 TEXT,
       photographed_status TEXT,
       notes TEXT
     );
@@ -3238,6 +3699,8 @@ function endOfDayBaselinePath(rootPathValue) {
   return path.join(resolveProjectPath(rootPathValue), 'Database', 'onsite-start.db');
 }
 
+const endOfDaySafety = require('./end-of-day-safety');
+
 function normalizeSubjectForCompare(row) {
   return {
     id: row.id,
@@ -3251,6 +3714,8 @@ function normalizeSubjectForCompare(row) {
     homeroom: row.homeroom || '',
     track: row.track || '',
     team: row.team || '',
+    field1: row.field1 || '',
+    field2: row.field2 || '',
     notes: row.notes || ''
   };
 }
@@ -3276,6 +3741,8 @@ function compareSubjectRows(currentRows, baselineRows) {
     ['homeroom', 'Homeroom'],
     ['track', 'Track'],
     ['team', 'Team'],
+    ['field1', 'Field1'],
+    ['field2', 'Field2'],
     ['notes', 'Notes']
   ];
 
@@ -3285,8 +3752,18 @@ function compareSubjectRows(currentRows, baselineRows) {
       id: row.id,
       ref: row.legacy_ref_num,
       name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' '),
+      type: row.subject_type,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      displayName: row.display_name,
+      externalId: row.external_id,
       grade: row.grade,
-      homeroom: row.homeroom
+      homeroom: row.homeroom,
+      track: row.track,
+      team: row.team,
+      field1: row.field1,
+      field2: row.field2,
+      notes: row.notes
     }));
 
   const editedSubjects = [];
@@ -3341,7 +3818,7 @@ function parseImageMetadata(metadataJson) {
 
 async function buildEndOfDayPreview(jobId) {
   const SQL = await getSqlModule();
-  const sourceDatabase = await openWorkingDatabase();
+  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
 
   try {
     const jobRows = rowsFromDatabase(sourceDatabase, `
@@ -3376,6 +3853,7 @@ async function buildEndOfDayPreview(jobId) {
     const capturedImageWhere = localCaptureImageIds.length
       ? `AND ia.id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})`
       : 'AND 1 = 0';
+    const capturedImageIdsSeen = new Set();
     const capturedImages = rowsFromDatabase(sourceDatabase, `
       SELECT
         ia.id,
@@ -3410,6 +3888,10 @@ async function buildEndOfDayPreview(jobId) {
         ...row,
         rawPath: metadata.rawPath || localRow.cr3_path || null
       };
+    }).filter((row) => {
+      if (capturedImageIdsSeen.has(Number(row.id))) return false;
+      capturedImageIdsSeen.add(Number(row.id));
+      return true;
     });
     const wrongReferenceMoves = localCaptureImageIds.length
       ? rowsFromDatabase(sourceDatabase, `
@@ -3492,20 +3974,15 @@ async function getEndOfDayPreview(_event, jobIdValue) {
   return buildEndOfDayPreview(numericId(jobIdValue));
 }
 
-function movePackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
-  if (!sourcePathValue) {
-    return null;
-  }
-
-  const sourcePath = resolveProjectPath(sourcePathValue);
+async function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
+  const sourcePath = sourcePathValue && resolveProjectPath(sourcePathValue);
   if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
-    return null;
+    throw new Error(`Captured file is missing: ${sourcePathValue || '(no path)'}. Correct it before creating End of Day.`);
   }
-
   fs.mkdirSync(destinationFolder, { recursive: true });
   const destinationPath = uniquePath(destinationFolder, fallbackName || path.basename(sourcePath));
-  moveFile(sourcePath, destinationPath);
-  return path.relative(projectRoot, destinationPath);
+  const integrity = await endOfDaySafety.copyVerified(sourcePath, destinationPath);
+  return { sourcePath, destinationPath, relativePath: path.relative(projectRoot, destinationPath), integrity };
 }
 
 function endOfDayPackageDisplayName(preview, createdAt) {
@@ -3652,7 +4129,28 @@ function adjustedEndOfDaySubjectChanges(preview, adjustments = {}) {
 
 async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const jobId = numericId(jobIdValue);
+  for (const [webContentsId, watcher] of captureWatchers) {
+    if (watcher.queueAvailableFiles) watcher.queueAvailableFiles();
+    if (Number(watcher.jobId) !== jobId && !watcher.pendingCaptures.some((pending) => Number(pending.jobId) === jobId)) continue;
+    if (watcher.importing || watcher.pendingCaptures.length || watcher.warningOpen) {
+      throw new Error('Finish importing or skip the pending capture files before creating End of Day.');
+    }
+    closeCaptureWatcher(webContentsId);
+  }
   const preview = await buildEndOfDayPreview(jobId);
+  const journalPath = path.join(resolveProjectPath(preview.job.rootPath), 'Database', 'end-of-day-pending.json');
+  if (fs.existsSync(journalPath)) {
+    const pending = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    const pendingManifestPath = path.join(pending.packagePath, 'end-of-day-manifest.json');
+    if (fs.existsSync(pendingManifestPath)) {
+      const pendingManifest = JSON.parse(fs.readFileSync(pendingManifestPath, 'utf8'));
+      if (pendingManifest.state === 'complete') {
+        const cleanup = await finishEndOfDayCleanup(jobId, pending, journalPath);
+        return { packagePath: pending.packagePath, manifestPath: pendingManifestPath, databasePath: path.join(pending.packagePath, 'Database', 'job.db'), counts: { ...pendingManifest.counts, ...cleanup }, recovered: true };
+      }
+    }
+    // An interrupted build never removed its sources. Preserve that folder for diagnosis.
+  }
   const subjectChanges = adjustedEndOfDaySubjectChanges(preview, adjustments);
   const adjustedCounts = {
     ...preview.counts,
@@ -3669,14 +4167,20 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   fs.mkdirSync(databaseFolder, { recursive: true });
   fs.mkdirSync(jpgFolder, { recursive: true });
   fs.mkdirSync(rawFolder, { recursive: true });
+  const journal = { jobId, packageId: crypto.randomUUID(), packagePath, phase: 'building', files: [], copiedImages: [] };
+  endOfDaySafety.atomicJson(journalPath, journal);
   if (preview.hasBaseline && fs.existsSync(preview.baselinePath)) {
-    fs.copyFileSync(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
+    await endOfDaySafety.copyVerified(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
   }
 
   const copiedImages = [];
-  preview.capturedImages.forEach((image) => {
-    const jpgPath = movePackageFile(image.currentPath, jpgFolder);
-    const rawPath = movePackageFile(image.rawPath, rawFolder);
+  for (const image of preview.capturedImages) {
+    const jpg = await copyPackageFile(image.currentPath, jpgFolder);
+    if (!image.rawPath && /raw|cr[23]/i.test(image.captureFileMode || '')) {
+      throw new Error(`Missing RAW for ${image.filename}. The original JPG remains in capture storage.`);
+    }
+    const raw = image.rawPath ? await copyPackageFile(image.rawPath, rawFolder) : null;
+    journal.files.push(jpg, ...(raw ? [raw] : []));
     copiedImages.push({
       imageAssetId: image.id,
       captureSessionId: image.captureSessionId,
@@ -3685,62 +4189,34 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       captureWorkstation: image.captureWorkstation || null,
       photographerName: image.photographerName || null,
       captureFileMode: image.captureFileMode || null,
+      status: image.status,
+      rejectedAt: image.rejectedAt || null,
       ref: image.ref,
       studentName: image.studentName,
       filename: image.filename,
-      jpgPath,
-      rawPath,
+      jpgPath: path.relative(packagePath, jpg.destinationPath),
+      rawPath: raw ? path.relative(packagePath, raw.destinationPath) : null,
+      jpgIntegrity: jpg.integrity,
+      rawIntegrity: raw ? raw.integrity : null,
       selected: image.selected === 1
     });
-  });
-
-  await writeJobSql(jobId, (database) => {
-    copiedImages.forEach((image) => {
-      const currentPath = image.jpgPath || null;
-      const metadata = {
-        rawPath: image.rawPath || null,
-        fileMode: image.captureFileMode || null,
-        shootStage: image.shootStage || null,
-        captureSessionId: image.captureSessionId || null,
-        endOfDayPackage: path.relative(projectRoot, packagePath)
-      };
-      database.run(`
-        UPDATE image_assets
-        SET original_path = ?,
-            current_path = ?,
-            status = 'packaged',
-            metadata_json = ?,
-            imported_at = CURRENT_TIMESTAMP
-        WHERE id = ?;
-      `, [
-        currentPath,
-        currentPath,
-        JSON.stringify(metadata),
-        image.imageAssetId
-      ]);
-      if (currentPath) {
-        database.run(`
-          UPDATE image_versions
-          SET path = ?
-          WHERE image_asset_id = ?
-            AND version_type = 'original';
-        `, [currentPath, image.imageAssetId]);
-      }
-    });
-    return { closedImages: copiedImages.length };
-  });
-  await markLocalCaptureEventsPackaged(jobId, copiedImages);
+  }
+  journal.copiedImages = copiedImages;
+  endOfDaySafety.atomicJson(journalPath, journal);
   if (preview.localCaptureDatabasePath && fs.existsSync(preview.localCaptureDatabasePath)) {
-    fs.copyFileSync(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
+    await endOfDaySafety.copyVerified(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
   }
 
   const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
-    fs.copyFileSync(jobDatabasePath, path.join(databaseFolder, 'job.db'));
+    await endOfDaySafety.copyVerified(jobDatabasePath, path.join(databaseFolder, 'job.db'));
   }
 
   const manifest = {
     packageType: 'end_of_day',
+    packageId: journal.packageId,
+    formatVersion: 2,
+    state: 'complete',
     app: 'TRECS',
     createdAt: createdAt.toISOString(),
     workstation: process.env.COMPUTERNAME || os.hostname(),
@@ -3757,16 +4233,40 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       database: 'Database/job.db',
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
       onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
+      legacyTrecsImport: 'Legacy TRECS Import.xlsx',
       images: 'JPG',
       rawImages: 'RAW'
     }
   };
 
-  const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  const SQL = await getSqlModule();
+  const packageDatabase = new SQL.Database(fs.readFileSync(jobDatabasePath));
+  try {
+    const legacyImportResult = writeLegacyTrecsImportWorkbook(
+      path.join(packagePath, manifest.paths.legacyTrecsImport),
+      manifest,
+      rowsFromOptionalTable(packageDatabase, 'subjects')
+    );
+    manifest.legacyTrecsImport = {
+      newRecords: legacyImportResult.newRecords,
+      changedSubjects: legacyImportResult.changedSubjects,
+      fieldChanges: legacyImportResult.fieldChanges
+    };
+    const workbookDescriptor = fs.openSync(path.join(packagePath, manifest.paths.legacyTrecsImport), 'r+');
+    try { fs.fsyncSync(workbookDescriptor); } finally { fs.closeSync(workbookDescriptor); }
+  } finally {
+    packageDatabase.close();
+  }
 
-  const cleanup = await writeJobSql(jobId, (database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
-  const refreshedJobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
+  manifest.databaseIntegrity = await endOfDaySafety.fileDigest(path.join(databaseFolder, 'job.db'));
+  // Complete, flushed manifest is the commit point. No laptop records or sources
+  // are removed until the entire portable package has passed verification.
+  endOfDaySafety.atomicJson(manifestPath, manifest);
+  journal.phase = 'complete';
+  endOfDaySafety.atomicJson(journalPath, journal);
+  const cleanup = await finishEndOfDayCleanup(jobId, journal, journalPath);
+  const refreshedJobDatabasePath = jobDatabasePath;
 
   queueTrecsLogEvent('END_OF_DAY.CREATED', {
     message: `End of Day created for ${preview.job.clientName} / ${preview.job.name}`,
@@ -3794,6 +4294,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     jobDatabasePath: refreshedJobDatabasePath,
     counts: {
       ...adjustedCounts,
+      retainedFiles: cleanup.retainedFiles || [],
       resetSubjects: cleanup.resetSubjects || 0
     }
   };
@@ -3807,7 +4308,7 @@ async function writeSql(updateDatabase, options = {}) {
   closeCachedProgramQueryDatabase();
   closeCachedJobQueryDatabases();
   closeCachedScopedQueryDatabases();
-  acquireDatabaseWriteLock();
+  await acquireDatabaseWriteLock();
   let database;
 
   try {
@@ -3815,8 +4316,10 @@ async function writeSql(updateDatabase, options = {}) {
     // globally unique. The persistence scope below prevents rewriting jobs that
     // were not changed.
     database = await openWorkingDatabase();
+    const validateIds = await reserveDatabaseRecordIds(database);
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
+    validateIds();
     database.run('COMMIT');
     const requestedJobIds = typeof options.jobIds === 'function'
       ? options.jobIds(result)
@@ -3836,12 +4339,52 @@ async function writeSql(updateDatabase, options = {}) {
   }
 }
 
+async function finishEndOfDayCleanup(jobId, journal, journalPath) {
+  const packageInfo = { packageFolder: journal.packagePath, ...readEndOfDayPackage(journal.packagePath) };
+  await endOfDaySafety.validatePackage(packageInfo);
+  const copiedImages = journal.copiedImages || packageInfo.manifest.copiedImages || [];
+  let cleanup = { resetSubjects: 0 };
+  if (journal.phase !== 'database_committed') {
+    cleanup = await writeJobSql(jobId, (database) => {
+      for (const image of copiedImages) {
+        const currentPath = path.relative(projectRoot, path.join(journal.packagePath, image.jpgPath));
+        const old = rowsFromDatabase(database, `SELECT metadata_json FROM image_assets WHERE id = ${numericId(image.imageAssetId)} AND job_id = ${jobId};`)[0];
+        const metadata = { ...parseImageMetadata(old && old.metadata_json), rawPath: image.rawPath ? path.relative(projectRoot, path.join(journal.packagePath, image.rawPath)) : null, endOfDayPackageId: journal.packageId, endOfDayPackage: path.relative(projectRoot, journal.packagePath) };
+        database.run("UPDATE image_assets SET original_path = ?, current_path = ?, status = 'packaged', metadata_json = ? WHERE id = ? AND job_id = ?;", [currentPath, currentPath, JSON.stringify(metadata), image.imageAssetId, jobId]);
+        database.run("UPDATE image_versions SET path = ? WHERE image_asset_id = ? AND version_type = 'original';", [currentPath, image.imageAssetId]);
+      }
+      return clearPackagedCaptureLinks(database, jobId, copiedImages);
+    });
+    await markLocalCaptureEventsPackaged(jobId, copiedImages);
+    journal.phase = 'database_committed';
+    endOfDaySafety.atomicJson(journalPath, journal);
+  }
+  const retainedFiles = [];
+  for (const file of journal.files || []) {
+    if (!fs.existsSync(file.sourcePath)) continue;
+    try {
+      await endOfDaySafety.verifyFile(file.destinationPath, file.integrity);
+      await endOfDaySafety.verifyFile(file.sourcePath, file.integrity);
+      await fs.promises.unlink(file.sourcePath);
+    } catch (error) {
+      retainedFiles.push({ path: file.sourcePath, reason: error.message });
+    }
+  }
+  if (retainedFiles.length) {
+    journal.retainedFiles = retainedFiles;
+    endOfDaySafety.atomicJson(journalPath, journal);
+  } else {
+    fs.unlinkSync(journalPath);
+  }
+  return { ...cleanup, retainedFiles };
+}
+
 async function writeProgramSql(updateDatabase) {
   closeCachedQueryDatabase();
   closeCachedProgramQueryDatabase();
   closeCachedJobQueryDatabases();
   closeCachedScopedQueryDatabases();
-  acquireDatabaseWriteLock();
+  await acquireDatabaseWriteLock();
   let database;
 
   try {
@@ -3850,7 +4393,7 @@ async function writeProgramSql(updateDatabase) {
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
     database.run('COMMIT');
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(database.export()), { backup: true });
     return result;
   } catch (error) {
     try {
@@ -5668,7 +6211,7 @@ async function runEventUnitRender(event, input, jobRow) {
   const sourceValue = optionalText(input.sourceValue, 255);
   const sortBy = String(input.sortBy || 'imageNumber');
   const eventPlanMode = String(input.eventPlanMode || 'package_plan');
-  const orders = await querySql(`
+  const orders = await queryScopedSql(jobId, `
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId,
            s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
@@ -5691,12 +6234,12 @@ async function runEventUnitRender(event, input, jobRow) {
   `);
   const selectedOrders = orders.sort((a, b) => eventUnitSortValue(a, sortBy).localeCompare(eventUnitSortValue(b, sortBy), undefined, { numeric: true, sensitivity: 'base' }));
   const schoolName = selectedOrders[0]?.clientName || jobRow.clientName || 'School';
-  const runDate = new Date().toISOString().slice(0, 10);
+  const runDate = /^\d{4}-\d{2}-\d{2}$/.test(input.renderDate || '') ? input.renderDate : new Date().toISOString().slice(0, 10);
   const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`), 'Event Render');
   const cardFolder = path.join(outputFolder, 'EventCards');
   const sheetFolder = path.join(outputFolder, 'StackSheets');
   fs.mkdirSync(outputFolder, { recursive: true });
-  const itemRows = selectedOrders.length ? await querySql(`
+  const itemRows = selectedOrders.length ? await queryScopedSql(jobId, `
     SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue,
            p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
     FROM order_items oi
@@ -5711,22 +6254,27 @@ async function runEventUnitRender(event, input, jobRow) {
   const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []]));
   itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
   const overlaySources = eventOverlaySources(selectedOrders[0]?.rootPath || jobRow.rootPath);
-  const result = { eventRender: true, jobId, outputFolder, orders: selectedOrders.length, cards: 0, sheetPages: 0, pdfPath: '', missingPhotos: [], unsupportedItems: [], files: [] };
+  const result = { eventRender: true, jobId, outputFolder, orders: selectedOrders.length, cards: 0, sheetPages: 0, pdfPath: '', missingPhotos: [], unsupportedItems: [], files: [], orderResults: [] };
+  if (input.eventIndividualCards === false && input.eventStackSheets === false && input.eventPdf === false) throw new Error('Select at least one event output.');
   const cardSources = [];
   const cardPaths = [];
   let cardSequence = 1;
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    if (typeof input.stopRequested === 'function' && input.stopRequested()) { result.interrupted = input.stopRequested(); break; }
     const order = selectedOrders[orderIndex];
+    const before = outputSnapshot(result);
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `Event ${order.imageNumber || order.ref || order.id}` });
     const items = itemsByOrder.get(Number(order.id)) || [];
     const cards = eventCardsForOrder(order, items, eventPlanMode);
     if (!cards.length) {
       result.unsupportedItems.push({ orderId: order.id, ref: order.ref, item: order.packageCodes || 'No event product mapping' });
+      result.orderResults.push(orderRenderOutcome(order, before, result, input));
       continue;
     }
     const imageSource = imageDataUrlFromPath(order.imagePath);
     if (!imageSource) {
       result.missingPhotos.push({ orderId: order.id, ref: order.ref, imageNumber: order.imageNumber });
+      result.orderResults.push(orderRenderOutcome(order, before, result, input));
       continue;
     }
     for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
@@ -5758,6 +6306,7 @@ async function runEventUnitRender(event, input, jobRow) {
       result.cards += 1;
       cardSequence += 1;
     }
+    result.orderResults.push(orderRenderOutcome(order, before, result, input));
   }
   const sheetPaths = [];
   if ((input.eventStackSheets !== false || input.eventPdf !== false) && cardSources.length) {
@@ -5795,7 +6344,7 @@ async function imagePrepExport(event, input = {}) {
   }
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']);
   if (!allowedSources.has(source)) throw new Error('Invalid ImagePrep source.');
-  const orders = await querySql(`
+  const orders = await queryScopedSql(jobId, `
     SELECT o.id, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
@@ -5808,7 +6357,7 @@ async function imagePrepExport(event, input = {}) {
     ORDER BY s.last_name, s.first_name, o.id;
   `);
   if (!orders.length) throw new Error('No paid orders matched this ImagePrep export.');
-  const itemRows = await querySql(`
+  const itemRows = await queryScopedSql(jobId, `
     SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue,
            p.name AS productName, p.category, p.metadata_json AS metadataJson
     FROM order_items oi
@@ -6056,6 +6605,8 @@ async function rasterizeDigitalDownloadCard(webContents, imageSource, templateSo
   })`);
 }
 
+const { outputSnapshot, orderRenderOutcome, completedOrderIds, renderJobStatus } = require('./production-outcomes');
+
 async function runUnitRender(event, input = {}) {
   const jobId = numericId(input.jobId); const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
   if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
@@ -6085,7 +6636,7 @@ async function runUnitRender(event, input = {}) {
   const jobSummary = selectedJob || {};
   const job = await adminJobSummary(jobId);
   const schoolName = selectedOrders[0]?.clientName || jobSummary.clientName || 'School';
-  const runDate = new Date().toISOString().slice(0, 10);
+  const runDate = /^\d{4}-\d{2}-\d{2}$/.test(input.renderDate || '') ? input.renderDate : new Date().toISOString().slice(0, 10);
   const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`));
   fs.mkdirSync(outputFolder, { recursive: true });
   const itemRows = selectedOrders.length ? await queryScopedSql(jobId, `
@@ -6104,7 +6655,7 @@ async function runUnitRender(event, input = {}) {
     return folder;
   };
   const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
-  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, zipFiles: 0, idCards: 0, deferredComposites: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, addons: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, zipFiles: 0, idCards: 0, deferredComposites: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, addons: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [], orderResults: [] };
   const addonInstructions = [[
     'Action',
     'Image',
@@ -6117,10 +6668,15 @@ async function runUnitRender(event, input = {}) {
     'Homeroom'
   ]];
   const addonCopiedImages = new Set();
+  const writtenDownloadArchives = new Set();
   const itemTally = new Map();
   const idCardSubjects = [];
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    if (typeof input.stopRequested === 'function' && input.stopRequested()) { result.interrupted = input.stopRequested(); break; }
     const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
+    const before = outputSnapshot(result);
+    try {
+    if (!items.length) result.unsupportedItems.push({ orderId: order.id, item: 'No product mapping' });
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
     const imagePrepItem = items.find(isImagePrepItem);
     const preparedPath = imagePrepItem ? preparedImagePathForOrder(order, imagePrepItem) : null;
@@ -6131,7 +6687,7 @@ async function runUnitRender(event, input = {}) {
     if (input.includeCompositeNotice && items.some(isDeferredCompositeItem)) {
       contents.push('Class/Star composite will be delivered after makeup day');
     }
-    const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
+    const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}_order${order.id}`);
     if (input.includeUnits !== false) {
       let notedMissingImagePrep = false;
       let notedMissingPhoto = false;
@@ -6145,6 +6701,11 @@ async function runUnitRender(event, input = {}) {
           continue;
         }
         if (isIdCardItem(item)) {
+          if (!envelopeImageSource) {
+            if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+            notedMissingPhoto = true;
+            continue;
+          }
           const copies = Math.max(1, Number(item.quantity || 1));
           for (let copy = 0; copy < copies; copy += 1) {
             idCardSubjects.push({
@@ -6221,9 +6782,11 @@ async function runUnitRender(event, input = {}) {
           fs.writeFileSync(path.join(folders.digitalDownloads, `${prefix}_DigitalDownload_${itemIndex + 1}.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
           fs.rmSync(qrPath, { force: true });
           const zipEntries = zipSourceEntriesForOrder(order, items.filter(isImagePrepItem));
-          if (zipEntries.length) {
+          const archivePath = path.join(folders.zip, `${prefix}_DigitalDownload.zip`);
+          if (zipEntries.length && !writtenDownloadArchives.has(archivePath)) {
             ensureRenderFolder(folders.zip);
-            writeStoredZip(path.join(folders.zip, `${prefix}_DigitalDownload.zip`), zipEntries);
+            writeStoredZip(archivePath, zipEntries);
+            writtenDownloadArchives.add(archivePath);
             result.zipFiles += 1;
           }
           result.digitalDownloads += 1;
@@ -6250,17 +6813,17 @@ async function runUnitRender(event, input = {}) {
             });
             const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
             ensureRenderFolder(folders.tenByThirteens);
-            fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
+            fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${itemIndex + 1}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
             result.tenByThirteens += 1;
           }
           continue;
         }
         const recipe = recipes.get(String(item.rawValue || '').toLowerCase()) || recipes.get(String(item.productName || '').toLowerCase());
-        if (!recipe) { if (item.rawValue || item.productName) result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName }); continue; }
+        if (!recipe) { result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName || `Unmapped code ${item.packageCode || ''}` }); continue; }
         for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
           const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], `${recipe.name} — ${sheetIndex + 1} of ${recipe.sheets.length}`);
           const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
-          ensureRenderFolder(folders.units); fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
+          ensureRenderFolder(folders.units); fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_copy${copy + 1}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
         }
       }
     }
@@ -6271,6 +6834,10 @@ async function runUnitRender(event, input = {}) {
     if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, false, envelopeTemplateDataUrl(order, false)), 2625, 3975); ensureRenderFolder(folders.envelopes); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
     if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, true, envelopeTemplateDataUrl(order, true)), 3450, 4950); ensureRenderFolder(folders.largeEnvelopes); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
     if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, envelopeImageSource), 1200, 600); ensureRenderFolder(folders.labels); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+    } catch (error) {
+      result.errors.push({ orderId: order.id, ref: order.ref, message: error.message || String(error) });
+    }
+    result.orderResults.push(orderRenderOutcome(order, before, result, input));
   }
   if (result.addons) {
     ensureRenderFolder(folders.addons);
@@ -6285,7 +6852,7 @@ async function runUnitRender(event, input = {}) {
       directorySchoolYear: String(new Date().getFullYear())
     }, idCardOutputPath, idCardOutputPath);
   }
-  result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [item.item, item])).values());
+  result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [`${item.orderId}:${item.item}`, item])).values());
   result.reports = {
     delivery: writeUnitRenderDeliveryReport(outputFolder, jobSummary, selectedOrders, itemsByOrder, sortBy),
     summary: writeUnitRenderJobSummaryReport(outputFolder, jobSummary, result, itemTally)
@@ -6501,61 +7068,104 @@ async function importOnlineOrders(_event, input = {}) {
   return { ...result, fileName: preview.fileName, copiedSourcePath };
 }
 
+const activeProductionBatches = new Map();
+const activeProductionJobs = new Map();
+
 async function getBatchRenderSetup() {
   const setup = await getUnitRenderSetup(null, null);
   const history = await queryProgramSql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
-    COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status = 'failed' THEN 1 ELSE 0 END) AS failedJobs
+    COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status IN ('failed', 'completed_with_errors') THEN 1 ELSE 0 END) AS failedJobs
     FROM render_batches rb LEFT JOIN render_batch_jobs rbj ON rbj.render_batch_id = rb.id
     GROUP BY rb.id ORDER BY rb.id DESC LIMIT 20;`);
-  return { jobs: setup.jobs, history, locks: await getJobSessions() };
+  const details = history.length ? await queryProgramSql(`SELECT render_batch_id AS batchId, job_id AS jobId, status, error_message AS errorMessage, output_path AS outputPath, result_json AS resultJson FROM render_batch_jobs WHERE render_batch_id IN (${history.map((batch) => Number(batch.id)).join(',')}) ORDER BY sort_order;`) : [];
+  return { jobs: setup.jobs, history: history.map((batch) => ({ ...batch, activeHere: activeProductionBatches.has(Number(batch.id)), details: details.filter((row) => Number(row.batchId) === Number(batch.id)).map((row) => ({ ...row, result: JSON.parse(row.resultJson || 'null') })) })), locks: await getJobSessions() };
 }
 
 async function runBatchRender(event, input = {}) {
   const jobIds = Array.from(new Set((Array.isArray(input.jobIds) ? input.jobIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))).sort((a, b) => a - b);
-  if (jobIds.length < 2) throw new Error('Select at least two jobs for a batch render.');
+  if (!jobIds.length) throw new Error('Select at least one job for the production queue.');
   const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
   if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
-  const acquired = [];
-  try {
-    for (const jobId of jobIds) {
-      const lock = await acquireJobSession(event, jobId, 'batch_render');
-      if (!lock.acquired) throw new Error(`${lock.job.clientName} / ${lock.job.name} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
-      acquired.push(jobId);
-    }
     const jobs = await queryProgramSql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
+    if (jobs.length !== jobIds.length) throw new Error('One or more selected jobs no longer exist.');
     const name = optionalText(input.name, 160) || `Production Batch ${new Date().toLocaleString()}`;
-    const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom') };
+    const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom'), renderDate: new Date().toISOString().slice(0, 10) };
     const batch = await writeProgramSql((database) => {
-      database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, started_at, created_by) VALUES (?, ?, 'running', ?, ?, CURRENT_TIMESTAMP, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
+      database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, created_by) VALUES (?, ?, 'queued', ?, ?, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
       const batchId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
       const statement = database.prepare(`INSERT INTO render_batch_jobs (render_batch_id, job_id, sort_order, status) VALUES (?, ?, ?, 'queued');`);
       try { jobs.forEach((job, index) => statement.run([batchId, job.id, index])); } finally { statement.free(); }
       return { id: Number(batchId), name };
     });
-    const results = []; let failed = 0;
+    return executeProductionBatch(event, batch.id);
+}
+
+async function executeProductionBatch(event, batchIdValue) {
+  const batchId = numericId(batchIdValue);
+  if (activeProductionBatches.has(batchId)) throw new Error('This batch is already running on this workstation.');
+  const control = { stop: null };
+  activeProductionBatches.set(batchId, control);
+  const acquired = [];
+  try {
+    const [batch] = await queryProgramSql(`SELECT id, name, output_path AS outputFolder, options_json AS optionsJson FROM render_batches WHERE id = ${batchId};`);
+    if (!batch) throw new Error('Production batch not found.');
+    if (!fs.existsSync(batch.outputFolder)) throw new Error('The saved output folder is unavailable. Reconnect the output drive before resuming.');
+    const options = JSON.parse(batch.optionsJson || '{}');
+    const jobs = await queryProgramSql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName, rbj.status, rbj.output_path AS outputPath, rbj.result_json AS resultJson FROM render_batch_jobs rbj JOIN jobs j ON j.id = rbj.job_id JOIN clients c ON c.id = j.client_id WHERE rbj.render_batch_id = ${batchId} ORDER BY rbj.sort_order;`);
+    for (const job of jobs.filter((job) => job.status !== 'completed').sort((a, b) => a.id - b.id)) {
+      if (activeProductionJobs.has(Number(job.id))) throw new Error(`${job.clientName} / ${job.jobName} is already in a running production queue on this workstation.`);
+      activeProductionJobs.set(Number(job.id), batchId);
+      const lock = await acquireJobSession(event, job.id, 'batch_render');
+      if (!lock.acquired) throw new Error(`${job.clientName} / ${job.jobName} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
+      acquired.push(job.id);
+    }
+    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), finished_at = NULL WHERE id = ?;`, [batchId]));
+    const results = [];
     for (let index = 0; index < jobs.length; index += 1) {
-      const job = jobs[index]; const jobOutput = path.join(outputFolder, safeFolderName(`${job.clientName}_${job.jobName}`)); fs.mkdirSync(jobOutput, { recursive: true });
-      event.sender.send('batch-render:progress', { current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
-      await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batch.id, job.id]));
+      const job = jobs[index];
+      if (job.status === 'completed') { results.push({ job, status: job.status, result: JSON.parse(job.resultJson || 'null') }); continue; }
+      if (control.stop) break;
+      const jobOutput = job.outputPath || path.join(batch.outputFolder, `Batch_${batchId}`, safeFolderName(`${job.clientName}_${job.jobName}_${job.id}`));
+      fs.mkdirSync(jobOutput, { recursive: true });
+      event.sender.send('batch-render:progress', { batchId, current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
+      await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, finished_at = NULL, error_message = NULL, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batchId, job.id]));
       try {
-        const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options });
-        results.push({ job, status: 'completed', result });
-        await writeJobSql(job.id, (database) => {
-          database.run(`UPDATE render_batch_jobs SET status = 'completed', result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [JSON.stringify(result), batch.id, job.id]);
-          database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ? AND paid_status = 'paid' AND subject_id IN (SELECT id FROM subjects WHERE job_id = ? AND primary_image_asset_id IS NOT NULL);`, [job.id, job.id]);
-        });
+        const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options, stopRequested: () => control.stop });
+        const status = renderJobStatus(result);
+        const completedIds = completedOrderIds(result);
+        if (completedIds.length) await writeJobSql(job.id, (database) => database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ${Number(job.id)} AND id IN (${completedIds.join(',')});`));
+        results.push({ job, status, result });
+        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [status, JSON.stringify(result), batchId, job.id]));
       } catch (error) {
-        failed += 1; results.push({ job, status: 'failed', error: error.message });
-        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batch.id, job.id]));
+        results.push({ job, status: 'failed', error: error.message });
+        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batchId, job.id]));
       }
     }
-    const status = failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed';
-    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batch.id]));
-    event.sender.send('batch-render:progress', { current: jobs.length, total: jobs.length, message: 'Batch render complete' });
-    return { batchId: batch.id, name: batch.name, status, outputFolder, results };
+    const failed = results.filter((item) => ['failed', 'completed_with_errors'].includes(item.status)).length;
+    const status = control.stop || (failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed');
+    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batchId]));
+    event.sender.send('batch-render:progress', { batchId, current: results.length, total: jobs.length, message: `Production batch ${status.replace(/_/g, ' ')}` });
+    return { batchId, name: batch.name, status, outputFolder: batch.outputFolder, results };
   } finally {
+    activeProductionBatches.delete(batchId);
+    for (const [jobId, owner] of activeProductionJobs) if (owner === batchId) activeProductionJobs.delete(jobId);
     if (acquired.length) await releaseJobSession(event, acquired);
   }
+}
+
+async function controlProductionBatch(event, input = {}) {
+  const batchId = numericId(input.batchId);
+  const action = String(input.action || '');
+  if (['resume', 'retry'].includes(action)) return executeProductionBatch(event, batchId);
+  if (!['pause', 'cancel'].includes(action)) throw new Error('Invalid production queue action.');
+  const status = action === 'pause' ? 'paused' : 'cancelled';
+  const control = activeProductionBatches.get(batchId);
+  if (control) { control.stop = status; return { batchId, status: `${action}_requested` }; }
+  const [batch] = await queryProgramSql(`SELECT status FROM render_batches WHERE id = ${batchId};`);
+  if (!batch) throw new Error('Production batch not found.');
+  if (batch.status === 'running') throw new Error('This batch is running on another workstation. Pause it there, or resume here after its reservation expires.');
+  await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, batchId]));
+  return { batchId, status };
 }
 
 ipcMain.handle('student-lists:get-setup', getStudentListSetup);
@@ -6567,6 +7177,7 @@ ipcMain.handle('online-orders:import', importOnlineOrders);
 ipcMain.handle('batch-render:get-setup', getBatchRenderSetup);
 ipcMain.handle('batch-render:choose-output-folder', chooseUnitRenderOutputFolder);
 ipcMain.handle('batch-render:run', runBatchRender);
+ipcMain.handle('batch-render:control', controlProductionBatch);
 
 function eventImageNumber(filename) {
   return path.basename(String(filename || ''), path.extname(String(filename || ''))).trim();
@@ -9382,6 +9993,92 @@ function outputFileName(baseName, outputStem) {
   return `${name}-${outputStem}${extension}`;
 }
 
+const { exportSisDelivery, stickerPageSvg } = require('./school-deliverables');
+
+async function availableProductionImage(subject) {
+  for (const candidate of [subject.croppedLargePath, subject.croppedMediumPath, subject.originalImagePath, subject.imagePath]) {
+    const imagePath = candidate ? resolveProjectPath(candidate) : null;
+    if (!imagePath) continue;
+    try { if ((await fs.promises.stat(imagePath)).isFile()) return imagePath; } catch { /* Try the next available version. */ }
+  }
+  return '';
+}
+
+async function renderSisDelivery(job, subjects, options, absoluteOutputPath) {
+  const outputFolder = absoluteOutputPath.replace(/\.csv$/i, '_files');
+  const output = await exportSisDelivery({ subjects: sisExportSubjects(subjects), formats: options.sisFormats, outputFolder,
+    resolveImage: availableProductionImage,
+    resize: (filePath, width, height) => imageProcessor.resize(filePath, width, height, { fit: 'contain' }) });
+  const columns = ['Format', 'Status', 'Ref', 'Student ID', 'First', 'Last', 'Grade', 'Image Source', 'Image Target', 'Message'];
+  await fs.promises.writeFile(absoluteOutputPath, csvRows(columns, output.rows));
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ job, ...output.manifest }, null, 2));
+  return { displayPath: outputFolder, renderedFiles: output.files, subjects: output.manifest.selectedSubjects, exceptions: output.rows.filter((row) => row.Status === 'Exception').length };
+}
+
+async function renderStickerSheets(event, job, subjects, options, listSubjectIds, absoluteOutputPath) {
+  const selected = selectedStickerSubjects(subjects, options, listSubjectIds);
+  const rows = buildStickerRows(selected, options);
+  const output = buildStickerPrintOutput(job, subjects, options, listSubjectIds);
+  const folder = absoluteOutputPath.replace(/\.csv$/i, '_sheets');
+  await fs.promises.mkdir(folder, { recursive: true });
+  const files = [];
+  const missingPhotos = new Set();
+  for (let page = 1; page <= output.manifest.pages; page += 1) {
+    const pageRows = rows.filter((row) => row.Page === page);
+    const sources = new Map();
+    for (const row of pageRows) {
+      if (sources.has(String(row.Ref))) continue;
+      const subject = selected.find((item) => String(item.ref) === String(row.Ref));
+      const sourcePath = subject && await availableProductionImage(subject);
+      try { sources.set(String(row.Ref), sourcePath ? (await imageProcessor.preview(sourcePath, 'thumbnail')).dataUrl : ''); }
+      catch { sources.set(String(row.Ref), ''); }
+      if (!sources.get(String(row.Ref))) missingPhotos.add(String(row.Ref));
+    }
+    const jpeg = await rasterizeUnitSheet(event.sender, stickerPageSvg(pageRows, sources, page), 2550, 3300);
+    const filePath = path.join(folder, `Stickers_${String(page).padStart(4, '0')}.jpg`);
+    await fs.promises.writeFile(filePath, setJpegDensity(Buffer.from(jpeg.split(',')[1], 'base64'), 300));
+    files.push(filePath);
+  }
+  const pdfPath = files.length ? path.join(folder, 'Stickers.pdf') : null;
+  if (pdfPath) writeJpegImagesPdf(pdfPath, files, 612, 792);
+  await fs.promises.writeFile(absoluteOutputPath, output.csv);
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ ...output.manifest, renderedFiles: files, pdfPath, missingPhotos: [...missingPhotos], pageSize: '8.5 x 11 inches at 300 dpi; legacy 6 x 6 positions' }, null, 2));
+  return { displayPath: pdfPath || folder, pdfPath, renderedFiles: files, subjects: selected.length, exceptions: missingPhotos.size };
+}
+
+async function renderStaffPackages(event, job, subjects, absoluteOutputPath) {
+  const items = await queryProgramSql(`SELECT pci.raw_value AS rawValue, p.name AS productName, COALESCE(pci.quantity, 1) AS quantity FROM package_plans pp JOIN package_codes pc ON pc.package_plan_id = pp.id JOIN package_code_items pci ON pci.package_code_id = pc.id LEFT JOIN products p ON p.id = pci.product_id WHERE UPPER(pp.name) = 'STAFF' AND pc.code = '101' ORDER BY pci.sort_order;`);
+  if (!items.length) throw new Error('Configure package plan STAFF, code 101 in the Package Editor before rendering staff packages (the same plan used by legacy TRECS).');
+  const recipes = new Map(pictureUnitRecipes().flatMap((recipe) => [recipe.name, ...(recipe.aliases || [])].map((name) => [name.toLowerCase(), recipe])));
+  const planned = items.map((item) => ({ ...item, recipe: recipes.get(String(item.rawValue || item.productName || '').toLowerCase()) }));
+  const unsupported = planned.filter((item) => !item.recipe);
+  if (unsupported.length) throw new Error(`Staff package has unsupported print layouts: ${unsupported.map((item) => item.rawValue || item.productName).join(', ')}. Choose supported picture units in STAFF / 101.`);
+  const staff = subjects.filter((subject) => ['staff', 'faculty'].includes(subject.subjectType) || subject.grade === 'FAC');
+  const folder = absoluteOutputPath.replace(/\.csv$/i, '_sheets');
+  await fs.promises.mkdir(folder, { recursive: true });
+  const files = [];
+  const rows = [];
+  for (const subject of staff) {
+    const sourcePath = await availableProductionImage(subject);
+    if (!sourcePath) { rows.push({ Ref: subject.ref, Name: subjectDisplayName(subject), Status: 'Missing Image', Files: '' }); continue; }
+    const imageSource = (await imageProcessor.preview(sourcePath, 'original')).dataUrl;
+    const subjectFiles = [];
+    for (let itemIndex = 0; itemIndex < planned.length; itemIndex += 1) {
+      const item = planned[itemIndex];
+      for (let copy = 1; copy <= Number(item.quantity); copy += 1) for (let sheet = 0; sheet < item.recipe.sheets.length; sheet += 1) {
+        const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, item.recipe.sheets[sheet], { schoolName: job.clientName || job.location, studentName: subjectDisplayName(subject), printInfo: `Staff ${item.recipe.name}` });
+        const destination = path.join(folder, `${safeFolderName(subject.ref || subject.id)}_${itemIndex + 1}_${safeFolderName(item.recipe.name)}_copy${copy}_${sheet + 1}.jpg`);
+        await fs.promises.writeFile(destination, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+        subjectFiles.push(destination); files.push(destination);
+      }
+    }
+    rows.push({ Ref: subject.ref, Name: subjectDisplayName(subject), Status: 'Rendered', Files: subjectFiles.join('; ') });
+  }
+  await fs.promises.writeFile(absoluteOutputPath, csvRows(['Ref', 'Name', 'Status', 'Files'], rows));
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ plan: 'STAFF', code: '101', renderedFiles: files, subjects: rows, sheetSize: '8 x 10.5 inches at 300 dpi; existing picture-unit layouts' }, null, 2));
+  return { displayPath: folder, renderedFiles: files, subjects: staff.length, exceptions: rows.filter((row) => row.Status !== 'Rendered').length };
+}
+
 function buildSisExportOutput(job, subjects, options, outputStem) {
   const selectedSubjects = sisExportSubjects(subjects);
   const formats = normalizeSisFormats(options.sisFormats);
@@ -9441,7 +10138,7 @@ function buildSisExportOutput(job, subjects, options, outputStem) {
       sort: 'last name, first name',
       excludes: ['blank first or last name'],
       imageFolder: 'CroppedMed',
-      imageCopying: 'Prototype creates map and exception files; physical image copy/resize will be added in the render pass.'
+      imageCopying: 'The delivery pass validates, copies and resizes images before writing native map entries.'
     }
   };
 
@@ -9736,26 +10433,11 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     writeMissingPhotoWorkbook(absoluteOutputPath, subjects);
   } else if (type === 'sticker_prints') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.stickerListName);
-    const stickerOutput = buildStickerPrintOutput(job, subjects, options, listSubjectIds);
-    fs.writeFileSync(absoluteOutputPath, stickerOutput.csv);
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(stickerOutput.manifest, null, 2)
-    );
+    renderDetails = await renderStickerSheets(_event, job, subjects, options, listSubjectIds, absoluteOutputPath);
+  } else if (type === 'staff_picture_packages') {
+    renderDetails = await renderStaffPackages(_event, job, subjects, absoluteOutputPath);
   } else if (type === 'sis_export') {
-    const outputStem = path.basename(outputPath, path.extname(outputPath));
-    const sisOutput = buildSisExportOutput(job, subjects, options, outputStem);
-    fs.writeFileSync(absoluteOutputPath, sisOutput.summaryCsv);
-    sisOutput.files.forEach((file) => {
-      const filePath = path.join(path.dirname(outputPath), file.relativePath);
-      const absoluteFilePath = adminOutputAbsolutePath(filePath);
-      fs.mkdirSync(path.dirname(absoluteFilePath), { recursive: true });
-      fs.writeFileSync(absoluteFilePath, file.content);
-    });
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(sisOutput.manifest, null, 2)
-    );
+    renderDetails = await renderSisDelivery(job, subjects, options, absoluteOutputPath);
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
@@ -9787,7 +10469,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         created_by,
         completed_at
       )
-      VALUES (?, ?, ?, 'complete', ?, ?, ?, CURRENT_TIMESTAMP);
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
     `);
 
     try {
@@ -9795,6 +10477,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         jobId,
         stage,
         type,
+        renderDetails.exceptions ? 'complete_with_exceptions' : 'complete',
         JSON.stringify(options),
         outputPath,
         process.env.USERNAME || os.userInfo().username || null
@@ -9812,6 +10495,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         pdfPath: renderDetails.pdfPath || null,
         subjects: renderDetails.subjects || null,
         renderedFiles: renderDetails.renderedFiles || [],
+        exceptions: renderDetails.exceptions || 0,
         type,
         stage
       };
@@ -10481,7 +11165,7 @@ async function generateCroppedMediumImages(event, jobIdValue) {
 
   sendProgress({ done: 0, created, skipped, failed, filename: '', status: 'starting' });
 
-  files.forEach((name, index) => {
+  for (const [index, name] of files.entries()) {
     const sourcePath = path.join(sourceFolder, name);
     const extension = path.extname(name).toLowerCase();
     const outputName = ['.jpg', '.jpeg'].includes(extension)
@@ -10489,20 +11173,24 @@ async function generateCroppedMediumImages(event, jobIdValue) {
       : `${path.basename(name, path.extname(name))}.jpg`;
     const destinationPath = path.join(destinationFolder, outputName);
 
-    if (fs.existsSync(destinationPath)) {
+    if (await derivativeIsFresh(sourcePath, destinationPath)) {
       skipped += 1;
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'skipped' });
-      return;
+      continue;
     }
 
     try {
-      const image = nativeImage.createFromPath(sourcePath);
-      if (image.isEmpty()) {
-        throw new Error('Could not read image');
+      const signature = await sourceSignature(sourcePath);
+      const resized = await imageProcessor.resize(sourcePath, 480, 600);
+      const bytes = setJpegDensity(Buffer.from(resized.bytes), 300);
+      const temporary = `${destinationPath}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(temporary, bytes);
+        await fs.promises.rename(temporary, destinationPath);
+        await writeDerivativeSignature(destinationPath, signature);
+      } finally {
+        await fs.promises.unlink(temporary).catch(() => {});
       }
-      const resized = image.resize({ width: 480, height: 600, quality: 'best' });
-      const bytes = setJpegDensity(resized.toJPEG(92), 300);
-      fs.writeFileSync(destinationPath, bytes);
       created += 1;
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'created' });
     } catch (error) {
@@ -10510,7 +11198,7 @@ async function generateCroppedMediumImages(event, jobIdValue) {
       errors.push({ filename: name, message: error.message || String(error) });
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'failed' });
     }
-  });
+  }
 
   const syncResult = await syncCroppedImages(null, jobId);
   const result = {
@@ -10698,7 +11386,9 @@ function upsertImportedRowsById(database, tableName, rows) {
 
 function nextDatabaseId(database, tableName) {
   const rows = rowsFromDatabase(database, `SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ${tableName};`);
-  return Number(rows[0]?.id || 1);
+  const sequence = databaseHasTable(database, 'sqlite_sequence')
+    ? rowsFromDatabase(database, `SELECT seq FROM sqlite_sequence WHERE name = ${sqlLiteral(tableName)}`)[0]?.seq : 0;
+  return Math.max(Number(rows[0]?.id || 1), Number(sequence || 0) + 1);
 }
 
 function mergeImportedSubjectCodeRows(database, rows) {
@@ -10937,7 +11627,7 @@ function readEndOfDayPackage(packageFolder) {
     throw new Error('That folder is not a TRECS End of Day package');
   }
 
-  const databasePath = path.join(packageFolder, manifest.paths && manifest.paths.database ? manifest.paths.database : 'Database/job.db');
+  const databasePath = endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.database ? manifest.paths.database : 'Database/job.db');
   if (!fs.existsSync(databasePath)) {
     throw new Error('Database\\job.db was not found in that folder');
   }
@@ -10946,8 +11636,8 @@ function readEndOfDayPackage(packageFolder) {
     manifest,
     manifestPath,
     databasePath,
-    imagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'),
-    rawImagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.rawImages ? manifest.paths.rawImages : (manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'))
+    imagesFolder: endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'),
+    rawImagesFolder: endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.rawImages ? manifest.paths.rawImages : (manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'))
   };
 }
 
@@ -10973,6 +11663,7 @@ async function chooseEndOfDayPackageFolder(event) {
     }
   }
 
+  const importReview = manifest ? await reviewEndOfDayImport(null, { packageFolder: folderPath }) : null;
   return {
     canceled: false,
     folderPath,
@@ -10980,7 +11671,8 @@ async function chooseEndOfDayPackageFolder(event) {
     databasePath,
     hasManifest: fs.existsSync(manifestPath),
     hasDatabase: fs.existsSync(databasePath),
-    manifest
+    manifest,
+    importReview
   };
 }
 
@@ -10995,10 +11687,12 @@ const END_OF_DAY_SUBJECT_FIELD_COLUMNS = {
   homeroom: 'homeroom',
   track: 'track',
   team: 'team',
+  field1: 'field1',
+  field2: 'field2',
   notes: 'notes'
 };
 
-function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
+async function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
   const copiedByImageId = new Map((packageInfo.manifest.copiedImages || []).map((image) => [Number(image.imageAssetId), image]));
   const destinationFolder = path.join(resolveProjectPath(rootPathValue), UNPROCESSED_IMAGE_FOLDER);
   let copied = 0;
@@ -11006,40 +11700,46 @@ function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
 
   fs.mkdirSync(destinationFolder, { recursive: true });
 
-  const rows = imageRows.map((row) => {
+  const rows = [];
+  for (const row of imageRows) {
     const copiedImage = copiedByImageId.get(Number(row.id));
     if (!copiedImage) {
-      return row;
+      throw new Error(`Image ${row.id} is not listed in the package manifest.`);
     }
 
     let currentPath = row.current_path;
     let metadata = parseImageMetadata(row.metadata_json);
-    const jpgSource = copiedImage.jpgPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.jpgPath)) : null;
-    const rawSource = copiedImage.rawPath ? path.join(packageInfo.rawImagesFolder, path.basename(copiedImage.rawPath)) : null;
-
-    if (jpgSource && fs.existsSync(jpgSource) && fs.statSync(jpgSource).isFile()) {
-      const destinationPath = uniquePath(destinationFolder, path.basename(jpgSource));
-      fs.copyFileSync(jpgSource, destinationPath);
+    const jpgSource = endOfDaySafety.packageImageSource(packageInfo, copiedImage, 'jpg');
+    const rawSource = endOfDaySafety.packageImageSource(packageInfo, copiedImage, 'raw');
+    if (!jpgSource) throw new Error(`JPG is missing for image ${row.id}.`);
+    {
+      // Stable destinations make a copy interrupted before DB commit retryable.
+      const token = packageInfo.identity.contentId.slice(0, 16);
+      const destinationPath = path.join(destinationFolder, `${path.parse(jpgSource).name}_eod_${token}_${row.id}${path.extname(jpgSource)}`);
+      await endOfDaySafety.copyVerified(jpgSource, destinationPath, copiedImage.jpgIntegrity);
       currentPath = path.relative(projectRoot, destinationPath);
       importedPathByImageId.set(Number(row.id), currentPath);
       copied += 1;
     }
 
     if (rawSource) {
+      const destinationPath = path.join(destinationFolder, `${path.parse(rawSource).name}_eod_${packageInfo.identity.contentId.slice(0, 16)}_${row.id}${path.extname(rawSource)}`);
+      await endOfDaySafety.copyVerified(rawSource, destinationPath, copiedImage.rawIntegrity);
+      copied += 1;
       metadata = {
         ...metadata,
-        rawPath: rawSource
+        rawPath: path.relative(projectRoot, destinationPath)
       };
     }
 
-    return {
+    rows.push({
       ...row,
       original_path: currentPath,
       current_path: currentPath,
-      status: 'imported',
+      status: copiedImage.status === 'rejected' || row.status === 'rejected' ? 'rejected' : 'imported',
       metadata_json: Object.keys(metadata).length ? JSON.stringify(metadata) : row.metadata_json
-    };
-  });
+    });
+  }
 
   return { rows, copied, importedPathByImageId };
 }
@@ -11051,6 +11751,73 @@ function endOfDayIncludedNewSubjectIds(manifest) {
 function endOfDayEditedSubjects(manifest) {
   return (manifest.subjectChanges && manifest.subjectChanges.editedSubjects) || [];
 }
+
+function endOfDayBaselineSubjects(SQL, packageInfo) {
+  const relative = packageInfo.manifest.paths && packageInfo.manifest.paths.onsiteStartDatabase;
+  if (!relative) return [];
+  const filename = endOfDaySafety.insidePackage(packageInfo.packageFolder, relative);
+  if (!fs.existsSync(filename)) return [];
+  const database = new SQL.Database(fs.readFileSync(filename));
+  try { return rowsFromOptionalTable(database, 'subjects'); } finally { database.close(); }
+}
+
+function alreadyImportedEndOfDay(imports, identity, packageFolder) {
+  return imports.some((row) => {
+    const manifest = parseImageMetadata(row.manifest_json);
+    return row.package_folder === packageFolder
+      || manifest.packageId === identity.packageId
+      || (identity.manifestId && (manifest.importIdentity?.manifestId || endOfDaySafety.manifestIdentity(manifest)) === identity.manifestId)
+      || (manifest.importIdentity && (manifest.importIdentity.packageId === identity.packageId || manifest.importIdentity.contentId === identity.contentId));
+  });
+}
+
+async function reviewEndOfDayImport(_event, input = {}) {
+  const packageFolder = normalizeText(input.packageFolder, 'End of Day package folder', 1000);
+  const packageInfo = { packageFolder, ...readEndOfDayPackage(packageFolder) };
+  const identity = await endOfDaySafety.validatePackage(packageInfo);
+  const manifest = { ...packageInfo.manifest, subjectChanges: adjustedEndOfDaySubjectChanges({ subjectChanges: packageInfo.manifest.subjectChanges || {} }, input.adjustments || {}) };
+  const jobId = numericId(manifest.job && manifest.job.id);
+  const currentSubjects = await queryJobSql(jobId, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
+  const imports = await queryJobSql(jobId, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+  if (alreadyImportedEndOfDay(imports, identity, packageFolder)) throw new Error('This End of Day package has already been loaded, even if its folder was moved or renamed.');
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(packageInfo.databasePath));
+  try {
+    const imageIds = new Set((manifest.copiedImages || []).map((row) => Number(row.imageAssetId)));
+    const requiredIds = new Set([
+      ...endOfDayIncludedNewSubjectIds(manifest),
+      ...endOfDayEditedSubjects(manifest).map((row) => Number(row.id)),
+      ...rowsFromOptionalTable(database, 'subject_images').filter((row) => imageIds.has(Number(row.image_asset_id))).map((row) => Number(row.subject_id))
+    ]);
+    const packageSubjects = rowsFromOptionalTable(database, 'subjects').filter((row) => requiredIds.has(Number(row.id)));
+    const plan = endOfDaySafety.planSubjectMerge({ currentSubjects, packageSubjects, baselineSubjects: endOfDayBaselineSubjects(SQL, packageInfo), manifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+    return { packageId: identity.packageId, conflicts: plan.conflicts, validatedImages: imageIds.size };
+  } finally { database.close(); }
+}
+
+ipcMain.handle('end-of-day:review-import', reviewEndOfDayImport);
+
+ipcMain.handle('storage:list-backups', (_event, jobId) => listStorageBackups(jobId));
+ipcMain.handle('recovery:list-jobs', () => queryProgramSql('SELECT j.id, j.name, j.root_path AS rootPath, c.display_name AS clientName FROM jobs j LEFT JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;'));
+ipcMain.handle('storage:restore-backup', async (_event, input) => {
+  if (captureWatchers.size) throw new Error('Stop capture before restoring a database backup.');
+  return restoreStorageBackup(input);
+});
+ipcMain.handle('images:integrity', async (_event, jobIdValue) => {
+  const jobId = numericId(jobIdValue);
+  const databasePath = await storageDatabasePath(jobId);
+  const database = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
+  let data;
+  try {
+    data = {
+      subjects: rowsFromDatabase(database, `SELECT * FROM subjects WHERE job_id = ${jobId};`),
+      images: rowsFromDatabase(database, `SELECT ia.*, cs.file_mode AS captureFileMode FROM image_assets ia LEFT JOIN capture_sessions cs ON cs.id = ia.capture_session_id WHERE ia.job_id = ${jobId};`),
+      versions: rowsFromDatabase(database, `SELECT iv.* FROM image_versions iv JOIN image_assets ia ON ia.id = iv.image_asset_id WHERE ia.job_id = ${jobId};`),
+      links: rowsFromDatabase(database, `SELECT si.* FROM subject_images si JOIN subjects s ON s.id = si.subject_id WHERE s.job_id = ${jobId};`)
+    };
+  } finally { database.close(); }
+  return require('./photo-integrity').inspectPhotoIntegrity({ ...data, resolvePath: resolveProjectPath, databaseFolder: path.dirname(databasePath) });
+});
 
 async function approveEndOfDayPackage(_event, input = {}) {
   const packageFolder = normalizeText(input.packageFolder, 'End of Day package folder', 1000);
@@ -11066,6 +11833,8 @@ async function approveEndOfDayPackage(_event, input = {}) {
     ...packageInfo.manifest,
     subjectChanges: approvedSubjectChanges
   };
+  packageInfo.identity = await endOfDaySafety.validatePackage(packageInfo);
+  approvedManifest.importIdentity = packageInfo.identity;
   const jobId = numericId(approvedManifest.job && approvedManifest.job.id);
   const imageIds = new Set((approvedManifest.copiedImages || []).map((image) => Number(image.imageAssetId)).filter(Boolean));
   const newSubjectIds = endOfDayIncludedNewSubjectIds(approvedManifest);
@@ -11094,6 +11863,19 @@ async function approveEndOfDayPackage(_event, input = {}) {
       .map((id) => packageSubjectsById.get(Number(id)))
       .filter(Boolean);
 
+    if (packageTables.image_assets.length !== imageIds.size) throw new Error('The package database is missing image records listed in its manifest.');
+    if (subjectRowsToImport.length !== changedSubjectIds.size) throw new Error('The package database is missing a student referenced by its changes or images.');
+    if (packageTables.image_assets.some((row) => Number(row.job_id) !== jobId) || subjectRowsToImport.some((row) => Number(row.job_id) !== jobId)) throw new Error('The package contains records from a different job.');
+    const baselineSubjects = endOfDayBaselineSubjects(SQL, packageInfo);
+    const currentSubjects = await queryJobSql(jobId, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
+    const importHistory = await queryJobSql(jobId, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+    if (alreadyImportedEndOfDay(importHistory, packageInfo.identity, packageFolder)) throw new Error('This End of Day package has already been loaded, even if its folder was moved or renamed.');
+    const preliminaryPlan = endOfDaySafety.planSubjectMerge({ currentSubjects, packageSubjects: subjectRowsToImport, baselineSubjects, manifest: approvedManifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+    if (preliminaryPlan.conflicts.length) return { requiresReview: true, conflicts: preliminaryPlan.conflicts };
+    const targetJob = (await queryProgramSql(`SELECT root_path AS rootPath FROM jobs WHERE id = ${jobId};`))[0];
+    if (!targetJob) throw new Error('The matching job is not loaded on this computer.');
+    const imageCopyResult = await copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, targetJob.rootPath);
+
     result = await writeJobSql(jobId, (database) => {
       const jobRows = rowsFromDatabase(database, `
         SELECT id, root_path AS rootPath
@@ -11105,21 +11887,17 @@ async function approveEndOfDayPackage(_event, input = {}) {
         throw new Error('The matching job is not loaded on this computer');
       }
 
-      const previousImports = rowsFromDatabase(database, `
-        SELECT id
-        FROM end_of_day_imports
-        WHERE job_id = ${jobId}
-          AND package_folder = ${sqlLiteral(packageFolder)}
-        LIMIT 1;
-      `);
-      if (previousImports.length) {
+      const previousImports = rowsFromDatabase(database, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+      if (alreadyImportedEndOfDay(previousImports, packageInfo.identity, packageFolder)) {
         throw new Error('This End of Day package has already been loaded for this job');
       }
 
+      const mergePlan = endOfDaySafety.planSubjectMerge({ currentSubjects: rowsFromDatabase(database, `SELECT * FROM subjects WHERE job_id = ${jobId};`), packageSubjects: subjectRowsToImport, baselineSubjects, manifest: approvedManifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+      if (mergePlan.conflicts.length) throw new Error('Student records changed while this import was being prepared. Reopen the package to review the latest conflicts.');
+
       ensureJobFolders(jobRows[0].rootPath);
-      const imageCopyResult = copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, jobRows[0].rootPath);
       const copiedImageRows = imageCopyResult.rows;
-      const copiedImageVersionRows = packageTables.image_versions.map((row) => {
+      const copiedImageVersionRows = packageTables.image_versions.filter((row) => row.version_type === 'original').map((row) => {
         const importedPath = imageCopyResult.importedPathByImageId.get(Number(row.image_asset_id));
         return importedPath && row.version_type === 'original'
           ? { ...row, path: importedPath }
@@ -11127,9 +11905,10 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
       const copiedFiles = imageCopyResult.copied;
 
-      const subjectIdMap = new Map();
+      const subjectIdMap = mergePlan.subjectIdMap;
       let nextSubjectId = nextDatabaseId(database, 'subjects');
       newSubjectIds.forEach((sourceSubjectId) => {
+        if (subjectIdMap.has(Number(sourceSubjectId))) return;
         subjectIdMap.set(Number(sourceSubjectId), nextSubjectId);
         nextSubjectId += 1;
       });
@@ -11154,7 +11933,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
 
       const newSubjectRows = subjectRowsToImport
-        .filter((row) => newSubjectIds.has(Number(row.id)))
+        .filter((row) => newSubjectIds.has(Number(row.id)) && !mergePlan.linkedNewIds.has(Number(row.id)))
         .map((row) => {
           const sourceSubjectId = Number(row.id);
           const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
@@ -11171,7 +11950,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
         });
       upsertImportedRowsById(database, 'subjects', newSubjectRows);
       mergeImportedSubjectCodeRows(database, packageTables.subject_codes
-        .filter((row) => newSubjectIds.has(Number(row.subject_id)))
+        .filter((row) => newSubjectIds.has(Number(row.subject_id)) && !mergePlan.linkedNewIds.has(Number(row.subject_id)))
         .map((row) => ({
           ...row,
           subject_id: subjectIdMap.get(Number(row.subject_id))
@@ -11188,27 +11967,8 @@ async function approveEndOfDayPackage(_event, input = {}) {
         }));
       upsertImportedRowsById(database, 'capture_sessions', captureSessionRows);
 
-      editedSubjects.forEach((subject) => {
-        const updates = [];
-        const values = [];
-        (subject.changes || []).forEach((change) => {
-          const column = END_OF_DAY_SUBJECT_FIELD_COLUMNS[change.field];
-          if (!column) {
-            return;
-          }
-          updates.push(`${column} = ?`);
-          values.push(change.after || null);
-        });
-        if (!updates.length) {
-          return;
-        }
-        values.push(Number(subject.id), jobId);
-        database.run(`
-          UPDATE subjects
-          SET ${updates.join(', ')}
-          WHERE id = ?
-            AND job_id = ?;
-        `, values);
+      mergePlan.fieldUpdates.forEach((update) => {
+        database.run(`UPDATE subjects SET ${update.column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?;`, [update.value, update.subjectId, jobId]);
       });
 
       const imageRows = copiedImageRows.map((row) => ({
@@ -11226,10 +11986,14 @@ async function approveEndOfDayPackage(_event, input = {}) {
         ...row,
         id: undefined,
         subject_id: subjectIdMap.get(Number(row.subject_id)) || Number(row.subject_id),
-        image_asset_id: imageIdMap.get(Number(row.image_asset_id))
+        image_asset_id: imageIdMap.get(Number(row.image_asset_id)),
+        selected: mergePlan.keepPrimary.has(Number(row.subject_id)) ? 0 : row.selected
       }));
       upsertImportedRowsById(database, 'image_assets', imageRows);
       mergeImportedImageVersionRows(database, imageVersionRows);
+      for (const row of subjectImageRows.filter((link) => Number(link.selected) === 1)) {
+        database.run('UPDATE subject_images SET selected = 0 WHERE subject_id = ?;', [row.subject_id]);
+      }
       mergeImportedSubjectImageRows(database, subjectImageRows);
       const manifestCounts = approvedManifest.counts || {};
       const photographerName = (approvedManifest.photographerNames || []).join(', ')
@@ -11246,6 +12010,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
         .filter((row) => !newSubjectIds.has(Number(row.id)))
         .forEach((row) => {
           const mappedPrimaryImageId = imageIdMap.get(Number(row.primary_image_asset_id));
+          if (!mappedPrimaryImageId || mergePlan.keepPrimary.has(Number(row.id))) return;
           database.run(`
             UPDATE subjects
             SET primary_image_asset_id = ?,
@@ -11253,9 +12018,9 @@ async function approveEndOfDayPackage(_event, input = {}) {
             WHERE id = ?
               AND job_id = ?;
           `, [
-            mappedPrimaryImageId || null,
-            row.photographed_status || null,
-            row.id,
+            mappedPrimaryImageId,
+            'photographed',
+            subjectIdMap.get(Number(row.id)),
             jobId
           ]);
         });
@@ -11288,7 +12053,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
           workstationName,
           approvedManifest.shootStage || null,
           Number(manifestCounts.capturedImages || manifestCounts.images || (approvedManifest.copiedImages || []).length || 0),
-          Number(manifestCounts.rawFiles || manifestCounts.cr3Files || 0),
+          Number(manifestCounts.capturedRawFiles || manifestCounts.rawFiles || manifestCounts.cr3Files || 0),
           newSubjectRows.length,
           editedSubjects.length,
           copiedFiles,
@@ -11558,7 +12323,7 @@ async function createJob(_event, input = {}) {
   const retakeDate = optionalText(input.retakeDate, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeProgramSql((database) => {
+  const result = await writeSql((database) => {
     const clientRows = rowsFromDatabase(database, `
       SELECT id, display_name AS displayName, trecs_name AS trecsName
       FROM clients
@@ -11620,7 +12385,7 @@ async function createJob(_event, input = {}) {
       schoolName: clientRows[0].trecsName || clientRows[0].displayName,
       shootDate
     };
-  });
+  }, { jobIds: (created) => [created.id] });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
   queueTrecsLogEvent('JOB.CREATED', {
@@ -12649,9 +13414,8 @@ function ensureVerificationSchema(database) {
 }
 
 async function ensureVerificationSchemaReady() {
-  await mutateSql((database) => {
-    ensureVerificationSchema(database);
-  });
+  // Kept for existing callers. All job readers/writers prepare their own
+  // in-memory schema. There is no global write required to display a view.
 }
 
 function duplicateNameKey(subject) {
@@ -15094,7 +15858,7 @@ function metadataValue(metadataJson, key) {
   }
 }
 
-function renameUnlinkedCaptureImage(database, input) {
+async function renameUnlinkedCaptureImage(database, input) {
   const imageId = numericId(input.imageId);
   const ref = String(input.ref || '').trim();
   if (!ref) {
@@ -15142,7 +15906,7 @@ function renameUnlinkedCaptureImage(database, input) {
   }
 
   const destinationPath = uniquePath(currentFolder, newFilename);
-  moveFile(currentPath, destinationPath);
+  const fileMoves = [{ sourcePath: currentPath, destinationPath }];
   const relativeDestination = path.relative(projectRoot, destinationPath);
   const oldCurrentPath = row.currentPath;
   const oldOriginalPath = row.originalPath;
@@ -15156,7 +15920,7 @@ function renameUnlinkedCaptureImage(database, input) {
       const rawFilename = stripCaptureReferencePrefix(path.basename(rawPath), ref);
       if (rawFilename && rawFilename !== path.basename(rawPath)) {
         const rawDestinationPath = uniquePath(path.dirname(rawPath), rawFilename);
-        moveFile(rawPath, rawDestinationPath);
+        fileMoves.push({ sourcePath: rawPath, destinationPath: rawDestinationPath });
         relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
         try {
           const metadata = JSON.parse(row.metadataJson || '{}');
@@ -15169,6 +15933,7 @@ function renameUnlinkedCaptureImage(database, input) {
     }
   }
 
+  await database.stageImageFiles(fileMoves);
   database.run(`
     UPDATE image_assets
     SET current_path = ?,
@@ -15208,7 +15973,7 @@ function renameUnlinkedCaptureImage(database, input) {
   };
 }
 
-function renameLinkedCaptureImage(database, input) {
+async function renameLinkedCaptureImage(database, input) {
   const imageId = numericId(input.imageId);
   const ref = String(input.ref || '').trim();
   if (!ref) {
@@ -15251,7 +16016,7 @@ function renameLinkedCaptureImage(database, input) {
   }
 
   const destinationPath = uniquePath(currentFolder, prefixedName);
-  moveFile(currentPath, destinationPath);
+  const fileMoves = [{ sourcePath: currentPath, destinationPath }];
   const relativeDestination = path.relative(projectRoot, destinationPath);
   const oldCurrentPath = row.currentPath;
   const oldOriginalPath = row.originalPath;
@@ -15264,7 +16029,7 @@ function renameLinkedCaptureImage(database, input) {
     if (fs.existsSync(rawPath) && path.resolve(path.dirname(rawPath)).toLowerCase() === path.resolve(jobImagesFolder).toLowerCase()) {
       const rawDestinationName = `${path.basename(destinationPath, path.extname(destinationPath))}${path.extname(rawPath) || '.CR3'}`;
       const rawDestinationPath = uniquePath(path.dirname(rawPath), rawDestinationName);
-      moveFile(rawPath, rawDestinationPath);
+      fileMoves.push({ sourcePath: rawPath, destinationPath: rawDestinationPath });
       relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
       try {
         const metadata = JSON.parse(row.metadataJson || '{}');
@@ -15276,6 +16041,7 @@ function renameLinkedCaptureImage(database, input) {
     }
   }
 
+  await database.stageImageFiles(fileMoves);
   database.run(`
     UPDATE image_assets
     SET current_path = ?,
@@ -15389,14 +16155,24 @@ function getOrCreateCaptureSession(database, input) {
   return rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
 }
 
+const { skipCapture, readSkippedCaptures, collectLateRaw, shouldWarnMissingRaw,
+  captureFileIdentity, readCaptureQueue, saveCaptureQueue } = require('./capture-recovery');
+
 function closeCaptureWatcher(webContentsId) {
   const watcherState = captureWatchers.get(webContentsId);
   if (!watcherState) {
     return;
   }
   clearTimeout(watcherState.timer);
+  watcherState.closed = true;
   watcherState.watcher.close();
-  captureWatchers.delete(webContentsId);
+  if (watcherState.processingPromise) {
+    watcherState.processingPromise.finally(() => {
+      if (captureWatchers.get(webContentsId) === watcherState) captureWatchers.delete(webContentsId);
+    }).catch(() => {});
+  } else {
+    captureWatchers.delete(webContentsId);
+  }
 }
 
 async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourcePath = null, explicitRawPath = null, options = {}) {
@@ -15408,8 +16184,9 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
   }
   const sourcePath = pair.imagePath;
   const rawSourcePath = pair.rawPath;
+  if (normalizeCaptureFileMode(options.fileMode) === 'jpg_raw' && !rawSourcePath) throw new Error('RAW file is missing. Check the camera is set to RAW + JPG; retry or skip this JPG.');
 
-  const result = await writeJobSql(jobId, (database) => {
+  const result = await writeImageJobSql(jobId, async (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,
@@ -15444,15 +16221,16 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     fs.mkdirSync(imageFolder, { recursive: true });
     const filename = captureDestinationName(row.ref, sourcePath);
     const destinationPath = uniquePath(imageFolder, filename);
-    moveFile(sourcePath, destinationPath);
     const relativeDestination = path.relative(projectRoot, destinationPath);
     let relativeRawDestination = null;
-    if (rawSourcePath && fs.existsSync(rawSourcePath)) {
+    const stagedFiles = [{ sourcePath, destinationPath }];
+    if (rawSourcePath) {
       const rawDestinationName = `${path.basename(destinationPath, path.extname(destinationPath))}${path.extname(rawSourcePath) || '.CR3'}`;
       const rawDestinationPath = uniquePath(imageFolder, rawDestinationName);
-      moveFile(rawSourcePath, rawDestinationPath);
+      stagedFiles.push({ sourcePath: rawSourcePath, destinationPath: rawDestinationPath });
       relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
     }
+    await database.stageImageFiles(stagedFiles);
 
     const fileMode = normalizeCaptureFileMode(options.fileMode);
     const shootStage = normalizeShootStage(options.shootStage);
@@ -15626,13 +16404,14 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       counts: captureCounts,
       image: {
         id: imageId,
+        jobId,
         captureSessionId,
         subjectId,
         ref: row.ref,
         filename: path.basename(destinationPath),
         rawPath: relativeRawDestination,
         path: relativeDestination,
-        dataUrl: imageDataUrl(destinationPath),
+        dataUrl: null,
         rotationDegrees: 0,
         selected: shouldSelectNewImage,
         shootStage,
@@ -15642,7 +16421,13 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     };
   });
 
-  result.localCaptureDatabasePath = await appendLocalCaptureEvent({
+  // Release the database write lock before decoding in the image worker.
+  try {
+    Object.assign(result.image, await imageProcessor.preview(resolveProjectPath(result.image.path)));
+  } catch (error) {
+    result.image.previewError = error.message;
+  }
+  try { result.localCaptureDatabasePath = await appendLocalCaptureEvent({
     jobId,
     subjectId,
     imageAssetId: result.image.id,
@@ -15653,11 +16438,16 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     jpgPath: result.image.path,
     cr3Path: result.image.rawPath,
     filename: result.image.filename
-  });
+  }); } catch (error) {
+    // Metadata is durable; a secondary journal failure must not reimport it.
+    result.recoveryWarning = `Image saved; local capture history needs recovery: ${error.message}`;
+    logStartup('capture local journal warning', error);
+  }
   return result;
 }
 
 async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = {}) {
+  if (projectRoot.startsWith('\\\\') || captureHotFolder.startsWith('\\\\')) throw new Error('Capture must use a local laptop data folder and local camera hot folder. Use the server path.txt only on lab computers.');
   const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
   const fileMode = normalizeCaptureFileMode(options.fileMode);
@@ -15670,6 +16460,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   const webContentsId = event.sender.id;
   const existingState = captureWatchers.get(webContentsId);
   if (existingState
+    && !existingState.closed
     && existingState.jobId === jobId
     && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
     // Capture anything already written under the previous student before the UI
@@ -15680,6 +16471,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     existingState.shootStage = shootStage;
     existingState.photographerName = optionalText(options.photographerName, 255);
     existingState.workstationName = optionalText(options.workstationName, 255);
+    existingState.subjectLabel = [optionalText(options.subjectRef, 255), optionalText(options.subjectName, 255)].filter(Boolean).join(' / ');
     existingState.queueAvailableFiles();
     existingState.scheduleProcessing(0);
     return {
@@ -15694,8 +16486,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     };
   }
 
+  if (existingState) await stopCaptureWatcher(event);
   let captureSessionId = null;
-  await writeJobSql(jobId, (database) => {
+  await writeImageJobSql(jobId, (database) => {
     captureSessionId = getOrCreateCaptureSession(database, {
       jobId,
       subjectId,
@@ -15710,6 +16503,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
 
   closeCaptureWatcher(webContentsId);
 
+  const restoredCaptures = readCaptureQueue(hotFolder);
   const watcherState = {
     jobId,
     subjectId,
@@ -15722,14 +16516,30 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     photographerName: optionalText(options.photographerName, 255),
     workstationName: optionalText(options.workstationName, 255),
     captureSessionId,
-    pendingCaptures: [],
-    queuedSourcePaths: new Set(),
+    pendingCaptures: restoredCaptures,
+    skippedCaptures: readSkippedCaptures(hotFolder),
+    subjectLabel: [optionalText(options.subjectRef, 255), optionalText(options.subjectName, 255)].filter(Boolean).join(' / '),
+    processedSourcePaths: new Map(),
+    warningOpen: false,
+    closed: false,
+    queuedSourcePaths: new Set(restoredCaptures.map((pending) => path.resolve(pending.sourcePath).toLowerCase())),
     queueAvailableFiles: null,
     scheduleProcessing: null,
     watcher: null
   };
 
   const sourceKey = (sourcePath) => path.resolve(sourcePath).toLowerCase();
+  const sourceFingerprint = (sourcePath) => {
+    try { const stat = fs.statSync(sourcePath); return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`; }
+    catch (_) { return null; }
+  };
+  const recoveryJobIds = [...new Set([jobId, ...restoredCaptures.map((pending) => Number(pending.jobId))])];
+  const committedSources = (await Promise.all(recoveryJobIds.map((id) => pendingCommittedCaptureSources(id)))).flat();
+  for (const committedSource of committedSources) {
+    const fingerprint = sourceFingerprint(committedSource);
+    if (fingerprint) watcherState.processedSourcePaths.set(sourceKey(committedSource), fingerprint);
+  }
+  watcherState.pendingCaptures = watcherState.pendingCaptures.filter((pending) => !watcherState.processedSourcePaths.has(sourceKey(pending.sourcePath)));
 
   const sendCaptureStatus = (payload) => {
     if (event.sender && !event.sender.isDestroyed()) {
@@ -15737,7 +16547,30 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     }
   };
 
+  const persistQueue = () => {
+    try {
+      saveCaptureQueue(hotFolder, watcherState.pendingCaptures);
+      watcherState.queuePersistenceError = null;
+      return true;
+    } catch (error) {
+      watcherState.queuePersistenceError = error.message;
+      sendCaptureStatus({ error: `Capture paused: student assignments could not be saved. ${error.message}` });
+      return false;
+    }
+  };
+
   const queueAvailableFiles = () => {
+    if (watcherState.closed) return 0;
+    for (const record of watcherState.skippedCaptures) {
+      try {
+        if (collectLateRaw(record, rawPairPathForImage, fileIsStable)) {
+          sendCaptureStatus({ recovery: { folder: record.recoveryFolder, subjectId: record.subjectId,
+            message: `Late RAW recovered with skipped JPG in ${record.recoveryFolder}` } });
+        }
+      } catch (error) {
+        sendCaptureStatus({ error: `Skipped capture recovery needs attention: ${error.message}` });
+      }
+    }
     let images = [];
     try {
       images = captureImagesInFolder(hotFolder);
@@ -15749,15 +16582,24 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     let queued = 0;
     images.forEach((image) => {
       const key = sourceKey(image.path);
+      if (watcherState.processedSourcePaths.has(key)) {
+        if (watcherState.processedSourcePaths.get(key) === sourceFingerprint(image.path)) return;
+        watcherState.processedSourcePaths.delete(key);
+      }
       if (watcherState.queuedSourcePaths.has(key)) {
         return;
       }
+      let sourceIdentity;
+      try { sourceIdentity = captureFileIdentity(image.path); } catch (_) { return; }
       watcherState.queuedSourcePaths.add(key);
       watcherState.pendingCaptures.push({
         sourcePath: image.path,
+        sourceIdentity,
         modified: image.modified,
+        queuedAt: Date.now(),
         jobId: watcherState.jobId,
         subjectId: watcherState.subjectId,
+        subjectLabel: watcherState.subjectLabel,
         fileMode: watcherState.fileMode,
         shootStage: watcherState.shootStage,
         photographerName: watcherState.photographerName,
@@ -15768,20 +16610,32 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     watcherState.pendingCaptures.sort((first, second) => (
       first.modified - second.modified || first.sourcePath.localeCompare(second.sourcePath)
     ));
+    if (queued || watcherState.queuePersistenceError) persistQueue();
     return queued;
   };
 
   const scheduleProcessing = (delay = 250) => {
+    if (watcherState.closed) return;
     clearTimeout(watcherState.timer);
-    watcherState.timer = setTimeout(processQueue, delay);
+    watcherState.timer = setTimeout(() => {
+      if (watcherState.closed || watcherState.importing || watcherState.warningOpen) return;
+      const processing = processQueue();
+      watcherState.processingPromise = processing;
+      processing.catch((error) => {
+        sendCaptureStatus({ error: error.message || 'Capture queue paused after an unexpected error.' });
+      }).finally(() => {
+        if (watcherState.processingPromise === processing) watcherState.processingPromise = null;
+      });
+    }, delay);
   };
 
   const processQueue = async () => {
-    if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
+    if (watcherState.closed || watcherState.importing || watcherState.warningOpen || !event.sender || event.sender.isDestroyed()) {
       return;
     }
 
     queueAvailableFiles();
+    if (watcherState.queuePersistenceError) { scheduleProcessing(1000); return; }
     const pending = watcherState.pendingCaptures[0];
     if (!pending) {
       sendCaptureStatus({
@@ -15791,11 +16645,17 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
           queued: 0
         }
       });
+      if (watcherState.skippedCaptures.some((record) => record.state !== 'paired')) scheduleProcessing(1000);
+      return;
+    }
+    if (pending.retryAt && pending.retryAt > Date.now()) {
+      scheduleProcessing(pending.retryAt - Date.now());
       return;
     }
 
     if (!fs.existsSync(pending.sourcePath)) {
       watcherState.pendingCaptures.shift();
+      persistQueue();
       watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
       scheduleProcessing(0);
       return;
@@ -15811,6 +16671,38 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     }
 
     if (!pair.ready) {
+      if (shouldWarnMissingRaw(pending, pair, Date.now(), fileIsStable)) {
+        watcherState.warningOpen = true;
+        try {
+          const explanation = watcherState.lastImportAt
+            ? 'A RAW file did not arrive during this shoot. Check the camera, cable, transfer software, and available disk space.'
+            : 'At the start of a shoot this usually means the camera is set to JPG only. Check that the camera saves and transfers both JPG and RAW.';
+          const response = await dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+            type: 'warning', title: 'Missing RAW capture', message: `${pair.filename} has no matching RAW file.`,
+            detail: `${explanation}\n\nThe JPG belongs to ${pending.subjectLabel || `student ${pending.subjectId}`}. Wait and retry, or skip this JPG and continue with the next pair. Skipped files are preserved with their student assignment in ${path.join(hotFolder, 'SkippedCaptures')}.`,
+            buttons: ['Wait / Retry', 'Skip JPG and Continue'], defaultId: 0, cancelId: 0, noLink: true
+          });
+          if (watcherState.closed) return;
+          if (response.response === 1) {
+            const recovered = skipCapture(pending, hotFolder);
+            watcherState.skippedCaptures.push(recovered);
+            watcherState.pendingCaptures.shift();
+            persistQueue();
+            watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+            sendCaptureStatus({ recovery: { folder: recovered.recoveryFolder, subjectId: pending.subjectId,
+              message: `Skipped ${pair.filename}; JPG preserved for student ${pending.subjectId}.` } });
+          } else {
+            pending.nextRawWarningAt = Date.now() + 30000;
+          }
+        } catch (error) {
+          pending.nextRawWarningAt = Date.now() + 30000;
+          sendCaptureStatus({ error: `Could not skip capture: ${error.message}` });
+        } finally {
+          watcherState.warningOpen = false;
+          scheduleProcessing(250);
+        }
+        return;
+      }
       sendCaptureStatus({
         status: {
           ready: false,
@@ -15841,7 +16733,10 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
       );
       watcherState.pendingCaptures.shift();
       watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      persistQueue();
       watcherState.lastImportAt = Date.now();
+      const retainedFingerprint = sourceFingerprint(pending.sourcePath);
+      if (retainedFingerprint) watcherState.processedSourcePaths.set(sourceKey(pending.sourcePath), retainedFingerprint);
       sendCaptureStatus({
         ...result,
         status: {
@@ -15860,8 +16755,10 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
         error
       );
       sendCaptureStatus({ error: error.message || 'Image capture import failed' });
+      pending.retryAt = Date.now() + 2000;
       if (!fs.existsSync(pending.sourcePath)) {
         watcherState.pendingCaptures.shift();
+        persistQueue();
         watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
       }
     } finally {
@@ -15876,7 +16773,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   watcherState.queueAvailableFiles = queueAvailableFiles;
   watcherState.scheduleProcessing = scheduleProcessing;
 
-  watcherState.watcher = fs.watch(hotFolder, (eventType) => {
+  watcherState.watcher = fs.watch(hotFolder, (eventType, changedName) => {
+    // Ignore our own journal events: they must not delay a queued import.
+    if (changedName && !['.jpg', '.jpeg', '.cr2', '.cr3'].includes(path.extname(String(changedName)).toLowerCase())) return;
     if (eventType === 'rename' || eventType === 'change') {
       // Queue immediately so a later student scan cannot claim an earlier shot.
       queueAvailableFiles();
@@ -15885,7 +16784,7 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
   });
   captureWatchers.set(webContentsId, watcherState);
   event.sender.once('destroyed', () => closeCaptureWatcher(webContentsId));
-  if (queueAvailableFiles()) {
+  if (queueAvailableFiles() || watcherState.pendingCaptures.length || watcherState.skippedCaptures.some((record) => record.state !== 'paired')) {
     scheduleProcessing();
   } else {
     sendCaptureStatus({
@@ -15910,11 +16809,15 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
 }
 
 async function stopCaptureWatcher(event) {
+  const state = captureWatchers.get(event.sender.id);
   closeCaptureWatcher(event.sender.id);
+  // A saved asset is not finished until its local capture journal is durable.
+  // Keep it visible to EOD guards and wait without blocking the main process.
+  if (state?.processingPromise) await state.processingPromise;
   return { stopped: true };
 }
 
-async function getCaptureSubjectImages(_event, jobIdValue, subjectIdValue) {
+async function getCaptureSubjectImages(_event, jobIdValue, subjectIdValue, options = {}) {
   const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
   let rows;
@@ -15953,30 +16856,35 @@ async function getCaptureSubjectImages(_event, jobIdValue, subjectIdValue) {
     throw error;
   }
 
-  return rows.map((row) => {
-    const fullPath = resolveProjectPath(row.versionPath || row.currentPath);
+  const best = rows.find((row) => row.selected) || rows[1] || rows[0];
+  const latest = rows[0];
+  const visibleIds = new Set(options.metadataOnly ? [] : [best?.id, latest?.id].filter(Boolean).map(Number));
+  return Promise.all(rows.map(async (row) => {
     let metadata = {};
     try {
       metadata = row.metadataJson ? JSON.parse(row.metadataJson) : {};
     } catch (_error) {
       metadata = {};
     }
+    const preview = visibleIds.has(Number(row.id)) ? await getImagePreview(null, jobId, row.id) : null;
     return {
       ...row,
       rawPath: metadata.rawPath || null,
       rotationDegrees: Number(metadata.rotationDegrees || 0),
-      path: fullPath,
-      dataUrl: fullPath && fs.existsSync(fullPath) ? imageDataUrl(fullPath) : null,
-      missing: !fullPath || !fs.existsSync(fullPath)
+      path: preview?.path || row.currentPath,
+      dataUrl: preview?.dataUrl || null,
+      version: preview?.version || null,
+      missing: preview ? preview.missing : false
     };
-  });
+  }));
 }
 
-async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
+async function selectCaptureImage(_event, subjectIdValue, imageIdValue, jobIdHint = null) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeResultJobSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId, jobIdHint);
+  const result = await writeAuditedImageSql(jobId, { type: 'select', subjectIds: [subjectId], imageIds: [imageId] }, (database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
@@ -16027,7 +16935,6 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
   });
 
   result.localCaptureDatabasePath = await updateLocalCaptureSelection(result.jobId, subjectId, imageId);
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
@@ -16062,6 +16969,46 @@ function chooseReplacementCaptureImage(database, subjectId, preferredImageId = n
   return replacementId;
 }
 
+const photoAssignmentHistory = require('./photo-assignment-history');
+
+async function writeAuditedImageSql(jobId, action, callback) {
+  return writeImageJobSql(jobId, async (database) => {
+    ensureCaptureImageActionsSchema(database);
+    const state = photoAssignmentHistory.begin(database, action);
+    const result = await callback(database);
+    const actionId = photoAssignmentHistory.record(database, { ...action, jobId }, state);
+    return { ...result, photoAssignmentActionId: actionId };
+  });
+}
+
+ipcMain.handle('images:assignment-history', async (_event, jobIdValue) => {
+  const jobId = numericId(jobIdValue);
+  return queryJobSql(jobId, `SELECT ca.id, ca.reason AS action, ca.action_type AS status, ca.image_asset_id AS imageId, ia.filename, ca.created_at AS createdAt, ca.photographer_name AS photographerName, ca.workstation_name AS workstationName FROM capture_image_actions ca LEFT JOIN image_assets ia ON ia.id = ca.image_asset_id WHERE ca.job_id = ${jobId} AND ca.action_type IN ('assignment_audit', 'assignment_undone') ORDER BY ca.id DESC LIMIT 100;`);
+});
+ipcMain.handle('images:undo-assignment', async (_event, input) => {
+  const jobId = numericId(input.jobId);
+  const result = await writeImageJobSql(jobId, (database) => photoAssignmentHistory.undo(database, jobId, numericId(input.actionId)));
+  await refreshLocalCaptureAssociations(jobId, result.imageIds);
+  return result;
+});
+
+async function refreshLocalCaptureAssociations(jobId, imageIds) {
+  const dbPath = localCaptureDatabasePath(jobId);
+  if (!fs.existsSync(dbPath) || !imageIds.length) return;
+  const rows = await queryJobSql(jobId, `SELECT ia.id, ia.current_path AS jpgPath, ia.filename, ia.metadata_json AS metadataJson, ia.status, si.subject_id AS subjectId, si.selected, s.legacy_ref_num AS ref FROM image_assets ia LEFT JOIN subject_images si ON si.image_asset_id = ia.id LEFT JOIN subjects s ON s.id = si.subject_id WHERE ia.id IN (${imageIds.map(numericId).join(',')}) ORDER BY si.selected DESC;`);
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    const updated = new Set();
+    for (const row of rows) {
+      if (updated.has(Number(row.id))) continue;
+      updated.add(Number(row.id));
+      database.run("UPDATE capture_events SET subject_id = COALESCE(?, subject_id), ref = COALESCE(?, ref), selected = ?, sync_status = CASE WHEN ? = 'rejected' THEN 'not_needed' ELSE 'pending_sync' END, jpg_path = ?, cr3_path = ?, filename = ? WHERE image_asset_id = ?;", [row.subjectId, row.ref, row.subjectId ? row.selected : 0, row.status, row.jpgPath, parseImageMetadata(row.metadataJson).rawPath || null, row.filename, row.id]);
+    }
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
+  } finally { database.close(); }
+}
+
 async function updateLocalCaptureResolution(input) {
   const dbPath = localCaptureDatabasePath(input.jobId);
   if (!fs.existsSync(dbPath)) {
@@ -16089,7 +17036,7 @@ async function updateLocalCaptureResolution(input) {
         WHERE image_asset_id = ?;
       `, [input.actionType, input.auditNotes, input.imageId]);
     }
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -16116,7 +17063,8 @@ async function resolveCaptureImage(_event, input = {}) {
     throw new Error('Choose a different student');
   }
 
-  const result = await writeJobSql(jobId, (database) => {
+  const jobId = await imageJobIdForSubject(sourceSubjectId, input.jobId);
+  const result = await writeAuditedImageSql(jobId, { type: reason === 'wrong_student' ? 'move' : reason, subjectIds: [sourceSubjectId, targetSubjectId], imageIds: [imageId], photographerName, workstationName }, async (database) => {
     // Capture stations can open databases created by older TRECS builds, or a
     // shared database can be replaced by an older station after startup.
     // Repair this feature's schema in the same transaction as the action.
@@ -16158,7 +17106,7 @@ async function resolveCaptureImage(_event, input = {}) {
         AND image_asset_id = ?;
     `, [sourceSubjectId, imageId]);
     const sourceReplacementId = chooseReplacementCaptureImage(database, sourceSubjectId, replacementImageId);
-    const unlinkedRename = renameUnlinkedCaptureImage(database, {
+    const unlinkedRename = await renameUnlinkedCaptureImage(database, {
       imageId,
       ref: source.sourceRef
     });
@@ -16192,7 +17140,7 @@ async function resolveCaptureImage(_event, input = {}) {
         SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
         WHERE id = ?;
       `, [imageId]);
-      linkedRename = renameLinkedCaptureImage(database, { imageId, ref: target.ref });
+      linkedRename = await renameLinkedCaptureImage(database, { imageId, ref: target.ref });
     } else if (['duplicate_test', 'poor_image'].includes(reason)) {
       actionType = 'reject';
       database.run(`
@@ -16252,11 +17200,19 @@ async function resolveCaptureImage(_event, input = {}) {
   });
 
   result.localCaptureDatabasePath = await updateLocalCaptureResolution(result);
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
-ipcMain.handle('capture:start-watcher', startCaptureWatcher);
+const captureWatcherStarts = new Map();
+ipcMain.handle('capture:start-watcher', (event, ...args) => {
+  const id = event.sender.id;
+  const request = (captureWatcherStarts.get(id) || Promise.resolve()).catch(() => {})
+    .then(() => startCaptureWatcher(event, ...args));
+  captureWatcherStarts.set(id, request);
+  request.finally(() => { if (captureWatcherStarts.get(id) === request) captureWatcherStarts.delete(id); }).catch(() => {});
+  return request;
+});
 ipcMain.handle('capture:stop-watcher', stopCaptureWatcher);
 ipcMain.handle('capture:subject-images', getCaptureSubjectImages);
 ipcMain.handle('capture:select-image', selectCaptureImage);
@@ -16267,7 +17223,8 @@ async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue
   const rejected = Boolean(rejectedValue);
   const reason = rejected ? (optionalText(reasonValue, 500) || 'Rejected in linked image manager') : null;
 
-  const result = await writeResultJobSql((database) => {
+  const jobId = await imageJobIdForAsset(imageId);
+  const result = await writeAuditedImageSql(jobId, { type: rejected ? 'reject' : 'restore image', subjectIds: [], imageIds: [imageId] }, (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT ia.id, ia.job_id AS jobId
       FROM image_assets ia
@@ -16338,7 +17295,7 @@ async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue
     return { imageId, jobId: rows[0].jobId, rejected };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -16346,7 +17303,8 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeResultJobSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId);
+  const result = await writeAuditedImageSql(jobId, { type: 'unlink', subjectIds: [subjectId], imageIds: [imageId] }, async (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT s.job_id AS jobId, s.legacy_ref_num AS ref, si.selected
       FROM subjects s
@@ -16392,7 +17350,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [replacementId, replacementId, subjectId]);
 
-    const renameResult = renameUnlinkedCaptureImage(database, {
+    const renameResult = await renameUnlinkedCaptureImage(database, {
       imageId,
       ref: rows[0].ref
     });
@@ -16400,7 +17358,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
     return { subjectId, imageId, jobId: rows[0].jobId, renameResult };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -16408,7 +17366,8 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeResultJobSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId);
+  const result = await writeAuditedImageSql(jobId, { type: 'link', subjectIds: [subjectId], imageIds: [imageId] }, async (database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, s.legacy_ref_num AS ref, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
@@ -16484,7 +17443,7 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [imageId, subjectId]);
 
-    const renameResult = renameLinkedCaptureImage(database, {
+    const renameResult = await renameLinkedCaptureImage(database, {
       imageId,
       ref: subjectRef
     });
@@ -16492,7 +17451,7 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
     return { subjectId, imageId, jobId: subjectJobId, renameResult };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -16516,62 +17475,72 @@ function mimeTypeFor(filePath) {
   return 'image/jpeg';
 }
 
-async function getImagePreview(_event, imageIdValue) {
+const { createImageProcessor } = require('./image-processing');
+const { sourceSignature, derivativeIsFresh, writeDerivativeSignature } = require('./image-derivatives');
+const imageProcessor = createImageProcessor({ BrowserWindow, ipcMain });
+
+async function getImagePreview(_event, jobIdValue, imageIdValue, options = {}) {
+  const jobId = numericId(jobIdValue);
   const imageId = numericId(imageIdValue);
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       ia.filename,
       ia.status,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
-        ia.current_path
-      ) AS path,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.width ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.width ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.width ELSE NULL END)
-      ) AS width,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.height ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.height ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.height ELSE NULL END)
-      ) AS height,
-      CASE
-        WHEN MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_med'
-        WHEN MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_large'
-        WHEN MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'original'
-        ELSE 'current'
-      END AS versionType
+      ia.current_path AS currentPath,
+      j.root_path AS rootPath,
+      iv.version_type AS versionType,
+      iv.path,
+      iv.width,
+      iv.height
     FROM image_assets ia
+    JOIN jobs j ON j.id = ia.job_id
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     WHERE ia.id = ${imageId}
-    GROUP BY ia.id
-    LIMIT 1;
+      AND ia.job_id = ${jobId}
   `);
 
   if (!rows.length) {
     return null;
   }
 
-  const row = rows[0];
-  if (row.status === 'packaged' && !['cropped_med', 'cropped_large'].includes(row.versionType)) {
-    return { ...row, path: null, dataUrl: null, missing: true };
+  const asset = rows[0];
+  const size = ['thumbnail', 'display', 'original'].includes(options.size) ? options.size : 'display';
+  const versionPriority = size === 'original' ? ['original', 'cropped_large', 'cropped_med']
+    : ['cropped_med', 'cropped_large', 'original'];
+  const validVersions = rows.filter((row) => row.versionType
+    && pathBelongsToJobRoot(row.path, row.rootPath));
+  const candidates = versionPriority
+    .flatMap((versionType) => validVersions.filter((version) => version.versionType === versionType));
+  if (pathBelongsToJobRoot(asset.currentPath, asset.rootPath)) candidates.push({
+      ...asset,
+      path: asset.currentPath,
+      width: null,
+      height: null,
+      versionType: 'current'
+    });
+  let lastError = null;
+  const visited = new Set();
+  for (const row of candidates) {
+    if (row.status === 'packaged' && !['cropped_med', 'cropped_large'].includes(row.versionType)) continue;
+    const fullPath = resolveProjectPath(row.path);
+    if (!fullPath || visited.has(fullPath.toLowerCase())) continue;
+    visited.add(fullPath.toLowerCase());
+    if (row.versionType === 'cropped_med') {
+      const larger = validVersions.find((version) => version.versionType === 'cropped_large');
+      if (larger) {
+        const largePath = resolveProjectPath(larger.path);
+        const largeExists = await fs.promises.stat(largePath).catch(() => null);
+        if (largeExists?.isFile() && !await derivativeIsFresh(largePath, fullPath, { allowLegacy: true })) continue;
+      }
+    }
+    try {
+      // Re-stat every request in the main cache; changed crops invalidate by
+      // file signature. Missing/broken preferred derivatives try the original.
+      const preview = await imageProcessor.preview(fullPath, size);
+      return { ...row, ...preview, path: fullPath, missing: false };
+    } catch (error) { lastError = error.message; }
   }
-
-  const fullPath = resolveProjectPath(row.path);
-  if (!fullPath || !fs.existsSync(fullPath)) {
-    return { ...row, dataUrl: null, missing: true };
-  }
-
-  const bytes = fs.readFileSync(fullPath);
-  return {
-    ...row,
-    path: fullPath,
-    dataUrl: `data:${mimeTypeFor(fullPath)};base64,${bytes.toString('base64')}`,
-    missing: false
-  };
+  return { ...asset, path: null, dataUrl: null, missing: true, error: lastError };
 }
 
 ipcMain.handle('image:preview', getImagePreview);
@@ -16591,7 +17560,7 @@ async function chooseCropToolImage(event) {
   }
 
   const filePath = result.filePaths[0];
-  const bytes = fs.readFileSync(filePath);
+  const bytes = await fs.promises.readFile(filePath);
   return {
     canceled: false,
     filePath,
@@ -16610,8 +17579,8 @@ function cropToolImageFiles(folderPath) {
     }));
 }
 
-function cropToolImagePayload(filePath) {
-  const bytes = fs.readFileSync(filePath);
+async function cropToolImagePayload(filePath) {
+  const bytes = await fs.promises.readFile(filePath);
   return {
     canceled: false,
     filePath,
@@ -16738,7 +17707,7 @@ async function saveCropToolImage(_event, input = {}) {
   }
 
   const bytes = setJpegDensity(Buffer.from(match[1], 'base64'), 300);
-  fs.writeFileSync(filePath, bytes);
+  await storageSafety.atomicWriteFile(filePath, bytes);
   return {
     canceled: false,
     filePath,
@@ -16986,7 +17955,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 720,
     backgroundColor: '#f4f6f8',
-    title: 'TRECS',
+    title: trecsWindowTitle(),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -17000,13 +17969,23 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     logStartup(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
   });
+  mainWindow.webContents.once('did-finish-load', () => {
+    markPortableUpdateStartupReady();
+    showPortableUpdateStartupNotice(mainWindow).catch((error) => {
+      logStartup('portable update startup notice failed', error);
+    });
+  });
   createApplicationMenu(mainWindow);
+  mainWindow.on('closed', () => imageProcessor.close());
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
 app.whenReady().then(async () => {
   logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot} captureStationMode=${captureStationMode} captureFile=${captureConfigPath} captureHotFolder=${captureHotFolder}`);
-  await ensurePrototypeDatabaseShape();
+  if (await checkForPortableUpdateAtStartup()) return;
+  await acquireDatabaseWriteLock();
+  try { await ensurePrototypeDatabaseShape(); }
+  finally { releaseDatabaseWriteLock(); }
   logStartup('database ready');
   createWindow();
   scheduleTrecsLogFlush(1000);
@@ -17023,6 +18002,13 @@ app.whenReady().then(async () => {
 }).catch((error) => {
   logStartup('whenReady failed', error);
   console.error(error);
+  const updateFailure = String(error.code || '').startsWith('TRECS_UPDATE');
+  if (process.env.TRECS_UI_TEST !== '1') {
+    dialog.showErrorBox(
+      updateFailure ? 'TRECS update could not be installed' : 'TRECS could not open its data',
+      error.message || String(error)
+    );
+  }
   app.quit();
 });
 

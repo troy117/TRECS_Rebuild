@@ -2,6 +2,8 @@
 
 Electron prototype for the TRECS rebuild.
 
+Image performance, missing-RAW recovery, backups, and local-laptop/shared-lab configuration are documented in [Image storage and deployment](../docs/IMAGE_STORAGE_AND_DEPLOYMENT.md). Production queue and school delivery changes are in [Production recovery and deliveries](../docs/PRODUCTION_RECOVERY_AND_DELIVERABLES.md).
+
 ## Current Scope
 
 - Native desktop shell.
@@ -34,6 +36,29 @@ The start script clears `ELECTRON_RUN_AS_NODE` before launching Electron. This m
 ```powershell
 npm run check
 npm run check:db
+npm run check:legacy-eod
+npm run check:portable-updater
+```
+
+## Lab Release
+
+Build and then publish a verified automatic update to the UNC folder configured by `../path-server.txt`:
+
+```powershell
+npm run build:portable
+npm run publish:lab-update
+```
+
+The publishing command writes the executable first and the small update manifest last. See [Image storage and deployment](../docs/IMAGE_STORAGE_AND_DEPLOYMENT.md#automatic-lab-updates) for initial rollout, rollback, and server-permission details.
+
+## Legacy End of Day Export
+
+New End of Day packages automatically include `Legacy TRECS Import.xlsx`. The workbook contains an eight-column `New Records` sheet for the old Add Students screen, exact-reference rows for the legacy End of Day importer, complete changed-subject rows, and before/after change details.
+
+To add the workbook to an End of Day package that was created earlier, pass either its folder or its `end-of-day-manifest.json` file:
+
+```powershell
+npm run export:legacy-eod -- "C:\path\to\EOD-package"
 ```
 
 ## Planned Next Implementation

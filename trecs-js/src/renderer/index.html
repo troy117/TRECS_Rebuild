@@ -225,7 +225,7 @@
             <div class="batch-render-layout">
               <form id="batchRenderForm" class="batch-render-options">
                 <label><span>Batch Name</span><input name="name" placeholder="Production batch name"></label>
-                <fieldset><legend>Jobs (select at least two)</legend><div id="batchRenderJobs" class="batch-job-list"></div></fieldset>
+                <fieldset><legend>Jobs (select one or more)</legend><div id="batchRenderJobs" class="batch-job-list"></div></fieldset>
                 <label><span>Output By</span><select name="sortBy"><option value="homeroom">Homeroom</option><option value="grade">Grade</option><option value="last">Last Name</option></select></label>
                 <div class="unit-render-checks"><label class="checkbox-line"><input name="includeUnits" type="checkbox" checked><span>Picture Units</span></label><label class="checkbox-line"><input name="includeEnvelopes" type="checkbox" checked><span>Envelopes</span></label><label class="checkbox-line"><input name="includeLabels" type="checkbox"><span>Order Labels</span></label></div>
                 <label><span>Output Folder</span><div class="folder-picker"><input name="outputFolder" readonly required placeholder="Choose batch output folder"><button id="browseBatchRenderOutputButton" type="button">Browse</button></div></label>
@@ -1487,5 +1487,6 @@
     </div>
 
     <script src="./renderer.js"></script>
+    <script src="./recovery.js"></script>
   </body>
 </html>
