@@ -2,6 +2,8 @@
 
 This document is a first working map of the existing TRECS V7 software and a proposed path for rebuilding it as a cleaner JavaScript application. It is meant to be revised as we talk through the real production workflow.
 
+Current priority (2026-09-25): [capture headsizing, Lightroom Classic lab review and verified server merge](HEADSIZING_MILESTONE_PLAN.md). Its M1-M9 numbering is separate from this historical rebuild roadmap. Read [HANDOFF.md](HANDOFF.md) for implemented scope, checks and the next concrete step; older prototype progress lists below are not a complete current inventory.
+
 ## Current Software Summary
 
 TRECS is a desktop production system for school photography jobs. It manages schools, shoot jobs, student/player/senior/event records, image capture, image matching, order entry, package plans, specialty products, rendering, exports, and admin reports.
@@ -426,4 +428,4 @@ These choices affect the whole rebuild:
 
 ## Suggested Next Step
 
-Build the actual print-ready ID card renderer from the current ID-card work list and manifest, then continue into envelope scan order entry and render batch creation.
+Continue headsizing M1.2: prepare pinned offline MediaPipe assets and validate the dedicated worker runtime in TRECS. M1.1's crop/recipe/validation-XMP foundation is implemented; live capture and production RAW export remain gated. Follow [the active handoff](HANDOFF.md) and [headsizing milestone plan](HEADSIZING_MILESTONE_PLAN.md). Retain the earlier ID-card/order/render work in the broader backlog and verify its current status before scheduling it.

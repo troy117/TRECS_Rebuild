@@ -60,6 +60,8 @@
     }
   },
   "scripts": {
+    "check:headsizing": "node --test scripts/check-headsizing.mjs",
+    "headsizing:fixture": "node scripts/create-headsizing-fixture.mjs",
     "check:eod-roundtrip": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-eod-roundtrip.ps1",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
     "build:portable": "node scripts/build-portable.js",

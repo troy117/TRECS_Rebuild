@@ -2,6 +2,8 @@
 
 Electron prototype for the TRECS rebuild.
 
+Continuing on another workstation? Start with [the active handoff](../docs/HANDOFF.md). The next major initiative is [capture headsizing through Lightroom Classic and server merge](../docs/HEADSIZING_MILESTONE_PLAN.md). Its first crop/recipe foundation is implemented; live automatic headsizing and production XMP are not enabled.
+
 Image performance, missing-RAW recovery, backups, and local-laptop/shared-lab configuration are documented in [Image storage and deployment](../docs/IMAGE_STORAGE_AND_DEPLOYMENT.md). Production queue and school delivery changes are in [Production recovery and deliveries](../docs/PRODUCTION_RECOVERY_AND_DELIVERABLES.md).
 
 ## Current Scope
@@ -38,7 +40,10 @@ npm run check
 npm run check:db
 npm run check:legacy-eod
 npm run check:portable-updater
+npm run check:headsizing
 ```
+
+The headsizing foundation check is dependency-free (Node 20+); it needs no photographs, models, server or donor-app folder. `npm run headsizing:fixture` creates synthetic JSON and validation-only XMP under ignored `exports/`. Never put those drafts beside production RAWs. See the [module contract](src/shared/headsizing/SOURCE.md).
 
 ## Lab Release
 
@@ -63,5 +68,5 @@ npm run export:legacy-eod -- "C:\path\to\EOD-package"
 
 ## Planned Next Implementation
 
-- Add job detail workflow screens for subjects, orders, and images.
-- Add migration/import actions after the app shell is stable.
+- Headsizing M1.2: pinned offline MediaPipe face assets, licensing/checksum verification and TRECS Electron runtime compatibility.
+- Then a dedicated bounded inference worker and isolated preview harness, followed by real RAW/Lightroom crop validation before production integration. Follow the active milestone plan rather than the historical prototype scope above.

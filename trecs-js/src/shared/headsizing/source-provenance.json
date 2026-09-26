@@ -1,0 +1,21 @@
+{
+  "source": "User-supplied Headsizer 2.0 v0.4",
+  "reviewedAt": "2026-09-25",
+  "files": {
+    "models/birefnet.json": {
+      "sha256": "49238d9f8140d7c6cb61550fe84eae0e64f87ea6acbf7de230b957005aa3164e"
+    },
+    "models/manifest.json": {
+      "sha256": "ffd62e910af01ccece2d070ae72248c40622a4a523cae4c0bcb5da779e544a06"
+    },
+    "calibrations/Fall 2026.txt": {
+      "sha256": "dd726afd41c49ce181ca0b59c5bdffcef1c29e12c1bf6953a871952561eb0ffd"
+    },
+    "legacy-crop.mjs": {
+      "sha256": "3dca9e3033429c1e36c85a862a9580b37a06a4d4fed7633d744cafcf15b844e7"
+    },
+    "geometry.mjs": {
+      "sha256": "a165a5e11692c948d4f3facd06633af52387397b9c42f9869c69f13bda4524b8"
+    }
+  }
+}
