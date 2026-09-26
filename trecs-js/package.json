@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "TRECS JavaScript rebuild prototype",
-  "main": "src/main/main.js",
+  "main": "src/main/entry.js",
   "build": {
     "appId": "com.islandphotography.trecs",
     "productName": "TRECS",
@@ -13,10 +13,15 @@
     },
     "files": [
       "src/**/*",
+      "licenses/**/*",
       "package.json",
       "node_modules/**/*"
     ],
     "extraResources": [
+      {
+        "from": "assets/headsizing",
+        "to": "headsizing"
+      },
       {
         "from": "../database",
         "to": "database",
@@ -60,7 +65,14 @@
     }
   },
   "scripts": {
+    "prepare:headsizing": "node scripts/prepare-headsizing-assets.js",
+    "start:calibration": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-calibration.ps1",
+    "check:headsizing-worker": "node scripts/run-electron-check.js check-headsizing-worker.js",
+    "check:calibration-ui": "node scripts/run-electron-check.js check-calibration-ui.js",
+    "check:calibration-core": "node --test scripts/check-calibration-core.js",
+    "check:headsizing-assets": "node -e \"require('./src/main/headsizing-assets').verifyAssets().then(console.log).catch(e=>{console.error(e.message);process.exitCode=1})\"",
     "check:headsizing": "node --test scripts/check-headsizing.mjs",
+    "check:headsizing-performance": "node --test scripts/check-headsizing-performance.js",
     "headsizing:fixture": "node scripts/create-headsizing-fixture.mjs",
     "check:eod-roundtrip": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-eod-roundtrip.ps1",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",

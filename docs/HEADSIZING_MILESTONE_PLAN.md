@@ -2,7 +2,9 @@
 
 Updated: 2026-09-25. This is the next major TRECS initiative requested by Troy. The lab uses **Lightroom Classic**. The M1-M9 numbers below belong to this initiative, not the historical rebuild milestones.
 
-Status: **M1.1 implemented; M1.2 next.** No automatic headsizing, production XMP writing, Lightroom integration or server deployment is enabled by this first slice. See [HANDOFF.md](HANDOFF.md) for resuming from another workstation.
+Status: **M1.1–M1.4 software implemented; real capture-laptop acceptance pending.** Local JPG headsizing/testing is available. Automatic live capture, production XMP, Lightroom integration and server deployment are not enabled. See [HANDOFF.md](HANDOFF.md) for resuming from another workstation.
+
+Clarification approved after M1.1: the JPG testing tool will be a **Crop Calibration** left-menu screen inside TRECS, not a separate app. It will accept a calibration file and JPG folder and include laptop benchmarking/performance exports. See [the screen and benchmark specification](CROP_CALIBRATION_BENCHMARK.md). The screen, offline model worker, previews and telemetry are now implemented. A local-only launch switch uses the same TRECS code without database/server startup; it is not a separate app.
 
 ## Intended workflow
 
@@ -47,11 +49,11 @@ Reviewed source: the user-supplied v0.4 application originally at `C:\Users\Rend
 Goal: make the useful Headsizer components reproducible inside TRECS before touching live capture.
 
 - [x] **M1.1 Foundation:** port crop/rotation geometry and Fall 2026 calibration with source provenance; add a dependency-free, versioned JSON recipe API; add a validation-only XMP serializer and synthetic tests/fixture command. Every recipe remains unreviewed and non-production. No models or image data are committed.
-- [ ] **M1.2 Offline worker setup (next):** verify the pinned face-library/model references, vendor license notices and checksums; add a reproducible asset preparation command and offline packaging/cache strategy. Validate on TRECS's Electron runtime before deciding whether an Electron upgrade needs its own change. Missing/corrupt models must disable headsizing cleanly without affecting capture.
-- [ ] **M1.3 Isolated inference:** create a dedicated worker/hidden processing surface separate from the normal image-preview worker. Use IMAGE mode, detect up to two faces to catch ambiguity, cap inference dimensions, and try orientation candidates deliberately. Add bounded concurrency, deadlines, cancellation/restart and structured results. Avoid an unbounded queue of full-resolution image buffers.
-- [ ] **M1.4 Preview harness:** on explicitly supplied copies, decode EXIF once, map landmarks to the original pixel frame, create a clean cropped JPG and optional overlay, and save the matching recipe. Define preview ICC handling and color conversion; preview color remains provisional. Include original/clean/guide comparisons, timings and errors without writing beside originals.
+- [x] **M1.2 Offline worker setup (software implemented):** verify the pinned face-library/model references, vendor license notices and checksums; add a reproducible asset preparation command and offline packaging/cache strategy. Validate on TRECS's Electron runtime before deciding whether an Electron upgrade needs its own change. Missing/corrupt models must disable headsizing cleanly without affecting capture.
+- [x] **M1.3 Isolated inference (implemented):** create a dedicated worker/hidden processing surface separate from the normal image-preview worker. Use IMAGE mode, detect up to two faces to catch ambiguity, cap inference dimensions, and try orientation candidates deliberately. Add bounded concurrency, deadlines, cancellation/restart and structured results. Avoid an unbounded queue of full-resolution image buffers.
+- [x] **M1.4 Crop Calibration screen and laptop benchmark (software implemented; hardware acceptance below remains open):** add a left-menu screen inside TRECS, usable without an open job/server, to load a calibration `.txt` and a JPG folder. Decode EXIF once, map landmarks to the original frame, create clean/guide previews and matching recipes, and support side-by-side review and calibration reruns. Preserve input files and never auto-activate a tested calibration. Add folder throughput and paced/burst capture simulation, cold/warm and stage timings, actual worker/system resources, queue/responsiveness measurements, privacy-safe reports and configuration comparisons per [CROP_CALIBRATION_BENCHMARK.md](CROP_CALIBRATION_BENCHMARK.md). Actual worker CPU/RAM and stage timing are wired in. Preview decode uses browser color conversion into an sRGB canvas; source ICC metadata is not preserved. Preview color remains provisional.
 
-Acceptance: clean checkout can prepare assets and run a genuinely offline single-photo harness; missing assets, no face, two faces and worker crash are safe; source hashes remain unchanged; crop math is deterministic. Record cold/warm time and memory on the intended laptop. M1.1 tests alone do not complete M1.
+Acceptance: clean checkout can prepare assets and use the offline Crop Calibration screen on a JPG folder; missing assets, no face, two faces and worker crash are safe; source hashes remain unchanged; crop math is deterministic. Compare identical inputs/settings on capture laptops using cold/warm timings, measured resource use and backlog behavior. Pass the benchmark specification's M1.4 acceptance checklist. Automated software tests pass, including real model loading, EXIF mirrors, two-face rejection, worker crash/restart and folder UI safety. A portable build has been produced. Clean-machine online asset retrieval, sustained long-folder stability, independent resource comparison, and identical-set checks/human review on at least two actual capture laptops remain open. Do not mark overall M1 accepted until those results are recorded.
 
 ## M2 - Prove RAW crop and sidecar fidelity in Lightroom Classic
 
@@ -142,7 +144,7 @@ Acceptance: measurable quality benefit without capture slowdown, crop regression
 
 Depends on M1-M7; M8 can remain disabled.
 
-- [ ] **M9.1 Performance targets:** agree actual peak photos/minute, burst length, preview latency and acceptable queue drain time. Measure p50/p95, memory, disk growth and failure/review rates across a full simulated school day on the intended hardware.
+- [ ] **M9.1 Performance targets:** agree actual peak photos/minute, burst length, preview latency and acceptable queue drain time. Use M1.4's repeatable laptop benchmark and report format to measure p50/p95, CPU/worker memory, disk growth, responsiveness and failure/review rates across a full simulated school day on the intended hardware. Record AC/battery conditions; do not infer readiness from average folder throughput alone.
 - [ ] **M9.2 Failure matrix:** test app/worker crash, power loss simulation, partial JPG/late RAW, model missing/corrupt, queue backlog, disconnected share, duplicate packages, two stations, Lightroom conflict and export retry.
 - [ ] **M9.3 Private golden set:** maintain versioned expected outcomes, explicit supported camera/settings combinations, human crop/color approval, and regression reports before any model/calibration/runtime upgrade. Keep photographs and actual landmark data out of the source repository.
 - [ ] **M9.4 One-station pilot:** feature flag headsizing, train photographer and lab operator, complete a limited shoot through final rendering, reconcile counts and exceptions, and obtain owner sign-off before broad use.
@@ -167,7 +169,7 @@ MediaPipe's synchronous detection must not run on the interactive UI thread; Goo
 
 ## Decisions still needed
 
-These do not block M1.2, but must be settled at their gates:
+These did not block M1.2–M1.4 implementation, but must be settled at their gates:
 
 - M2: actual camera models/RAW formats, representative JPG+RAW pairs, lens/camera JPEG settings, installed Lightroom Classic version and quantitative crop tolerance.
 - M3/M9: intended laptop specifications, maximum shooting rate and acceptable backlog.

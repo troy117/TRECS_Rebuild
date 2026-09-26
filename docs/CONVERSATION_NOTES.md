@@ -6,7 +6,9 @@ These notes summarize working decisions made while building the JavaScript/Elect
 
 Start with [HANDOFF.md](HANDOFF.md) when resuming at home. The next major initiative is [capture headsizing through Lightroom Classic and verified server merge](HEADSIZING_MILESTONE_PLAN.md), requested by Troy. The lab software is confirmed as Lightroom Classic; camera models/RAW formats and production color profiles remain to be confirmed.
 
-The first slice (headsizing M1.1) adds portable crop geometry/calibration, a versioned non-production recipe, validation-only XMP and synthetic tests. Automatic capture processing is not enabled. Next is M1.2: pinned offline face-model assets and Electron runtime compatibility. Work continues on `agent/capture-station-focus`.
+The first slice (headsizing M1.1) adds portable crop geometry/calibration, a versioned non-production recipe, validation-only XMP and synthetic tests. Automatic capture processing is not enabled. M1.2–M1.4 software is now implemented: pinned offline assets, isolated inference and integrated JPG calibration/benchmark testing. Actual capture-laptop acceptance is next, followed by M2.1 inventory for Lightroom RAW validation. Work continues on `agent/capture-station-focus`.
+
+Subsequent clarification: testing belongs inside the new TRECS as a **Crop Calibration** left-menu screen with calibration-file and JPG-folder selection. Troy also requested performance/resource logs for comparing capture laptops and tuning settings. See [the benchmark specification](CROP_CALIBRATION_BENCHMARK.md). The screen and real ML-worker measurements are implemented, with a same-app local-only launch switch, durable partial logs, clean/guide previews and private opt-in photo export. No production XMP or automatic live capture was enabled. See the handoff for local/Git status and test commands.
 
 The sections below retain historical requirements/prototype notes, not a complete current feature inventory. The active handoff and headsizing plan supersede the older next-step ordering.
 

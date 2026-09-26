@@ -2,86 +2,109 @@
 
 Updated: 2026-09-25. Start here when continuing at home.
 
-## Current priority
+## Current priority and status
 
-Implement the capture-headsizing-to-Lightroom-Classic workflow in [HEADSIZING_MILESTONE_PLAN.md](HEADSIZING_MILESTONE_PLAN.md). Troy explicitly made this the next major initiative and requested the plan, a portable handoff, the first implementation step and a GitHub push.
+Build the capture-headsizing-to-Lightroom-Classic workflow in [HEADSIZING_MILESTONE_PLAN.md](HEADSIZING_MILESTONE_PLAN.md). Troy authorized implementation through **M1.4**.
 
-Confirmed: lab uses **Adobe Lightroom Classic**. Camera models/RAW formats, installed Adobe version and required print ICC profile are not yet confirmed. Do not infer those from the synthetic CR3 example.
+**M1.1–M1.4 software is implemented.** Crop Calibration is inside TRECS's left sidebar, including capture-station navigation. It loads a Headsizer calibration and JPG folder, runs offline face-only MediaPipe inference, shows original/clean/guide previews and records laptop benchmarks. Actual capture-laptop quality/performance acceptance remains pending. This is not approval to enable automatic live capture.
 
-Repository: `https://github.com/troy117/TRECS_Rebuild.git`
+Lab: **Lightroom Classic**. Camera models/RAW formats, installed Lightroom version, camera profiles and print ICC requirements remain unconfirmed. Do not infer them from synthetic CR3 examples.
 
-Working branch: `agent/capture-station-focus` (not `main`). The previous storage/recovery baseline is `8474aab32cc854013964f315c5a1f59e5a3b2f37`. The new change is identified by commit subject **Plan capture headsizing milestones and add crop recipe foundation**; use `git log -5 --oneline` for its actual hash. Git push does not publish a lab executable.
+Repository: https://github.com/troy117/TRECS_Rebuild.git
 
-## Implemented in this slice: M1.1
+Branch: `agent/capture-station-focus`, not `main`. M1.1 baseline: `07c39e7fae853da0903331cf2e0539a631e4de0a`. The M1.2–M1.4 implementation is identified by commit subject **Build offline crop calibration and laptop benchmarks through M1.4**; use `git log -5 --oneline` for its hash. Git push is not lab deployment.
 
-- Detailed M1-M9 plan with task IDs, dependencies, acceptance gates, code integration points and outstanding decisions.
-- Reusable geometry and Fall 2026 calibration ported from supplied Headsizer 2.0 v0.4; provenance/checksums checked in.
-- Dependency-free recipe API in `trecs-js/src/shared/headsizing/recipe.mjs`, including a MediaPipe-landmark adapter that does not itself load MediaPipe.
-- Validation-only XMP serializer with composed EXIF/quarter-turn orientation and selected/alternate/rejected metadata. It writes no files and does not merge existing sidecars.
-- Synthetic test suite and example generator. All recipe outputs are explicitly unreviewed, RAW-unverified and non-production.
+## Implemented
 
-**Not implemented:** live inference, camera hooks, durable ML queue, preview JPG writing, review UI, production-sidecar merging, real Lightroom RAW validation, package extensions or server promotion. M1 as a whole is not complete. Existing capture and server behavior are unchanged.
+- **M1.1:** unchanged reusable crop geometry, Fall 2026 calibration, versioned non-production recipe and validation-only XMP serializer.
+- **M1.2:** pinned library/WASM/model SHA checks, archive integrity verification, reproducible preparation, full license notices, offline resource paths and portable-build inclusion. Uses existing Electron 31.7.7; no runtime upgrade or CDN access.
+- **M1.3:** dedicated sandboxed hidden renderer, CPU IMAGE inference, maximum two faces, EXIF orientation plus deliberate orientation attempts, bounded single-image dispatch, initialization/image deadlines, cancellation and crash/restart isolation. No shared capture-preview queue.
+- **M1.4:** integrated Crop Calibration view; calibration/file validation; deterministic optional-recursive folder scan; side-by-side previews/guides; paging and page filters; manual review marks; separate runs/settings comparison; folder throughput and paced/burst simulation; private persisted previews/recipes; sanitized journals and interrupted-report recovery; privacy-safe JSON/CSV/text exports with explicit optional private images/recipes.
+- Actual read/decode/orient/detect/crop/encode/write timings, cold/warm summaries, queue waits, system and worker CPU, worker/TRECS working sets, free RAM, main/UI timer delays, AC/battery sampling and operator-entered power/storage settings. Missing readings stay unavailable.
+- Local-only launch mode in the **same app**: `--crop-calibration`. It loads the same service/screen without loading the school database, capture watchers, server settings or updater.
 
-Read the [module contract and caveats](../trecs-js/src/shared/headsizing/SOURCE.md) before using its API. Numeric measurements must already be in the post-EXIF/post-quarter-turn/post-fine-straightening frame. The landmark adapter performs fine straightening for you.
+**Not implemented/enabled:** live-camera ML hooks, production durable capture queue, production XMP merging, RAW/Lightroom matching, lab color approval, EOD derivative merging or server promotion. These are later milestones. There is no background/hair segmentation, face recognition, automatic calibration activation or automatic photo deletion.
 
-## Continue from home
+## Run on a capture laptop / continue from home
 
-For a new checkout, use an empty development location:
-
-```powershell
-git clone --branch agent/capture-station-focus https://github.com/troy117/TRECS_Rebuild.git
-cd TRECS_Rebuild
-git log -5 --oneline
-cd trecs-js
-npm.cmd run check:headsizing
-npm.cmd run headsizing:fixture
-```
-
-For an existing checkout, first inspect `git status`. Preserve any local work; do not force/reset it. If clean, fetch, switch to the working branch and pull with fast-forward only:
+To retrieve this implementation at home, fetch the working branch without discarding local changes:
 
 ```powershell
+git status
 git fetch origin
 git switch agent/capture-station-focus
 git pull --ff-only origin agent/capture-station-focus
+cd trecs-js
+npm.cmd ci
+npm.cmd run prepare:headsizing
+npm.cmd run check:headsizing-assets
+npm.cmd run start:calibration
 ```
 
-Use Node 20+ for the foundation; implementation checks ran with Node 24.16.0. On non-Windows systems use `npm` instead of `npm.cmd`. These two new commands require no `npm install`, real photos, MediaPipe assets, local databases, UNC connection or sibling Headsizer folder. The fixture generator creates a unique ignored `exports/headsizing-foundation-*` folder, never a production RAW/sidecar pair.
+Use Node 20+ (checks here used Node 24.16.0). For a new checkout, clone that branch first. Preparation downloads only pinned upstream assets at development/build time, verifies integrity and retains notices. It does not need the donor folder. On this workstation preparation was tested using the pinned donor archive/model:
 
-To work on the full Windows Electron app, install locked dependencies with `npm.cmd ci` from `trecs-js`, then use its documented start/check commands. Do not copy this workstation's `path.txt`, `path-server.txt`, local databases or student photo folders into Git. Do not run `publish:lab-update` as part of ordinary home development.
+```powershell
+npm.cmd run prepare:headsizing -- --archive "C:/Users/Render Machine/Desktop/Code/Headsizer 2.0/vendor/tasks-vision.tgz" --model "C:/Users/Render Machine/Desktop/Code/Headsizer 2.0/models/face_landmarker.task"
+```
 
-## Exact next task: M1.2
+The offline-archive path is tested; the script's direct online download path still needs a clean-machine check. No runtime network requests are allowed by the inference worker.
 
-1. Read the plan, module `SOURCE.md`, `upstream-models.json` and TRECS's image worker/build scripts.
-2. Implement reproducible retrieval/preparation of the pinned MediaPipe face library/WASM and `face_landmarker.task`, verifying integrity/checksums and retaining license notices. Do not bundle the older selfie model or BiRefNet in the first face-only slice.
-3. Define local runtime paths and portable-build inclusion; runtime must work without CDN/network requests. Fail safely when an asset is missing/corrupt. Keep large downloaded/runtime assets out of Git unless a deliberate distribution decision is documented.
-4. Validate initialization and shutdown in TRECS's current Electron runtime, independently of capture and the normal preview queue. The donor app's newer Electron version is not proof of compatibility. Treat an Electron upgrade, if needed, as a separately reviewed change.
-5. Add asset-verification/offline/initialization tests and update this handoff with results. Then continue M1.3's bounded worker and M1.4's isolated JPG harness. Do not jump directly to live capture or production XMP.
+Local portable test build: `build/headsizing-m1/TRECS-Portable.exe`. Copy the executable to a laptop and start with:
 
-Suggested continuation prompt:
+```powershell
+.\TRECS-Portable.exe --crop-calibration
+```
 
-> Read docs/HANDOFF.md and docs/HEADSIZING_MILESTONE_PLAN.md. Continue M1.2 of the capture headsizing initiative on agent/capture-station-focus. Preserve existing capture behavior, keep processing offline, validate assets and Electron compatibility, run relevant checks, and update the handoff. Do not enable production XMP or deploy to the lab server.
+Alternatively open **Crop Calibration** from normal TRECS. The dedicated switch is safest for no-job testing: normal TRECS still performs its existing database startup. These are the same executable/feature, not separate products. The build was not published to the lab share.
 
-## Important review findings to retain
+1. Load an approved calibration or click **Use Fall 2026**; select an authorized private JPG folder.
+2. Start with 1920 inference / 1000 preview, one CPU worker. Run a folder test, then a simulated shooting rate/burst matching actual use.
+3. Review clean and guide crops. Mark good/needs adjustment independently of automatic outcomes.
+4. Rerun identical inputs with another calibration or supported size; inspect recorded hardware/settings.
+5. Export reports without photos for routine comparison. The **PRIVATE** checkbox adds actual crop/guide JPGs and coordinate-bearing recipes; handle those as private photography data.
 
-- Reuse face landmark/crop math, not the entire donor app. Headsizer uses Electron 42/`node:sqlite`; TRECS uses Electron 31/`sql.js`.
-- Face landmarks are not hair/background segmentation. First version is fast, face-only, with a clean preview and optional guide overlay. Outline/background processing is optional M8 work.
-- Old Headsizer XMP lost an extra quarter turn and treated all alternates as rejected. New draft serializer addresses the math/three-state representation, but actual Adobe RAW fidelity remains **unverified**.
-- JPEG and RAW frame mapping must account for orientation, active area, aspect and lens processing. The draft API's same-frame declaration is an explicit assumption, not validation. Do not use its synthetic output beside production RAWs.
-- The backdrop reference is not a RAW camera/Adobe profile or an output ICC profile. Automatic backdrop gains/masks must not be assumed to reproduce color correctly in Lightroom.
-- Lab settings need ownership and conflict protection. External XMP cannot blindly overwrite catalog edits; preserve `.acr` sidecars when used by the installed Adobe version.
-- EOD currently copies/renames originals and remaps database IDs. Future recipes/derivatives/sidecars must travel with those mappings. Import must be idempotent across multiple capture stations.
-- Original camera files remain immutable; provisional previews cannot become production images. Reject/alternate states never imply file deletion.
+Local cache is shown by **Open local results**. Local-only mode uses `%LOCALAPPDATA%/TRECS/Calibration/CropCalibration/runs`; normal mode uses its workstation-local userData cache. It includes source-name mappings, previews and recipes and is not a public diagnostic log. No automatic cleanup is performed.
 
-## Verification and limits
+## Verification
 
-M1.1: `check:headsizing` passes all 11 synthetic geometry/recipe/XMP tests; `headsizing:fixture` generates isolated examples successfully and its output parses as XML. Additional regression checks pass: `check`, `check:image-pipeline` (12 tests), and `check:eod-safety`. The fixture XMP is validation-only. No actual RAW was opened in Lightroom for this change, and no inference performance claim is established by these unit tests.
+Passed in the installed Electron 31.7.7:
 
-Prior review of the separate Headsizer app passed its own numeric suite and real-model segmentation-gating harness on an isolated sample. Those checks do not prove TRECS Electron compatibility or Adobe RAW matching. Real test photographs/results stay outside Git.
+- `check:headsizing`: 11 foundation tests.
+- `check:headsizing-performance`: 9 telemetry/export tests.
+- `check:calibration-core`: scan/options/path guards, asset rejection, burst scheduling, version-aware CPU units and all EXIF tag parsing.
+- `check:headsizing-worker`: real pinned model initialization, no-face/corrupt JPG, eight EXIF/mirror corner-color cases, single-flight rejection, deliberate worker crash/restart and cancellation. With an explicitly supplied private portrait: valid non-production crop and two-face rejection.
+- `check:calibration-ui`: real folder processing, crop/guides, review, worker CPU/RAM, sanitized export, forbidden output paths, cancel and partial-journal recovery, byte-for-byte original preservation. Regular TRECS shell/preload/sidebar checked with unrelated job APIs stubbed.
+- Regression checks: `check`, `check:image-pipeline` and `check:eod-safety`.
+- Portable build completed; asset/licensing verification is a build prerequisite. The real-model worker suite also passed against the packaged source, notices and assets under `win-unpacked/resources` (including orientation, two faces and crash/restart).
 
-Known earlier repository checks to distinguish from this slice: `check:capture-compare` has unresolved preview-order/thumbnail expectations; earlier production/events UI smoke tests needed unavailable local fixtures. Do not report those as passing or dismiss the capture-comparison failure as merely missing fixture data. No full live-camera, Lightroom or server-deployment test is claimed here.
+Optional private test input (never commit it):
 
-## Other references
+```powershell
+npm.cmd run check:headsizing-worker -- "D:/PrivateTests/portrait.jpg"
+npm.cmd run check:calibration-ui -- "D:/PrivateTests/portrait.jpg"
+```
 
-- [Image storage, recovery and deployment](IMAGE_STORAGE_AND_DEPLOYMENT.md): preserve current durability and server configuration rules.
-- [Production recovery and deliveries](PRODUCTION_RECOVERY_AND_DELIVERABLES.md): existing production protections.
-- [Conversation notes](CONVERSATION_NOTES.md) and [rebuild plan](TRECS_REBUILD_PLAN.md): historical requirements; their older prototype feature lists are not a complete current inventory. This handoff and the headsizing plan define the next work.
+Without a portrait argument, the checks still run synthetic/no-face/error cases. The UI test screenshot stays under ignored `exports/calibration-ui-check` and may contain the explicitly supplied photo. These checks use their own temporary data; no school catalog/server is modified.
+
+These are workstation functional checks, **not** sustained laptop benchmarks or Lightroom RAW verification. CPU sampling can miss short peaks; Electron 31's normalized CPU is converted to 100% per logical core. The reported TRECS working-set sum may double-count shared memory. No GPU utilization, temperature, watts or battery-life estimate is claimed. Preview canvases use browser-converted sRGB; source ICC metadata is not preserved, and lab color is unapproved.
+
+Known earlier regression limits: `check:capture-compare` has unresolved preview-order/thumbnail expectations; earlier production/events UI checks needed local fixtures. Do not claim these were fixed or that a full live-camera/server test passed.
+
+## Next gate / continuation prompt
+
+The next operator work is M1.4 acceptance on **at least two actual capture laptops**, with the same representative private folder and calibration, normal camera/EOS software running, repeat runs, realistic bursts, and human crop review. A long-folder memory/queue stability check and independent stopwatch/Task Manager comparison remain required. Agree acceptable latency, shooting rate and quality, rather than inventing a readiness score.
+
+Then begin **M2.1** by collecting actual camera/RAW/JPG pairs, Lightroom Classic version and profile defaults. M2 is a hard gate before production sidecars. Do not move straight to live capture or production XMP based on preview success.
+
+> Read docs/HANDOFF.md, docs/HEADSIZING_MILESTONE_PLAN.md and docs/CROP_CALIBRATION_BENCHMARK.md. M1.1–M1.4 software is implemented on agent/capture-station-focus. Review actual laptop benchmark/crop results and remaining acceptance gaps, then start M2.1 with authorized JPG/RAW pairs and the installed Lightroom Classic version. Preserve immutable originals and existing capture/storage behavior. Do not enable production XMP, change lab color settings or deploy to the lab share without the relevant gates and authorization.
+
+## Integration caveats to retain
+
+- Read the [geometry contract](../trecs-js/src/shared/headsizing/SOURCE.md). Landmarks/crops use explicit EXIF, quarter-turn and fine-straightening frames; recipe output stays RAW-unverified and non-production.
+- A face guide is not a hair/background mask. The donor's background gains are neither a RAW camera profile nor a print ICC profile.
+- JPEG/RAW frames can differ by active area, lens corrections and aspect settings. Mathematically consistent coordinates do not prove Adobe matching.
+- Lab-owned XMP/catalog edits require conflict protection and preservation of related sidecars; never overwrite with the validation serializer.
+- EOD currently remaps original filenames and database IDs. Future derivatives/recipes must travel with stable identity, revisions and those mappings.
+- Keep photos, real landmark data, databases, `path.txt`, downloaded assets and generated builds out of Git. Do not run `publish:lab-update` as part of home development.
+
+Other references: [storage/recovery/deployment](IMAGE_STORAGE_AND_DEPLOYMENT.md), [production protections](PRODUCTION_RECOVERY_AND_DELIVERABLES.md), [conversation notes](CONVERSATION_NOTES.md).

@@ -6,7 +6,7 @@ This is the dependency-free first slice of the [headsizing milestone plan](../..
 
 The user supplied Headsizer 2.0 v0.4 for reuse in TRECS. `legacy-crop.mjs`, `geometry.mjs` and `calibrations/fall-2026.txt` come from that reviewed application. The legacy crop math is unchanged. `geometry.mjs` omits the old XMP generator, which only distinguished pick/reject and did not serialize an additional quarter turn. Original source SHA-256 values are in `source-provenance.json`. The calibration records 66 accepted reference crops; its head sizing uses eye/mouth anchors rather than a universal anatomical head-height estimate.
 
-These project-specific modules are not Google's MediaPipe library. `upstream-models.json` records the reviewed model/library versions, checksums, URLs and stated licenses for the future worker. M1.1 does not bundle or download those distributions. Add the actual vendor/model license notices when bundling them in M1.2. The retained upstream manifest mentions an older selfie model; the reviewed prototype actually uses BiRefNet lite for segmentation. M1.2 needs only the face model.
+These project-specific modules are not Google's MediaPipe library. `upstream-models.json` records reviewed references; `asset-lock.json` pins the face-only runtime files actually prepared by M1.2. `npm run prepare:headsizing` verifies archive integrity and file hashes, retains notices from `licenses/headsizing`, and stages ignored assets for offline packaging. The M1.3 hidden renderer and M1.4 Crop Calibration screen call this pure geometry API; the foundation still loads no models on import. The retained upstream manifest mentions an older selfie model; it and BiRefNet are not included in the face-only runtime.
 
 ## Contract
 

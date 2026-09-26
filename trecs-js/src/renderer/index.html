@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TRECS</title>
     <link rel="stylesheet" href="./styles.css">
+    <link rel="stylesheet" href="./crop-calibration.css">
   </head>
   <body>
     <div class="app-shell" id="appShell">
@@ -21,6 +22,7 @@
           <button data-view-button="jobs">Jobs</button>
           <button data-view-target="jobs" data-job-tab-target="orders">Orders</button>
           <button data-view-target="jobs" data-job-tab-target="capture">Capture</button>
+          <button data-view-button="cropCalibration">Crop Calibration</button>
           <button data-view-button="events">Events</button>
           <button data-view-button="products">Products</button>
           <button data-view-button="studentLists">Student Lists</button>
@@ -45,6 +47,7 @@
           </div>
         </header>
 
+        <section id="cropCalibrationView" class="view"></section>
         <section id="dashboardView" class="view active-view">
           <section class="metric-grid" id="metricGrid" aria-label="Prototype counts">
             <article>
@@ -1488,5 +1491,6 @@
 
     <script src="./renderer.js"></script>
     <script src="./recovery.js"></script>
+    <script src="./crop-calibration.js"></script>
   </body>
 </html>

@@ -11,6 +11,8 @@ const { writeLegacyTrecsImportWorkbook } = require('./legacy-end-of-day-export')
 const storageSafety = require('./storage-safety');
 const idReservations = require('./id-reservations');
 const portableUpdater = require('./portable-updater');
+const { createCalibrationService } = require('./calibration-service');
+let calibrationService;
 
 const appFolderCandidate = path.resolve(__dirname, '../..');
 const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
@@ -17976,6 +17978,8 @@ function createWindow() {
     });
   });
   createApplicationMenu(mainWindow);
+  calibrationService ??= createCalibrationService(require('electron'));
+  calibrationService.attach(mainWindow);
   mainWindow.on('closed', () => imageProcessor.close());
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }

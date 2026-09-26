@@ -867,6 +867,7 @@ function setView(view) {
     releaseUiJobLocks(jobsState.eventSetup.selectedEventJobId).catch((error) => console.error(error));
   }
   dashboardView.classList.toggle('active-view', view === 'dashboard');
+  document.getElementById('cropCalibrationView').classList.toggle('active-view', view === 'cropCalibration');
   jobsView.classList.toggle('active-view', view === 'jobs');
   productsView.classList.toggle('active-view', view === 'products');
   eventsView.classList.toggle('active-view', view === 'events');
@@ -882,6 +883,10 @@ function setView(view) {
   compositesView.classList.toggle('active-view', view === 'composites');
   title.textContent = view === 'jobs' ? jobsViewTitle() : view === 'events' ? 'Events' : view === 'products' ? 'Products' : view === 'studentLists' ? 'Student Lists' : view === 'onlineOrders' ? 'Online Orders' : view === 'productionSync' ? 'Production Sync' : view === 'settings' ? 'Settings' : view === 'dataVerification' ? 'Data Verification' : view === 'staffVerification' ? 'Staff Verification' : view === 'idCardRender' ? 'ID Card Render' : view === 'unitRender' ? 'Unit Render' : view === 'batchRender' ? 'Batch Render' : view === 'composites' ? 'Class Composites' : 'Dashboard';
   updateMainNavigation(view);
+  if (view === 'cropCalibration') {
+    title.textContent = 'Crop Calibration';
+    document.getElementById('cropCalibrationView').dispatchEvent(new Event('calibration:show'));
+  }
   if (!jobsState.jobWorkspaceOpen) {
     updateMenuContext();
   }
@@ -1233,7 +1238,7 @@ async function configureStationMode() {
     const isJobs = button.dataset.viewButton === 'jobs';
     const isCapture = button.dataset.viewTarget === 'jobs' && button.dataset.jobTabTarget === 'capture';
     const isSettings = button.dataset.viewButton === 'settings';
-    button.hidden = !isJobs && !isCapture && !isSettings;
+    button.hidden = !isJobs && !isCapture && !isSettings && button.dataset.viewButton !== 'cropCalibration';
   });
   jobsState.selectedTab = 'capture';
   setView('jobs');
@@ -11557,7 +11562,7 @@ viewButtons.forEach((button) => {
     if (button.dataset.viewButton === 'events') {
       jobsState.eventPinnedJobId = null;
     }
-    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'settings', 'idCardRender', 'unitRender', 'batchRender', 'composites'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
+    if (['events', 'products', 'studentLists', 'onlineOrders', 'productionSync', 'settings', 'idCardRender', 'unitRender', 'batchRender', 'composites', 'cropCalibration'].includes(button.dataset.viewButton) && jobsState.jobWorkspaceOpen) {
       closeJobWorkspace();
     }
     setView(button.dataset.viewButton);

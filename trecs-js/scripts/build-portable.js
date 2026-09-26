@@ -95,6 +95,7 @@ function compileCameraCardSheetRenderer() {
 }
 
 async function main() {
+  await require('../src/main/headsizing-assets').verifyAssets();
   compileAccessReader();
   compileDeliveryEnvelopeCoverRenderer();
   compileSchoolDirectoryRenderer();
