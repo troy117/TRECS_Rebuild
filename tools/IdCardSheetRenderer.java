@@ -286,8 +286,8 @@ public class IdCardSheetRenderer {
     if ("lastName".equals(field)) return subject.lastName;
     if ("homeroom".equals(field)) return subject.homeroom.length() > 0 ? "HR: " + subject.homeroom : "";
     if ("studentId".equals(field)) return subject.studentId.length() > 0 ? "ID #: " + subject.studentId : "";
-    if ("extra1".equals(field)) return subject.track;
-    if ("extra2".equals(field)) return subject.team;
+    if ("field1".equals(field) || "extra1".equals(field)) return subject.field1;
+    if ("field2".equals(field) || "extra2".equals(field)) return subject.field2;
     if ("year".equals(field)) return schoolYear;
     return "";
   }
@@ -400,6 +400,8 @@ public class IdCardSheetRenderer {
     String homeroom = "";
     String track = "";
     String team = "";
+    String field1 = "";
+    String field2 = "";
     String subjectType = "";
     String imagePath = "";
 
@@ -412,8 +414,10 @@ public class IdCardSheetRenderer {
       homeroom = value(parts, 5);
       track = value(parts, 6);
       team = value(parts, 7);
-      subjectType = value(parts, 8);
-      imagePath = value(parts, 9);
+      field1 = value(parts, 8);
+      field2 = value(parts, 9);
+      subjectType = value(parts, 10);
+      imagePath = value(parts, 11);
     }
 
     private static String value(String[] parts, int index) {

@@ -97,3 +97,6 @@ Validation notes:
 - Senior gallery/access codes import into `subject_codes`.
 - Fall and senior image folders now import into `image_assets`, `image_versions`, and `subject_images`.
 - Senior order items now link to `image_assets` by filename.
+# Historical schema note
+
+This is an early schema draft, not the current database contract. See [PROGRAM_DATABASE_TABLE_AUDIT.md](./PROGRAM_DATABASE_TABLE_AUDIT.md) for current usage and storage ownership.

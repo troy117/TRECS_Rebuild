@@ -21,7 +21,6 @@ public class TrecsMigrationPrototype {
     private static final Pattern SENIOR_ORDER_ITEM_PATTERN = Pattern.compile("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"");
 
     private int clientId = 1;
-    private int contactId = 1;
     private int templateId = 1;
     private int packagePlanId = 1;
     private int packageCodeId = 1;
@@ -149,24 +148,7 @@ public class TrecsMigrationPrototype {
                     sql(text(row, "Phone")) + ", " + sql(text(row, "Address")) + ", " + sql(text(row, "City")) + ", " +
                     sql(text(row, "State")) + ", " + sql(text(row, "Zipcode")) + ", " + sql(text(row, "Notes")) + ");");
             legacy(programDataSourceId, "Schools", ref, "clients", id, row.toString());
-
-            addContact(id, row, 1);
-            addContact(id, row, 2);
-            addContact(id, row, 3);
         }
-    }
-
-    private void addContact(int clientIdValue, Row row, int number) {
-        String name = text(row, "Contact" + number + "Name");
-        String position = text(row, "Contact" + number + "Position");
-        String email = text(row, "Contact" + number + "Email");
-        if (name.isEmpty() && position.isEmpty() && email.isEmpty()) {
-            return;
-        }
-
-        int id = contactId++;
-        out.println("INSERT INTO client_contacts (id, client_id, name, position, email, sort_order) VALUES (" +
-                id + ", " + clientIdValue + ", " + sql(name) + ", " + sql(position) + ", " + sql(email) + ", " + number + ");");
     }
 
     private void importIdTemplates(Table idTemplates) {

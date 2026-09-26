@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage, safeStorage, clipboard } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -7,6 +7,12 @@ const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
 const XLSX = require('xlsx');
+const { writeLegacyTrecsImportWorkbook } = require('./legacy-end-of-day-export');
+const storageSafety = require('./storage-safety');
+const idReservations = require('./id-reservations');
+const portableUpdater = require('./portable-updater');
+const { createCalibrationService } = require('./calibration-service');
+let calibrationService;
 
 const appFolderCandidate = path.resolve(__dirname, '../..');
 const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase() === 'app'
@@ -14,27 +20,61 @@ const runningFromPortableFolder = path.basename(appFolderCandidate).toLowerCase(
 const portableMode = app.isPackaged || runningFromPortableFolder;
 const appSourceRoot = portableMode ? appFolderCandidate : path.resolve(__dirname, '../..');
 const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR || (app.isPackaged ? path.dirname(process.execPath) : '');
+const portableExecutableFile = process.env.PORTABLE_EXECUTABLE_FILE || '';
 const defaultProjectRoot = portableMode ? (portableExecutableDir || path.resolve(appSourceRoot, '..', '..')) : path.resolve(__dirname, '../../..');
-function dataRootFromPathFile() {
-  const pathFile = path.join(defaultProjectRoot, 'path.txt');
-  if (!fs.existsSync(pathFile) || !fs.statSync(pathFile).isFile()) {
-    return defaultProjectRoot;
+function configuredPathFromFile(fileName, fallbackRoot, fallbackPath = fallbackRoot) {
+  const configFile = path.join(defaultProjectRoot, fileName);
+  if (!fs.existsSync(configFile) || !fs.statSync(configFile).isFile()) {
+    return fallbackPath;
   }
 
-  const configuredPath = fs.readFileSync(pathFile, 'utf8')
+  const configuredPath = fs.readFileSync(configFile, 'utf8')
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/^["']|["']$/g, ''))
     .find((line) => line && !line.startsWith('#'));
   if (!configuredPath) {
-    return defaultProjectRoot;
+    return fallbackPath;
   }
 
-  return path.resolve(defaultProjectRoot, configuredPath);
+  return path.isAbsolute(configuredPath) ? configuredPath : path.resolve(fallbackRoot, configuredPath);
 }
 
-const projectRoot = dataRootFromPathFile();
+const projectRoot = process.env.TRECS_DATA_ROOT
+  ? path.resolve(process.env.TRECS_DATA_ROOT)
+  : configuredPathFromFile('path.txt', defaultProjectRoot);
+const defaultElectronUserDataPath = app.getPath('userData');
+const legacyElectronUserDataPath = defaultElectronUserDataPath;
+const localWindowsAppDataPath = process.env.LOCALAPPDATA
+  ? path.resolve(process.env.LOCALAPPDATA)
+  : defaultElectronUserDataPath;
+const workstationStorageName = String(process.env.COMPUTERNAME || os.hostname() || 'workstation')
+  .trim()
+  .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  .replace(/[. ]+$/g, '')
+  || 'workstation';
+// Keep browser caches local, including on lab PCs using a UNC data root.
+const dataRootKey = crypto.createHash('sha256').update(projectRoot.toLowerCase()).digest('hex').slice(0, 16);
+const configuredElectronUserDataPath = process.env.TRECS_UI_TEST === '1'
+  ? path.join(projectRoot, '.test-workstation-cache')
+  : path.join(localWindowsAppDataPath, 'TRECS', 'workstations', workstationStorageName, dataRootKey);
+fs.mkdirSync(configuredElectronUserDataPath, { recursive: true });
+app.setPath('userData', configuredElectronUserDataPath);
+const portableUpdateRoot = path.join(configuredElectronUserDataPath, 'Updates');
+const localWorkstationSettingsFolder = path.join(localWindowsAppDataPath, 'TRECS', 'local-settings');
+const trecsLogSettingsPath = path.join(localWorkstationSettingsFolder, 'trecs-log.json');
+const trecsLogQueuePath = path.join(localWorkstationSettingsFolder, 'trecs-log-queue.json');
+const captureConfigName = 'capture.txt';
+const captureConfigPath = path.join(defaultProjectRoot, captureConfigName);
+const captureStationMode = fs.existsSync(captureConfigPath) && fs.statSync(captureConfigPath).isFile();
+const captureHotFolder = configuredPathFromFile(
+  captureConfigName,
+  defaultProjectRoot,
+  path.join(projectRoot, 'CaptureHotFolder')
+);
 const bundledResourceRoot = portableMode ? path.resolve(appSourceRoot, '..') : defaultProjectRoot;
-const prototypeDatabasePath = path.join(projectRoot, 'database', 'migration_prototype.db');
+const databaseFolderPath = path.join(projectRoot, 'database');
+const legacyPrototypeDatabasePath = path.join(databaseFolderPath, 'migration_prototype.db');
+const prototypeDatabasePath = path.join(databaseFolderPath, 'ProgramData.db');
 const sqlWasmPath = path.join(appSourceRoot, 'node_modules', 'sql.js', 'dist');
 const startupLogPath = path.join(projectRoot, 'portable-startup.log');
 const UNPROCESSED_IMAGE_FOLDER = 'Unprocessed';
@@ -43,43 +83,73 @@ const APP_SESSION_ID = crypto.randomUUID();
 const JOB_LOCK_TTL_SECONDS = 120;
 const DATABASE_WRITE_LOCK_PATH = `${prototypeDatabasePath}.write-lock`;
 
+let portableUpdateState = {
+  status: 'not_checked',
+  version: app.getVersion(),
+  buildId: '',
+  publishedAt: ''
+};
+
 let sqlModulePromise;
 
-function waitMilliseconds(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
+let databaseWriteQueue = Promise.resolve();
+let releaseLocalDatabaseWriter;
+let databaseLockHeartbeat;
 
-function acquireDatabaseWriteLock(timeoutMilliseconds = 15000) {
-  const startedAt = Date.now();
-  fs.mkdirSync(path.dirname(DATABASE_WRITE_LOCK_PATH), { recursive: true });
-  while (Date.now() - startedAt < timeoutMilliseconds) {
-    try {
-      fs.mkdirSync(DATABASE_WRITE_LOCK_PATH);
-      fs.writeFileSync(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), JSON.stringify({
-        sessionId: APP_SESSION_ID,
-        computerName: process.env.COMPUTERNAME || os.hostname() || '',
-        userName: process.env.USERNAME || os.userInfo().username || '',
-        acquiredAt: new Date().toISOString()
-      }, null, 2));
-      return;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+async function acquireDatabaseWriteLock(timeoutMilliseconds = 15000) {
+  const previous = databaseWriteQueue;
+  let releaseThisWriter;
+  databaseWriteQueue = new Promise((resolve) => { releaseThisWriter = resolve; });
+  await previous;
+  releaseLocalDatabaseWriter = releaseThisWriter;
+  try {
+    const startedAt = Date.now();
+    await fs.promises.mkdir(path.dirname(DATABASE_WRITE_LOCK_PATH), { recursive: true });
+    while (Date.now() - startedAt < timeoutMilliseconds) {
       try {
-        const stat = fs.statSync(DATABASE_WRITE_LOCK_PATH);
-        if (Date.now() - stat.mtimeMs > 60000) {
-          fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
-          continue;
+        await fs.promises.mkdir(DATABASE_WRITE_LOCK_PATH);
+        await fs.promises.writeFile(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), JSON.stringify({
+          sessionId: APP_SESSION_ID, pid: process.pid,
+          computerName: process.env.COMPUTERNAME || os.hostname() || '',
+          acquiredAt: new Date().toISOString()
+        }));
+        databaseLockHeartbeat = setInterval(() => {
+          const now = new Date();
+          fs.promises.utimes(DATABASE_WRITE_LOCK_PATH, now, now).catch(() => {});
+        }, 10000);
+        databaseLockHeartbeat.unref();
+        return;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        try {
+          const owner = JSON.parse(await fs.promises.readFile(path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json'), 'utf8'));
+          // Do not remove a stale-looking directory automatically: two
+          // competing reapers could delete a freshly acquired writer's lock.
+          if (owner.computerName === (process.env.COMPUTERNAME || os.hostname()) && Number.isInteger(owner.pid)) {
+            try { process.kill(owner.pid, 0); }
+            catch (processError) {
+              if (processError.code === 'ESRCH') {
+                throw new Error(`A previous TRECS process stopped while holding the database lock. Have an administrator verify no workstation is saving and remove only ${DATABASE_WRITE_LOCK_PATH}, then retry.`);
+              }
+            }
+          }
+        } catch (readError) {
+          if (readError.code !== 'ENOENT' && !(readError instanceof SyntaxError)) throw readError;
         }
-      } catch (statError) {
-        if (statError.code !== 'ENOENT') throw statError;
+        await new Promise((resolve) => setTimeout(resolve, 75));
       }
-      waitMilliseconds(75);
     }
+    throw new Error('TRECS could not save because another workstation holds the shared database lock. Close TRECS on that workstation and retry. If it lost power, have the lab administrator check the lock before removing it.');
+  } catch (error) {
+    releaseLocalDatabaseWriter = null;
+    releaseThisWriter();
+    throw error;
   }
-  throw new Error('TRECS could not save because another workstation is writing the shared database. Try again in a few seconds.');
 }
 
 function releaseDatabaseWriteLock() {
+  if (databaseLockHeartbeat) clearInterval(databaseLockHeartbeat);
+  databaseLockHeartbeat = null;
   try {
     const ownerPath = path.join(DATABASE_WRITE_LOCK_PATH, 'owner.json');
     const owner = fs.existsSync(ownerPath) ? JSON.parse(fs.readFileSync(ownerPath, 'utf8')) : null;
@@ -87,7 +157,11 @@ function releaseDatabaseWriteLock() {
       fs.rmSync(DATABASE_WRITE_LOCK_PATH, { recursive: true, force: true });
     }
   } catch (_error) {
-    // A stale lock is recoverable on the next write.
+    // Keep an unremovable lock visible rather than overlap writes.
+  } finally {
+    const release = releaseLocalDatabaseWriter;
+    releaseLocalDatabaseWriter = null;
+    if (release) release();
   }
 }
 
@@ -97,8 +171,124 @@ function systemInfo() {
     userName: process.env.USERNAME || os.userInfo().username || '',
     dataRoot: projectRoot,
     defaultDataRoot: defaultProjectRoot,
-    pathFile: path.join(defaultProjectRoot, 'path.txt')
+    appDataRoot: configuredElectronUserDataPath,
+    pathFile: path.join(defaultProjectRoot, 'path.txt'),
+    captureFile: captureConfigPath,
+    captureHotFolder,
+    captureStationMode,
+    appVersion: app.getVersion(),
+    portableBuildId: portableUpdateState.buildId || '',
+    portableUpdateStatus: portableUpdateState.status,
+    portableUpdatePublishedAt: portableUpdateState.publishedAt || ''
   };
+}
+
+function portableUpdateIneligibilityReason() {
+  if (process.env.TRECS_UI_TEST === '1') return 'ui_test';
+  if (process.env.TRECS_DISABLE_AUTO_UPDATE === '1') return 'disabled';
+  if (process.env.TRECS_SKIP_UPDATE_ONCE === '1') return 'rollback_restart';
+  if (process.platform !== 'win32') return 'not_windows';
+  if (!app.isPackaged || !portableExecutableFile) return 'not_portable';
+  if (captureStationMode) return 'capture_station';
+  if (!portableUpdater.isUncPath(projectRoot)) return 'data_root_not_unc';
+  return '';
+}
+
+async function checkForPortableUpdateAtStartup() {
+  const ineligibilityReason = portableUpdateIneligibilityReason();
+  if (ineligibilityReason) {
+    portableUpdateState = {
+      ...portableUpdateState,
+      status: ineligibilityReason === 'rollback_restart' ? 'rolled_back' : 'not_applicable',
+      reason: ineligibilityReason
+    };
+    if (ineligibilityReason === 'rollback_restart') delete process.env.TRECS_SKIP_UPDATE_ONCE;
+    return false;
+  }
+
+  const result = await portableUpdater.inspectPortableUpdate({
+    serverRoot: projectRoot,
+    currentExecutablePath: portableExecutableFile,
+    stagingRoot: portableUpdateRoot
+  });
+  portableUpdateState = {
+    status: result.status,
+    version: result.manifest?.version || app.getVersion(),
+    buildId: result.manifest?.buildId || result.currentSha256?.slice(0, 12) || '',
+    publishedAt: result.manifest?.publishedAt || ''
+  };
+  if (result.status !== 'ready') return false;
+
+  await dialog.showMessageBox({
+    type: 'info',
+    title: 'TRECS Update Ready',
+    message: `TRECS ${result.manifest.version} (${result.manifest.buildId}) is ready to install.`,
+    detail: 'The complete update has been copied from the server and verified. TRECS will close, replace the local portable executable, and restart automatically.',
+    buttons: ['Install and Restart'],
+    defaultId: 0,
+    cancelId: -1,
+    noLink: true
+  });
+  const launched = await portableUpdater.launchPortableUpdate({
+    stagingRoot: portableUpdateRoot,
+    stagedPath: result.stagedPath,
+    targetPath: result.targetPath,
+    expectedSha256: result.manifest.sha256
+  });
+  portableUpdateState = {
+    ...portableUpdateState,
+    status: 'restarting',
+    helperPid: launched.pid
+  };
+  logStartup(`portable update staged buildId=${result.manifest.buildId} helperPid=${launched.pid}`);
+  app.quit();
+  return true;
+}
+
+function markPortableUpdateStartupReady() {
+  const handshakePath = process.env.TRECS_UPDATE_HANDSHAKE;
+  if (!handshakePath) return;
+  try {
+    portableUpdater.writeStartupHandshake(handshakePath, portableUpdateRoot, {
+      ready: true,
+      pid: process.pid,
+      version: app.getVersion(),
+      buildId: portableUpdateState.buildId || '',
+      readyAt: new Date().toISOString()
+    });
+    delete process.env.TRECS_UPDATE_HANDSHAKE;
+    logStartup('portable update startup handshake completed');
+  } catch (error) {
+    logStartup('portable update startup handshake failed', error);
+  }
+}
+
+async function showPortableUpdateStartupNotice(window) {
+  if (portableUpdateState.status !== 'rolled_back' || !window || window.isDestroyed()) return;
+  let detail = 'The attempted update did not start successfully, so the previous TRECS version was restored. Tell the lab administrator before trying the update again.';
+  try {
+    const status = JSON.parse(await fs.promises.readFile(
+      path.join(portableUpdateRoot, portableUpdater.UPDATE_STATUS_NAME),
+      'utf8'
+    ));
+    if (status.message) detail = String(status.message);
+  } catch (error) {
+    if (error.code !== 'ENOENT') logStartup('portable update rollback status could not be read', error);
+  }
+  await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'TRECS Update Rolled Back',
+    message: 'TRECS restored the previous version.',
+    detail,
+    buttons: ['OK'],
+    defaultId: 0,
+    noLink: true
+  });
+}
+
+function trecsWindowTitle() {
+  const buildLabel = portableUpdateState.buildId ? ` (${portableUpdateState.buildId})` : '';
+  return `TRECS ${app.getVersion()}${buildLabel}`;
 }
 
 function focusWindow(event) {
@@ -115,6 +305,52 @@ function focusWindow(event) {
     window.webContents.focus();
   }
   return { focused: Boolean(window) };
+}
+
+async function confirmImageUnlink(event, labelValue) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const label = String(labelValue || 'this image');
+  const result = await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'Unlink Image',
+    message: `Unlink ${label} from this student?`,
+    detail: 'If this image has no other student links, the reference prefix will be removed from the JPG and RAW filenames.',
+    buttons: ['Unlink', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function confirmAction(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showMessageBox(window, {
+    type: input.type === 'warning' ? 'warning' : 'question',
+    title: String(input.title || 'Confirm'),
+    message: String(input.message || 'Continue?'),
+    detail: String(input.detail || ''),
+    buttons: [String(input.confirmLabel || 'Continue'), 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  return result.response === 0;
+}
+
+async function showMessage(event, input = {}) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  await dialog.showMessageBox(window, {
+    type: input.type === 'error' ? 'error' : input.type === 'warning' ? 'warning' : 'info',
+    title: String(input.title || 'TRECS'),
+    message: String(input.message || ''),
+    detail: String(input.detail || ''),
+    buttons: ['OK'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  return { shown: true };
 }
 
 function logStartup(message, error = null) {
@@ -185,11 +421,70 @@ function insertRows(database, tableName, columns, rows) {
 }
 
 function captureSessionRoot() {
-  return path.join(app.getPath('userData'), 'CaptureSessions');
+  return path.join(configuredElectronUserDataPath, 'CaptureSessions');
 }
 
 function localCaptureDatabasePath(jobId) {
-  return path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const targetPath = path.join(captureSessionRoot(), `job-${jobId}`, 'capture.db');
+  const legacyPath = [
+    path.join(projectRoot, 'TRECS-AppData', workstationStorageName, 'CaptureSessions', `job-${jobId}`, 'capture.db'),
+    path.join(legacyElectronUserDataPath, 'CaptureSessions', `job-${jobId}`, 'capture.db')
+  ].find((candidate) => fs.existsSync(candidate));
+  if (process.env.TRECS_UI_TEST !== '1' && !fs.existsSync(targetPath) && legacyPath && path.resolve(legacyPath) !== path.resolve(targetPath)) {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(legacyPath, targetPath);
+  }
+  return targetPath;
+}
+
+function ensureCaptureImageActionsSchema(database) {
+  database.run(`
+    CREATE TABLE IF NOT EXISTS capture_image_actions (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      image_asset_id INTEGER NOT NULL,
+      source_subject_id INTEGER,
+      target_subject_id INTEGER,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+    ON capture_image_actions(image_asset_id, created_at);
+  `);
+}
+
+function repairMovedCaptureImageLinks(database) {
+  const staleLinks = rowsFromDatabase(database, `
+    SELECT DISTINCT
+      cia.source_subject_id AS sourceSubjectId,
+      cia.image_asset_id AS imageId
+    FROM capture_image_actions cia
+    JOIN subject_images si
+      ON si.subject_id = cia.source_subject_id
+      AND si.image_asset_id = cia.image_asset_id
+    WHERE cia.action_type = 'move'
+      AND cia.target_subject_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM capture_image_actions newer
+        WHERE newer.image_asset_id = cia.image_asset_id
+          AND newer.id > cia.id
+          AND newer.action_type IN ('move', 'move_undone')
+      );
+  `);
+  staleLinks.forEach((link) => {
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [link.sourceSubjectId, link.imageId]);
+    chooseReplacementCaptureImage(database, link.sourceSubjectId);
+  });
+  return staleLinks.length;
 }
 
 function createLocalCaptureSchema(database) {
@@ -211,7 +506,9 @@ function createLocalCaptureSchema(database) {
       sync_status TEXT NOT NULL DEFAULT 'pending_sync',
       notes TEXT
     );
+
   `);
+  ensureCaptureImageActionsSchema(database);
   ensureColumn(database, 'capture_events', 'capture_session_id', 'INTEGER');
   ensureColumn(database, 'capture_events', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
   ensureColumn(database, 'capture_events', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
@@ -263,7 +560,7 @@ async function appendLocalCaptureEvent(input) {
       statement.free();
     }
 
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -287,7 +584,7 @@ async function updateLocalCaptureSelection(jobId, subjectId, imageAssetId) {
       WHERE job_id = ?
         AND subject_id = ?;
     `, [imageAssetId, jobId, subjectId]);
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -321,7 +618,7 @@ async function markLocalCaptureEventsPackaged(jobId, copiedImages) {
         image.imageAssetId
       ]);
     });
-    fs.writeFileSync(dbPath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
     return dbPath;
   } finally {
     database.close();
@@ -491,6 +788,23 @@ function createJobDatabaseSchema(database) {
       UNIQUE(image_asset_id, version_type, path)
     );
 
+    CREATE TABLE IF NOT EXISTS image_import_events (
+      id INTEGER PRIMARY KEY,
+      capture_session_id INTEGER,
+      job_id INTEGER NOT NULL,
+      subject_id INTEGER,
+      image_asset_id INTEGER,
+      event_type TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      destination_path TEXT,
+      filename TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'new',
+      detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      processed_at TEXT,
+      error_message TEXT,
+      metadata_json TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS subject_images (
       id INTEGER PRIMARY KEY,
       subject_id INTEGER NOT NULL,
@@ -560,22 +874,18 @@ function createJobDatabaseSchema(database) {
       notes TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS capture_events (
+    CREATE TABLE IF NOT EXISTS capture_image_actions (
       id INTEGER PRIMARY KEY,
       job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      image_asset_id INTEGER,
-      capture_session_id INTEGER,
-      shoot_stage TEXT NOT NULL DEFAULT 'main',
-      file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
-      ref TEXT,
-      jpg_path TEXT,
-      cr3_path TEXT,
-      filename TEXT,
-      selected INTEGER NOT NULL DEFAULT 1,
-      captured_at TEXT,
-      sync_status TEXT NOT NULL DEFAULT 'pending_sync',
-      notes TEXT
+      image_asset_id INTEGER NOT NULL,
+      source_subject_id INTEGER,
+      target_subject_id INTEGER,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notes TEXT,
+      photographer_name TEXT,
+      workstation_name TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS admin_item_batches (
@@ -606,9 +916,22 @@ function createJobDatabaseSchema(database) {
       edited_subjects INTEGER NOT NULL DEFAULT 0,
       copied_files INTEGER NOT NULL DEFAULT 0,
       imported_by TEXT,
-      imported_at TEXT,
+      imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       manifest_json TEXT,
       UNIQUE(job_id, package_folder)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_milestones (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL,
+      milestone_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'not_started',
+      completed_at TEXT,
+      completed_by TEXT,
+      source TEXT NOT NULL DEFAULT 'manual',
+      notes TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, milestone_key)
     );
 
     CREATE TABLE IF NOT EXISTS event_entries (
@@ -635,173 +958,31 @@ function createJobDatabaseSchema(database) {
       notes TEXT,
       UNIQUE(event_entry_id, fall_subject_id)
     );
-  `);
-}
 
-function createProgramDatabaseSchema(database) {
-  database.run(`
-    PRAGMA foreign_keys = ON;
+    CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id
+    ON capture_sessions(job_id);
 
-    CREATE TABLE IF NOT EXISTS clients (
-      id INTEGER PRIMARY KEY,
-      reference_number TEXT,
-      display_name TEXT NOT NULL,
-      trecs_name TEXT UNIQUE,
-      phone TEXT,
-      address TEXT,
-      city TEXT,
-      state TEXT,
-      zip TEXT,
-      notes TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
+    CREATE INDEX IF NOT EXISTS idx_capture_image_actions_image
+    ON capture_image_actions(image_asset_id, created_at);
 
-    CREATE TABLE IF NOT EXISTS jobs (
-      id INTEGER PRIMARY KEY,
-      client_id INTEGER NOT NULL,
-      legacy_id TEXT,
-      reference_number TEXT,
-      name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      package_plan_id INTEGER,
-      student_id_template_id INTEGER,
-      faculty_id_template_id INTEGER,
-      root_path TEXT NOT NULL,
-      legacy_folder_layout TEXT NOT NULL DEFAULT 'trecs_v7',
-      shoot_date TEXT,
-      retake_date TEXT,
-      due_date TEXT,
-      notes TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
+    CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
+    ON image_assets(capture_session_id);
 
-    CREATE TABLE IF NOT EXISTS templates (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      template_type TEXT NOT NULL,
-      source_path TEXT,
-      metadata_json TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, template_type)
-    );
+    CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
+    ON image_assets(job_id, shoot_stage);
 
-    CREATE TABLE IF NOT EXISTS template_elements (
-      id INTEGER PRIMARY KEY,
-      template_id INTEGER NOT NULL,
-      element_type TEXT NOT NULL,
-      x REAL,
-      y REAL,
-      width REAL,
-      height REAL,
-      font TEXT,
-      font_size REAL,
-      color TEXT,
-      metadata_json TEXT,
-      sort_order INTEGER NOT NULL DEFAULT 0
-    );
+    CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id
+    ON end_of_day_imports(job_id, imported_at);
 
-    CREATE TABLE IF NOT EXISTS id_card_templates (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      template_type TEXT NOT NULL CHECK (template_type IN ('student', 'staff')),
-      template_json TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, template_type)
-    );
+    CREATE INDEX IF NOT EXISTS idx_job_milestones_job_id
+    ON job_milestones(job_id, milestone_key);
 
-    CREATE TABLE IF NOT EXISTS package_plans (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 1,
-      active INTEGER NOT NULL DEFAULT 1,
-      legacy_name TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      UNIQUE(name, version)
-    );
+    CREATE INDEX IF NOT EXISTS idx_event_entries_job_status
+    ON event_entries(event_job_id, status, image_number);
 
-    CREATE TABLE IF NOT EXISTS products (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      category TEXT,
-      size TEXT,
-      requires_image INTEGER NOT NULL DEFAULT 1,
-      template_id INTEGER,
-      metadata_json TEXT,
-      created_at TEXT,
-      updated_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS product_aliases (
-      id INTEGER PRIMARY KEY,
-      product_id INTEGER NOT NULL,
-      alias TEXT NOT NULL UNIQUE,
-      source TEXT NOT NULL DEFAULT 'legacy_package_item',
-      notes TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS package_codes (
-      id INTEGER PRIMARY KEY,
-      package_plan_id INTEGER NOT NULL,
-      code TEXT NOT NULL,
-      name TEXT,
-      active INTEGER NOT NULL DEFAULT 1,
-      legacy_code_name TEXT,
-      metadata_json TEXT,
-      UNIQUE(package_plan_id, code)
-    );
-
-    CREATE TABLE IF NOT EXISTS staff_assignments (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      subject_id INTEGER NOT NULL,
-      role TEXT NOT NULL,
-      homeroom TEXT,
-      class_description TEXT,
-      include_in_composites INTEGER NOT NULL DEFAULT 1,
-      include_in_exports INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      notes TEXT,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, subject_id, role, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS composite_grade_titles (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      homeroom TEXT NOT NULL,
-      grade_title TEXT NOT NULL,
-      reviewed INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(job_id, homeroom)
-    );
-
-    CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
-      id INTEGER PRIMARY KEY,
-      job_id INTEGER NOT NULL,
-      name_key TEXT NOT NULL,
-      subject_ids_key TEXT NOT NULL,
-      reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      notes TEXT,
-      UNIQUE(job_id, name_key, subject_ids_key)
-    );
-
-    CREATE TABLE IF NOT EXISTS package_code_items (
-      id INTEGER PRIMARY KEY,
-      package_code_id INTEGER NOT NULL,
-      legacy_field TEXT,
-      raw_value TEXT NOT NULL,
-      product_id INTEGER,
-      quantity INTEGER NOT NULL DEFAULT 1,
-      sort_order INTEGER NOT NULL DEFAULT 0
-    );
-  `);
+    CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
+    ON event_subject_links(event_entry_id, sort_order);
+  `.replace(/\bid INTEGER PRIMARY KEY\b/g, 'id INTEGER PRIMARY KEY AUTOINCREMENT'));
 }
 
 function migrateExistingIdTemplateFiles(database) {
@@ -869,6 +1050,178 @@ function migrateExistingIdTemplateFiles(database) {
   return changed;
 }
 
+const UNUSED_PROGRAM_TABLES = [
+  'subject_field_values',
+  'job_field_definitions',
+  'sync_record_mappings',
+  'sync_conflicts',
+  'sync_packages',
+  'render_tasks',
+  'exports',
+  'client_contacts'
+];
+
+// ProgramData.db is the global directory and configuration database. These
+// tables are materialized only in the in-memory working database; their
+// durable source of truth is JOBS/<school>/<job>/Database/job.db.
+const JOB_DATA_TABLES = [
+  'composite_grade_titles',
+  'duplicate_record_reviews',
+  'capture_sessions',
+  'subjects',
+  'staff_assignments',
+  'subject_groups',
+  'subject_group_members',
+  'subject_codes',
+  'image_assets',
+  'subject_images',
+  'image_versions',
+  'image_import_events',
+  'envelope_scans',
+  'capture_image_actions',
+  'orders',
+  'order_items',
+  'payments',
+  'event_entries',
+  'event_subject_links',
+  'admin_item_batches',
+  'end_of_day_imports',
+  'job_milestones'
+];
+
+const JOB_DATA_DROP_ORDER = [
+  'event_subject_links',
+  'subject_group_members',
+  'subject_codes',
+  'subject_images',
+  'image_versions',
+  'payments',
+  'order_items',
+  'envelope_scans',
+  'capture_image_actions',
+  'event_entries',
+  'admin_item_batches',
+  'end_of_day_imports',
+  'job_milestones',
+  'staff_assignments',
+  'duplicate_record_reviews',
+  'composite_grade_titles',
+  'subject_groups',
+  'image_import_events',
+  'capture_sessions',
+  'orders',
+  'image_assets',
+  'subjects'
+];
+
+function databaseHasTable(database, tableName) {
+  return rowsFromDatabase(database, `
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name = ${sqlLiteral(tableName)}
+    LIMIT 1;
+  `).length > 0;
+}
+
+function dropJobDataTables(database) {
+  database.run('PRAGMA foreign_keys = OFF;');
+  try {
+    JOB_DATA_DROP_ORDER.forEach((tableName) => {
+      database.run(`DROP TABLE IF EXISTS ${tableName};`);
+    });
+  } finally {
+    database.run('PRAGMA foreign_keys = ON;');
+  }
+}
+
+function jobDatabasePathForRow(jobRow) {
+  return path.join(resolveProjectPath(jobRow.root_path), 'Database', 'job.db');
+}
+
+function pathBelongsToJobRoot(filePath, rootPathValue) {
+  if (!filePath || !rootPathValue) {
+    return false;
+  }
+
+  const jobRoot = path.resolve(resolveProjectPath(rootPathValue));
+  const resolvedPath = path.resolve(resolveProjectPath(filePath));
+  const relativePath = path.relative(jobRoot, resolvedPath);
+  return relativePath === ''
+    || (relativePath !== '..'
+      && !relativePath.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relativePath));
+}
+
+function rowsFromJobDataTable(database, tableName, jobRow) {
+  const rows = rowsFromOptionalTable(database, tableName);
+  const jobId = Number(jobRow.id);
+  if (!rows.length) {
+    return rows;
+  }
+
+  if (tableName === 'jobs') {
+    return rows.filter((row) => Number(row.id) === jobId);
+  }
+
+  if (tableName === 'image_versions') {
+    const jobImageIds = new Set(rowsFromOptionalTable(database, 'image_assets')
+      .filter((row) => Number(row.job_id) === jobId)
+      .map((row) => Number(row.id)));
+    return rows.filter((row) => jobImageIds.has(Number(row.image_asset_id))
+      && pathBelongsToJobRoot(row.path, jobRow.root_path));
+  }
+
+  const columns = tableColumnNames(database, tableName);
+  if (columns.includes('job_id')) {
+    return rows.filter((row) => Number(row.job_id) === jobId);
+  }
+  if (columns.includes('event_job_id')) {
+    return rows.filter((row) => Number(row.event_job_id) === jobId);
+  }
+
+  return rows;
+}
+
+function prepareJobDatabaseShape(database) {
+  createJobDatabaseSchema(database);
+  ensureCaptureImageActionsSchema(database);
+  ensureVerificationSchema(database);
+  ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'");
+  ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER');
+  ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT');
+  ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT');
+  ensureColumn(database, 'subjects', 'field1', 'TEXT');
+  ensureColumn(database, 'subjects', 'field2', 'TEXT');
+  repairMovedCaptureImageLinks(database);
+}
+
+function removeUnusedEmptyProgramTables(database) {
+  let changed = false;
+  database.run('PRAGMA foreign_keys = OFF;');
+  try {
+    UNUSED_PROGRAM_TABLES.forEach((tableName) => {
+      const exists = rowsFromDatabase(database, `
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = ${sqlLiteral(tableName)};
+      `).length > 0;
+      if (!exists) {
+        return;
+      }
+      const count = Number(rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM ${tableName};`)[0]?.count || 0);
+      if (count === 0) {
+        database.run(`DROP TABLE ${tableName};`);
+        changed = true;
+      }
+    });
+  } finally {
+    database.run('PRAGMA foreign_keys = ON;');
+  }
+  return changed;
+}
+
 function croppedMediumPrimaryImageBySubject(database, jobId) {
   const rows = rowsFromDatabase(database, `
     SELECT
@@ -894,15 +1247,14 @@ function croppedMediumPrimaryImageBySubject(database, jobId) {
   return imageBySubject;
 }
 
-async function writeJobDatabaseSnapshot(jobId, options = {}) {
+async function writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options = {}) {
   const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const sourceDatabase = new SQL.Database(databaseBytes);
   const jobDatabase = new SQL.Database();
   const croppedMediumOnly = options.imageScope === 'cropped_med';
 
   try {
     ensureCompositeGradeTitleTable(sourceDatabase);
+    ensureCaptureImageActionsSchema(sourceDatabase);
     sourceDatabase.run(`
       CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
         id INTEGER PRIMARY KEY,
@@ -924,11 +1276,15 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     }
 
     const rootPath = resolveProjectPath(jobRows[0].root_path);
-    const databaseFolder = path.join(rootPath, 'Database');
+    const databaseFolder = options.outputPath
+      ? path.dirname(path.resolve(options.outputPath))
+      : path.join(rootPath, 'Database');
     fs.mkdirSync(databaseFolder, { recursive: true });
-    const jobDatabasePath = path.join(databaseFolder, 'job.db');
+    const jobDatabasePath = options.outputPath
+      ? path.resolve(options.outputPath)
+      : path.join(databaseFolder, 'job.db');
 
-    createJobDatabaseSchema(jobDatabase);
+    prepareJobDatabaseShape(jobDatabase);
     jobDatabase.run('PRAGMA foreign_keys = OFF;');
     jobDatabase.run('BEGIN TRANSACTION;');
 
@@ -985,12 +1341,16 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'subject_group_members', Object.keys(subjectGroupMemberRows[0] || {}), subjectGroupMemberRows);
     insertRows(jobDatabase, 'image_assets', Object.keys(imageRows[0] || {}), imageRows);
     insertRows(jobDatabase, 'capture_sessions', Object.keys(captureSessionRows[0] || {}), captureSessionRows);
+    const captureImageActionRows = croppedMediumOnly
+      ? []
+      : rowsFromDatabase(sourceDatabase, `SELECT * FROM capture_image_actions WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'capture_image_actions', Object.keys(captureImageActionRows[0] || {}), captureImageActionRows);
     const imageVersionRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
       FROM image_versions
       WHERE image_asset_id IN (${imageIdList})
       ${croppedMediumOnly ? "AND version_type = 'cropped_med'" : ''};
-    `);
+    `).filter((row) => pathBelongsToJobRoot(row.path, jobRows[0].root_path));
     insertRows(jobDatabase, 'image_versions', Object.keys(imageVersionRows[0] || {}), imageVersionRows);
     const subjectImageRows = rowsFromDatabase(sourceDatabase, `
       SELECT *
@@ -1018,6 +1378,12 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'envelope_scans', Object.keys(envelopeRows[0] || {}), envelopeRows);
     const adminRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM admin_item_batches WHERE job_id = ${jobId};`);
     insertRows(jobDatabase, 'admin_item_batches', Object.keys(adminRows[0] || {}), adminRows);
+    const imageImportRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM image_import_events WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'image_import_events', Object.keys(imageImportRows[0] || {}), imageImportRows);
+    const endOfDayRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM end_of_day_imports WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'end_of_day_imports', Object.keys(endOfDayRows[0] || {}), endOfDayRows);
+    const milestoneRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM job_milestones WHERE job_id = ${jobId};`);
+    insertRows(jobDatabase, 'job_milestones', Object.keys(milestoneRows[0] || {}), milestoneRows);
     const eventEntryRows = rowsFromDatabase(sourceDatabase, `SELECT * FROM event_entries WHERE event_job_id = ${jobId};`);
     const eventEntryIds = eventEntryRows.map((row) => row.id);
     const eventEntryIdList = eventEntryIds.length ? eventEntryIds.join(', ') : '0';
@@ -1026,7 +1392,7 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     insertRows(jobDatabase, 'event_subject_links', Object.keys(eventLinkRows[0] || {}), eventLinkRows);
 
     jobDatabase.run('COMMIT;');
-    fs.writeFileSync(jobDatabasePath, Buffer.from(jobDatabase.export()));
+    await storageSafety.atomicWriteFile(jobDatabasePath, Buffer.from(jobDatabase.export()), { backup: !options.outputPath });
     return jobDatabasePath;
   } catch (error) {
     try {
@@ -1037,170 +1403,164 @@ async function writeJobDatabaseSnapshot(jobId, options = {}) {
     throw error;
   } finally {
     jobDatabase.close();
+  }
+}
+
+let recentlyPersistedJobDatabasePaths = new Map();
+
+function rememberPersistedJobDatabasePaths(paths) {
+  recentlyPersistedJobDatabasePaths = paths;
+  setImmediate(() => {
+    if (recentlyPersistedJobDatabasePaths === paths) {
+      recentlyPersistedJobDatabasePaths = new Map();
+    }
+  });
+}
+
+async function writeJobDatabaseSnapshot(jobId, options = {}) {
+  if (!options.outputPath) {
+    const databasePath = await storageDatabasePath(jobId);
+    if (!fs.existsSync(databasePath)) throw new Error(`Job database is missing. Use Photo Integrity & Recovery; no empty replacement was created. ${databasePath}`);
+    return databasePath;
+  }
+  const imageSnapshot = imagePersistedSignatures.get(Number(jobId));
+  if (Object.keys(options).length === 0 && imageSnapshot && fs.existsSync(imageSnapshot.path)
+      && imageSnapshot.signature === storageSafety.fileSignature(imageSnapshot.path)) return imageSnapshot.path;
+  const recentPath = Object.keys(options).length === 0
+    ? recentlyPersistedJobDatabasePaths.get(Number(jobId))
+    : null;
+  if (recentPath && fs.existsSync(recentPath)) {
+    return recentPath;
+  }
+  closeCachedQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
+  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
+  try {
+    return await writeJobDatabaseFromWorkingDatabase(sourceDatabase, jobId, options);
+  } finally {
     sourceDatabase.close();
   }
 }
 
-async function writeProgramDatabaseSnapshot() {
+async function openWorkingDatabase(options = {}) {
   const SQL = await getSqlModule();
-  const sourceDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
-  const programDatabase = new SQL.Database();
-  const programDatabasePath = path.join(projectRoot, 'database', 'program.db');
+  const database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+  prepareJobDatabaseShape(database);
+  database.run('PRAGMA foreign_keys = OFF;');
 
   try {
-    createProgramDatabaseSchema(programDatabase);
-    programDatabase.run('BEGIN TRANSACTION;');
+    const requestedJobIds = Array.isArray(options.jobIds)
+      ? new Set(options.jobIds.map((id) => numericId(id)))
+      : null;
+    const jobRows = rowsFromDatabase(database, 'SELECT id, root_path FROM jobs ORDER BY id;')
+      .filter((jobRow) => !requestedJobIds || requestedJobIds.has(Number(jobRow.id)));
+    for (const jobRow of jobRows) {
+      if (!options.readOnly) {
+        ensureJobFolders(jobRow.root_path);
+      }
+      const databasePath = jobDatabasePathForRow(jobRow);
+      if (!fs.existsSync(databasePath)) {
+        if (storageSafety.listDatabaseBackups(databasePath).length) {
+          throw new Error(`Job database is missing; recovery copies are available. Use Photo Integrity & Recovery to restore it. No empty replacement was created. ${databasePath}`);
+        }
+        if (options.readOnly) {
+          if (options.requireExisting) {
+            throw new Error(`Job database was not found at ${databasePath}`);
+          }
+          continue;
+        }
+        await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+      }
 
-    [
-      'clients',
-      'jobs',
-      'templates',
-      'template_elements',
-      'id_card_templates',
-      'package_plans',
-      'products',
-      'product_aliases',
-      'package_codes',
-      'package_code_items'
-    ].forEach((tableName) => {
-      const rows = rowsFromDatabase(sourceDatabase, `SELECT * FROM ${tableName};`);
-      insertRows(programDatabase, tableName, Object.keys(rows[0] || {}), rows);
-    });
-
-    programDatabase.run('COMMIT;');
-    fs.writeFileSync(programDatabasePath, Buffer.from(programDatabase.export()));
-    return programDatabasePath;
-  } catch (error) {
-    try {
-      programDatabase.run('ROLLBACK;');
-    } catch (_rollbackError) {
-      // Keep the original snapshot error.
+      const jobDatabase = new SQL.Database(fs.readFileSync(databasePath));
+      try {
+        prepareJobDatabaseShape(jobDatabase);
+        JOB_DATA_TABLES.forEach((tableName) => {
+          const rows = rowsFromJobDataTable(jobDatabase, tableName, jobRow);
+          if (!rows.length) {
+            return;
+          }
+          try {
+            insertImportedRows(database, tableName, rows);
+          } catch (error) {
+            throw new Error(`Could not load ${tableName} from ${databasePath}. Job database IDs must be unique across loaded jobs. ${error.message}`);
+          }
+        });
+      } finally {
+        jobDatabase.close();
+      }
     }
+  } catch (error) {
+    database.close();
     throw error;
   } finally {
-    programDatabase.close();
-    sourceDatabase.close();
+    try {
+      database.run('PRAGMA foreign_keys = ON;');
+    } catch (_error) {
+      // The database may already be closed after a load failure.
+    }
   }
+
+  return database;
 }
+
+async function persistWorkingDatabase(database, options = {}) {
+  const requestedJobIds = Array.isArray(options.jobIds)
+    ? new Set(options.jobIds.map((id) => numericId(id)))
+    : null;
+  const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;')
+    .filter((jobRow) => !requestedJobIds || requestedJobIds.has(Number(jobRow.id)));
+  const persistedPaths = new Map();
+  for (const jobRow of jobRows) {
+    const jobId = Number(jobRow.id);
+    const databasePath = await writeJobDatabaseFromWorkingDatabase(database, jobId);
+    if (databasePath) persistedPaths.set(jobId, databasePath);
+  }
+
+  const SQL = await getSqlModule();
+  const programDatabase = new SQL.Database(database.export());
+  try {
+    dropJobDataTables(programDatabase);
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(programDatabase.export()), { backup: true });
+  } finally {
+    programDatabase.close();
+  }
+  rememberPersistedJobDatabasePaths(persistedPaths);
+}
+
 
 async function ensurePrototypeDatabaseShape() {
   const SQL = await getSqlModule();
-  fs.mkdirSync(path.join(projectRoot, 'database'), { recursive: true });
+  fs.mkdirSync(databaseFolderPath, { recursive: true });
+  // Startup calls this under the same shared lock as ordinary writes.
+  if (!fs.existsSync(prototypeDatabasePath) && fs.existsSync(legacyPrototypeDatabasePath)) {
+    fs.renameSync(legacyPrototypeDatabasePath, prototypeDatabasePath);
+  }
   fs.mkdirSync(path.join(projectRoot, 'JOBS'), { recursive: true });
-  fs.mkdirSync(path.join(projectRoot, 'CaptureHotFolder'), { recursive: true });
+  fs.mkdirSync(captureHotFolder, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'EnvelopeHotFolder'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, 'exports'), { recursive: true });
 
-  const database = fs.existsSync(prototypeDatabasePath)
-    ? new SQL.Database(fs.readFileSync(prototypeDatabasePath))
-    : new SQL.Database();
+  const isNewDatabase = !fs.existsSync(prototypeDatabasePath);
+  if (isNewDatabase && storageSafety.listDatabaseBackups(prototypeDatabasePath).length) {
+    throw new Error(`ProgramData.db is missing but recovery backups exist. TRECS will not replace the school/job directory with an empty database. Restore a validated copy from ${path.join(databaseFolderPath, '.backups', 'ProgramData.db')} to ${prototypeDatabasePath} with TRECS closed on all workstations.`);
+  }
+  const database = isNewDatabase
+    ? new SQL.Database()
+    : new SQL.Database(fs.readFileSync(prototypeDatabasePath));
 
   try {
-    let changed = false;
-    if (!fs.existsSync(prototypeDatabasePath)) {
+    if (isNewDatabase) {
       const schemaPath = path.join(bundledResourceRoot, 'database', 'schema.sql');
       if (!fs.existsSync(schemaPath)) {
         throw new Error(`Bundled schema was not found at ${schemaPath}`);
       }
       database.run(fs.readFileSync(schemaPath, 'utf8'));
-      changed = true;
     }
 
-    const jobColumns = rowsFromDatabase(database, 'PRAGMA table_info(jobs);')
-      .map((column) => column.name);
-
-    if (!jobColumns.includes('retake_date')) {
-      database.run('ALTER TABLE jobs ADD COLUMN retake_date TEXT;');
-      changed = true;
-    }
-
+    removeUnusedEmptyProgramTables(database);
     database.run(`
-      CREATE TABLE IF NOT EXISTS capture_sessions (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        session_type TEXT NOT NULL,
-        shoot_stage TEXT NOT NULL DEFAULT 'main',
-        file_mode TEXT NOT NULL DEFAULT 'jpg_raw',
-        workstation_name TEXT NOT NULL,
-        user_name TEXT,
-        hot_folder_path TEXT,
-        local_database_path TEXT,
-        storage_root_path TEXT,
-        active_subject_id INTEGER,
-        latest_image_asset_id INTEGER,
-        status TEXT NOT NULL DEFAULT 'open',
-        sync_status TEXT NOT NULL DEFAULT 'local_only',
-        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        ended_at TEXT,
-        notes TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_capture_sessions_job_id
-      ON capture_sessions(job_id);
-
-      CREATE INDEX IF NOT EXISTS idx_capture_sessions_status
-      ON capture_sessions(status, sync_status);
-
-      CREATE TABLE IF NOT EXISTS admin_item_batches (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        shoot_stage TEXT NOT NULL,
-        admin_item_type TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'created',
-        options_json TEXT,
-        output_path TEXT,
-        created_by TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        completed_at TEXT,
-        error_message TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_admin_item_batches_job_id
-      ON admin_item_batches(job_id, shoot_stage, admin_item_type);
-
-      CREATE TABLE IF NOT EXISTS end_of_day_imports (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        package_name TEXT,
-        package_folder TEXT NOT NULL,
-        photographer_name TEXT,
-        workstation_name TEXT,
-        shoot_stage TEXT,
-        captured_images INTEGER NOT NULL DEFAULT 0,
-        raw_files INTEGER NOT NULL DEFAULT 0,
-        new_subjects INTEGER NOT NULL DEFAULT 0,
-        edited_subjects INTEGER NOT NULL DEFAULT 0,
-        copied_files INTEGER NOT NULL DEFAULT 0,
-        imported_by TEXT,
-        imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        manifest_json TEXT,
-        UNIQUE(job_id, package_folder)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_end_of_day_imports_job_id
-      ON end_of_day_imports(job_id, imported_at);
-
-      CREATE TABLE IF NOT EXISTS envelope_scans (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        subject_id INTEGER,
-        capture_session_id INTEGER,
-        image_import_event_id INTEGER,
-        order_id INTEGER,
-        scan_path TEXT,
-        envelope_identifier TEXT,
-        keyed_order_code TEXT,
-        keyed_by TEXT,
-        status TEXT NOT NULL DEFAULT 'scanned',
-        scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        keyed_at TEXT,
-        notes TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_envelope_scans_job_id
-      ON envelope_scans(job_id, subject_id, status);
-
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -1234,31 +1594,6 @@ async function ensurePrototypeDatabaseShape() {
         metadata_json TEXT
       );
 
-      CREATE TABLE IF NOT EXISTS event_entries (
-        id INTEGER PRIMARY KEY,
-        event_job_id INTEGER NOT NULL,
-        fall_job_id INTEGER,
-        event_image_asset_id INTEGER NOT NULL,
-        image_number TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'unlinked',
-        notes TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(event_job_id, event_image_asset_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS event_subject_links (
-        id INTEGER PRIMARY KEY,
-        event_entry_id INTEGER NOT NULL,
-        fall_subject_id INTEGER NOT NULL,
-        order_id INTEGER,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        confirmed_by TEXT,
-        confirmed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT,
-        UNIQUE(event_entry_id, fall_subject_id)
-      );
-
       CREATE TABLE IF NOT EXISTS render_batches (
         id INTEGER PRIMARY KEY,
         job_id INTEGER NOT NULL,
@@ -1287,117 +1622,479 @@ async function ensurePrototypeDatabaseShape() {
         UNIQUE(render_batch_id, job_id)
       );
 
-      CREATE TABLE IF NOT EXISTS render_tasks (
-        id INTEGER PRIMARY KEY,
-        render_batch_id INTEGER NOT NULL,
-        order_item_id INTEGER,
-        job_id INTEGER,
-        order_id INTEGER,
-        task_type TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'queued',
-        output_path TEXT,
-        details_json TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-    `);
-    changed = true;
-
-    changed = ensureColumn(database, 'capture_sessions', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
-    changed = ensureColumn(database, 'capture_sessions', 'file_mode', "TEXT NOT NULL DEFAULT 'jpg_raw'") || changed;
-    changed = ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'subjects', 'enrollment_status', "TEXT NOT NULL DEFAULT 'active'") || changed;
-    changed = ensureColumn(database, 'subjects', 'include_in_composites', 'INTEGER NOT NULL DEFAULT 0') || changed;
-    changed = ensureColumn(database, 'subjects', 'verified_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'verification_source', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'field1', 'TEXT') || changed;
-    changed = ensureColumn(database, 'subjects', 'field2', 'TEXT') || changed;
-    ensureCompositeGradeTitleTable(database);
-    database.run(`
-      CREATE TABLE IF NOT EXISTS duplicate_record_reviews (
-        id INTEGER PRIMARY KEY,
-        job_id INTEGER NOT NULL,
-        name_key TEXT NOT NULL,
-        subject_ids_key TEXT NOT NULL,
-        reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        notes TEXT,
-        UNIQUE(job_id, name_key, subject_ids_key)
-      );
-    `);
-    changed = ensureColumn(database, 'image_assets', 'capture_session_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'image_assets', 'shoot_stage', "TEXT NOT NULL DEFAULT 'main'") || changed;
-    changed = ensureColumn(database, 'image_assets', 'rejected_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'image_assets', 'rejected_reason', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'session_uuid', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'lock_scope', "TEXT NOT NULL DEFAULT 'job_write'") || changed;
-    changed = ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'") || changed;
-    changed = ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT') || changed;
-    changed = ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'package_codes', 'metadata_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'output_path', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'options_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_batches', 'result_json', 'TEXT') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'job_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'order_id', 'INTEGER') || changed;
-    changed = ensureColumn(database, 'render_tasks', 'details_json', 'TEXT') || changed;
-    changed = migrateExistingIdTemplateFiles(database) || changed;
-
-    database.run(`
-      CREATE INDEX IF NOT EXISTS idx_image_assets_capture_session_id
-      ON image_assets(capture_session_id);
-
-      CREATE INDEX IF NOT EXISTS idx_image_assets_shoot_stage
-      ON image_assets(job_id, shoot_stage);
-
       CREATE INDEX IF NOT EXISTS idx_job_sessions_active
       ON job_sessions(job_id, session_status, lock_scope);
 
       CREATE INDEX IF NOT EXISTS idx_render_batch_jobs_batch
       ON render_batch_jobs(render_batch_id, sort_order);
-
-      CREATE INDEX IF NOT EXISTS idx_event_entries_job_status
-      ON event_entries(event_job_id, status, image_number);
-
-      CREATE INDEX IF NOT EXISTS idx_event_subject_links_entry
-      ON event_subject_links(event_entry_id, sort_order);
-
-      CREATE INDEX IF NOT EXISTS idx_event_subject_links_fall_subject
-      ON event_subject_links(fall_subject_id);
     `);
 
-    if (changed) {
-      fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    ensureColumn(database, 'jobs', 'retake_date', 'TEXT');
+    ensureColumn(database, 'jobs', 'student_id_template_id', 'INTEGER');
+    ensureColumn(database, 'jobs', 'faculty_id_template_id', 'INTEGER');
+    ensureColumn(database, 'job_sessions', 'session_uuid', 'TEXT');
+    ensureColumn(database, 'job_sessions', 'lock_scope', "TEXT NOT NULL DEFAULT 'job_write'");
+    ensureColumn(database, 'job_sessions', 'lock_mode', "TEXT NOT NULL DEFAULT 'exclusive'");
+    ensureColumn(database, 'job_sessions', 'expires_at', 'TEXT');
+    ensureColumn(database, 'job_sessions', 'metadata_json', 'TEXT');
+    ensureColumn(database, 'package_codes', 'metadata_json', 'TEXT');
+    ensureColumn(database, 'render_batches', 'output_path', 'TEXT');
+    ensureColumn(database, 'render_batches', 'options_json', 'TEXT');
+    ensureColumn(database, 'render_batches', 'result_json', 'TEXT');
+
+    const legacyJobTablePresent = JOB_DATA_TABLES.some((tableName) => databaseHasTable(database, tableName));
+    if (legacyJobTablePresent) {
+      const authorityBackupPath = path.join(databaseFolderPath, 'ProgramData.before-job-db-authority.db');
+      if (!isNewDatabase && !fs.existsSync(authorityBackupPath)) {
+        fs.copyFileSync(prototypeDatabasePath, authorityBackupPath);
+      }
+      prepareJobDatabaseShape(database);
+      const legacyRowCount = JOB_DATA_TABLES.reduce((total, tableName) => {
+        return total + Number(rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM ${tableName};`)[0]?.count || 0);
+      }, 0);
+      if (legacyRowCount > 0) {
+        const jobRows = rowsFromDatabase(database, 'SELECT id FROM jobs ORDER BY id;');
+        for (const jobRow of jobRows) {
+          await writeJobDatabaseFromWorkingDatabase(database, Number(jobRow.id));
+        }
+      }
+      dropJobDataTables(database);
     }
+
+    migrateExistingIdTemplateFiles(database);
+    ensureEventPackageProducts(database);
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(database.export()), { backup: true });
   } finally {
     database.close();
   }
+}
+
+let cachedQueryDatabasePromise = null;
+let cachedQueryDatabase = null;
+let cachedQueryDatabaseCloseScheduled = false;
+
+function closeCachedQueryDatabase() {
+  if (cachedQueryDatabase) {
+    cachedQueryDatabase.close();
+  }
+  cachedQueryDatabase = null;
+  cachedQueryDatabasePromise = null;
+  cachedQueryDatabaseCloseScheduled = false;
+}
+
+async function getCachedQueryDatabase() {
+  if (!cachedQueryDatabasePromise) {
+    cachedQueryDatabasePromise = openWorkingDatabase({ readOnly: true })
+      .then((database) => {
+        cachedQueryDatabase = database;
+        return database;
+      })
+      .catch((error) => {
+        cachedQueryDatabasePromise = null;
+        throw error;
+      });
+  }
+
+  const database = await cachedQueryDatabasePromise;
+  if (!cachedQueryDatabaseCloseScheduled) {
+    cachedQueryDatabaseCloseScheduled = true;
+    setImmediate(() => {
+      if (cachedQueryDatabase === database) {
+        closeCachedQueryDatabase();
+      }
+    });
+  }
+  return database;
 }
 
 async function querySql(sql) {
-  const SQL = await getSqlModule();
-  const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-  const database = new SQL.Database(databaseBytes);
+  const database = await getCachedQueryDatabase();
+  return rowsFromResult(database.exec(sql));
+}
 
-  try {
-    return rowsFromResult(database.exec(sql));
-  } finally {
-    database.close();
+let cachedProgramQueryDatabasePromise = null;
+let cachedProgramQueryDatabase = null;
+let cachedProgramQueryDatabaseCloseScheduled = false;
+
+function closeCachedProgramQueryDatabase() {
+  if (cachedProgramQueryDatabase) {
+    cachedProgramQueryDatabase.close();
   }
+  cachedProgramQueryDatabase = null;
+  cachedProgramQueryDatabasePromise = null;
+  cachedProgramQueryDatabaseCloseScheduled = false;
+}
+
+async function getCachedProgramQueryDatabase() {
+  if (!cachedProgramQueryDatabasePromise) {
+    cachedProgramQueryDatabasePromise = getSqlModule()
+      .then((SQL) => new SQL.Database(fs.readFileSync(prototypeDatabasePath)))
+      .then((database) => {
+        cachedProgramQueryDatabase = database;
+        return database;
+      })
+      .catch((error) => {
+        cachedProgramQueryDatabasePromise = null;
+        throw error;
+      });
+  }
+
+  const database = await cachedProgramQueryDatabasePromise;
+  if (!cachedProgramQueryDatabaseCloseScheduled) {
+    cachedProgramQueryDatabaseCloseScheduled = true;
+    setImmediate(() => {
+      if (cachedProgramQueryDatabase === database) {
+        closeCachedProgramQueryDatabase();
+      }
+    });
+  }
+  return database;
+}
+
+async function queryProgramSql(sql) {
+  const database = await getCachedProgramQueryDatabase();
+  return rowsFromResult(database.exec(sql));
+}
+
+const cachedJobQueryDatabases = new Map();
+
+function closeCachedJobQueryDatabases() {
+  cachedJobQueryDatabases.forEach((entry) => {
+    if (entry.database) {
+      entry.database.close();
+    }
+  });
+  cachedJobQueryDatabases.clear();
+}
+
+async function getCachedJobQueryDatabase(jobIdValue) {
+  const jobId = numericId(jobIdValue);
+  const existing = cachedJobQueryDatabases.get(jobId);
+  if (existing) {
+    return existing.promise;
+  }
+
+  const jobRows = await queryProgramSql(`
+    SELECT root_path AS rootPath
+    FROM jobs
+    WHERE id = ${jobId}
+    LIMIT 1;
+  `);
+  if (!jobRows.length) {
+    throw new Error('Job not found');
+  }
+  const databasePath = path.join(resolveProjectPath(jobRows[0].rootPath), 'Database', 'job.db');
+
+  if (!fs.existsSync(databasePath)) {
+    throw new Error(`Job database was not found at ${databasePath}`);
+  }
+
+  const entry = { database: null, promise: null };
+  entry.promise = getSqlModule().then((SQL) => {
+    entry.database = new SQL.Database(fs.readFileSync(databasePath));
+    // Compatibility migrations on a read remain in memory. The next scoped
+    // write persists them; opening a student must never rewrite every job.
+    prepareJobDatabaseShape(entry.database);
+    return entry.database;
+  });
+  cachedJobQueryDatabases.set(jobId, entry);
+  setImmediate(() => {
+    if (cachedJobQueryDatabases.get(jobId) === entry) {
+      if (entry.database) entry.database.close();
+      cachedJobQueryDatabases.delete(jobId);
+    }
+  });
+  return entry.promise;
+}
+
+async function queryJobSql(jobIdValue, sql) {
+  const database = await getCachedJobQueryDatabase(jobIdValue);
+  return rowsFromResult(database.exec(sql));
+}
+
+const cachedScopedQueryDatabases = new Map();
+
+function closeCachedScopedQueryDatabases() {
+  cachedScopedQueryDatabases.forEach((entry) => {
+    if (entry.database) {
+      entry.database.close();
+    }
+  });
+  cachedScopedQueryDatabases.clear();
+}
+
+async function getCachedScopedQueryDatabase(jobIdsValue) {
+  const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(numericId))).sort((a, b) => a - b);
+  const cacheKey = jobIds.join(',');
+  const existing = cachedScopedQueryDatabases.get(cacheKey);
+  if (existing) {
+    return existing.promise;
+  }
+
+  const entry = { database: null, promise: null };
+  entry.promise = openWorkingDatabase({ jobIds, readOnly: true, requireExisting: true }).then((database) => {
+    entry.database = database;
+    return database;
+  });
+  cachedScopedQueryDatabases.set(cacheKey, entry);
+  setImmediate(() => {
+    if (cachedScopedQueryDatabases.get(cacheKey) === entry) {
+      if (entry.database) entry.database.close();
+      cachedScopedQueryDatabases.delete(cacheKey);
+    }
+  });
+  return entry.promise;
+}
+
+async function queryScopedSql(jobIds, sql) {
+  const database = await getCachedScopedQueryDatabase(jobIds);
+  return rowsFromResult(database.exec(sql));
 }
 
 async function mutateSql(callback) {
-  const SQL = await getSqlModule();
-  const databaseBytes = fs.existsSync(prototypeDatabasePath) ? fs.readFileSync(prototypeDatabasePath) : null;
-  const database = databaseBytes ? new SQL.Database(databaseBytes) : new SQL.Database();
-  try {
-    callback(database);
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
-  } finally {
-    database.close();
+  return writeSql(callback);
+}
+
+async function writeJobSql(jobIds, callback) {
+  const ids = Array.isArray(jobIds) ? jobIds : [jobIds];
+  return writeSql(callback, { jobIds: ids });
+}
+
+const imageWriteDatabases = new Map();
+const imageSubjectOwners = new Map();
+const imageAssetOwners = new Map();
+const imagePersistedSignatures = new Map();
+const idAllocatorPath = path.join(databaseFolderPath, 'record-id-reservations.json');
+
+function learnImageOwners(database, jobId) {
+  for (const [table, cache] of [['subjects', imageSubjectOwners], ['image_assets', imageAssetOwners]]) {
+    for (const row of rowsFromDatabase(database, `SELECT id FROM ${table} WHERE job_id = ${jobId}`)) cache.set(Number(row.id), jobId);
   }
+}
+
+function closeImageWriteDatabases() {
+  for (const entry of imageWriteDatabases.values()) entry.database.close();
+  imageWriteDatabases.clear();
+}
+
+async function imageJobIdForRecord(table, idValue, hint) {
+  if (hint != null) return numericId(hint);
+  const id = numericId(idValue);
+  const cache = table === 'subjects' ? imageSubjectOwners : imageAssetOwners;
+  if (cache.has(id)) return cache.get(id);
+  const jobs = await queryProgramSql('SELECT id,root_path FROM jobs ORDER BY id');
+  const SQL = await getSqlModule();
+  for (const job of jobs) {
+    const database = new SQL.Database(await fs.promises.readFile(jobDatabasePathForRow(job)));
+    try {
+      if (rowsFromDatabase(database, `SELECT id FROM ${table} WHERE id = ${id} LIMIT 1`).length) {
+        cache.set(id, Number(job.id));
+        return Number(job.id);
+      }
+    } finally { database.close(); }
+  }
+  throw new Error(table === 'subjects' ? 'Subject not found' : 'Image not found');
+}
+
+const imageJobIdForSubject = (id, hint = null) => imageJobIdForRecord('subjects', id, hint);
+const imageJobIdForAsset = (id, hint = null) => imageJobIdForRecord('image_assets', id, hint);
+
+async function reserveDatabaseRecordIds(database) {
+  idReservations.ensureAutoincrement(database, JOB_DATA_TABLES);
+  return idReservations.reserveIds(database, JOB_DATA_TABLES, idAllocatorPath, async () => {
+    const values = idReservations.maxima(database, JOB_DATA_TABLES);
+    const SQL = await getSqlModule();
+    const directory = new SQL.Database(await fs.promises.readFile(prototypeDatabasePath));
+    try {
+      for (const job of rowsFromDatabase(directory, 'SELECT id,root_path FROM jobs')) {
+        const databasePath = jobDatabasePathForRow(job);
+        if (!fs.existsSync(databasePath)) continue;
+        const jobDatabase = new SQL.Database(await fs.promises.readFile(databasePath));
+        try { idReservations.maxima(jobDatabase, JOB_DATA_TABLES, values); }
+        finally { jobDatabase.close(); }
+      }
+    } finally { directory.close(); }
+    return values;
+  });
+}
+
+function captureStageJournals(databasePath) {
+  const folder = path.join(path.dirname(databasePath), 'pending-image-imports');
+  if (!fs.existsSync(folder)) return [];
+  const jobRoot = path.dirname(path.dirname(databasePath));
+  return fs.readdirSync(folder).filter((name) => name.endsWith('.json')).map((name) => {
+    try {
+      const journalPath = path.join(folder, name);
+      const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+      if (path.resolve(journal.databasePath) !== path.resolve(databasePath) || !Array.isArray(journal.files)) return null;
+      if (!journal.files.every((file) => pathBelongsToJobRoot(file.destinationPath, jobRoot) && file.integrity?.sha256 && file.sourcePath)) return null;
+      return { ...journal, journalPath };
+    } catch (error) { logStartup('capture recovery journal unreadable', error); return null; }
+  }).filter(Boolean);
+}
+
+function captureStageIsReferenced(database, journal) {
+  return journal.files.every((file) => {
+    const relative = path.relative(projectRoot, file.destinationPath);
+    return rowsFromDatabase(database, `SELECT id FROM image_assets WHERE current_path = ${sqlLiteral(relative)} OR original_path = ${sqlLiteral(relative)} LIMIT 1`).length
+      || rowsFromDatabase(database, 'SELECT metadata_json FROM image_assets WHERE metadata_json IS NOT NULL')
+        .some((row) => metadataValue(row.metadata_json, 'rawPath') === relative);
+  });
+}
+
+async function pendingCommittedCaptureSources(jobId) {
+  const databasePath = await storageDatabasePath(jobId);
+  const journals = captureStageJournals(databasePath);
+  if (!journals.length) return [];
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(await fs.promises.readFile(databasePath));
+  try {
+    return journals.filter((journal) => captureStageIsReferenced(database, journal))
+      .flatMap((journal) => journal.files.map((file) => file.sourcePath)).filter((source) => fs.existsSync(source));
+  } finally { database.close(); }
+}
+
+async function recoverCaptureStages(database, databasePath) {
+  for (const journal of captureStageJournals(databasePath)) {
+    if (!captureStageIsReferenced(database, journal)) {
+      // A committed journal with absent metadata may follow a manual backup
+      // restore. Preserve it for integrity review instead of deleting images.
+      if (journal.phase !== 'database_committed') storageSafety.rollbackImageStage(journal);
+      continue;
+    }
+    try {
+      for (const file of journal.files) {
+        const actual = await storageSafety.fingerprintAsync(file.destinationPath);
+        if (actual.sha256 !== file.integrity.sha256 || actual.size !== file.integrity.size) throw new Error('Saved image integrity mismatch; originals retained.');
+      }
+      storageSafety.commitImageStage(journal);
+    } catch (error) { logStartup(`capture recovery pending ${journal.journalPath}`, error); }
+  }
+}
+
+// Capture mutations never materialize other jobs or export ProgramData. sql.js
+// still serializes this one job; retain its connection until another writer
+// changes the on-disk identity. Limit resident databases to two jobs.
+async function writeImageJobSql(jobIdValue, callback) {
+  const jobId = numericId(jobIdValue);
+  await acquireDatabaseWriteLock();
+  let entry;
+  let durable = false;
+  let saveAttempted = false;
+  const stages = [];
+  try {
+    closeCachedQueryDatabase();
+    closeCachedProgramQueryDatabase();
+    closeCachedJobQueryDatabases();
+    closeCachedScopedQueryDatabases();
+    const rows = await queryProgramSql(`SELECT * FROM jobs WHERE id = ${jobId}`);
+    if (!rows.length) throw new Error('Job not found');
+    const databasePath = jobDatabasePathForRow(rows[0]);
+    const signature = storageSafety.fileSignature(databasePath);
+    entry = imageWriteDatabases.get(jobId);
+    if (entry && (entry.path !== databasePath || entry.signature !== signature)) {
+      entry.database.close(); imageWriteDatabases.delete(jobId); entry = null;
+    }
+    if (!entry) {
+      const SQL = await getSqlModule();
+      const database = new SQL.Database(await fs.promises.readFile(databasePath));
+      try { prepareJobDatabaseShape(database); }
+      catch (error) { database.close(); throw error; }
+      await recoverCaptureStages(database, databasePath);
+      entry = { path: databasePath, signature, database };
+      imageWriteDatabases.set(jobId, entry);
+      learnImageOwners(database, jobId);
+    }
+    const database = entry.database;
+    const validateIds = await reserveDatabaseRecordIds(database);
+    database.stageImageFiles = async (files) => {
+      const journal = await storageSafety.stageImageFilesAsync(databasePath, files);
+      stages.push(journal);
+      return journal;
+    };
+    database.run('BEGIN;');
+    const result = await callback(database);
+    validateIds();
+    database.run('COMMIT;');
+    saveAttempted = true;
+    await storageSafety.atomicWriteFile(databasePath, Buffer.from(database.export()), { backup: true });
+    durable = true;
+    entry.signature = storageSafety.fileSignature(databasePath);
+    imagePersistedSignatures.set(jobId, { path: databasePath, signature: entry.signature });
+    rememberPersistedJobDatabasePaths(new Map([[jobId, databasePath]]));
+    if (result?.image?.id) imageAssetOwners.set(Number(result.image.id), jobId);
+    const retainedFiles = [];
+    for (const stage of stages) {
+      try { retainedFiles.push(...storageSafety.commitImageStage(stage)); }
+      catch (error) { retainedFiles.push({ path: stage.journalPath, reason: error.message }); }
+    }
+    if (retainedFiles.length && result && typeof result === 'object') result.retainedFiles = retainedFiles;
+    while (imageWriteDatabases.size > 2) {
+      const [key, older] = imageWriteDatabases.entries().next().value;
+      older.database.close(); imageWriteDatabases.delete(key);
+    }
+    return result;
+  } catch (error) {
+    if (!durable) {
+      // A network error can make replacement success ambiguous. Keep both
+      // copies and the journal until recovery inspects the actual database.
+      if (!saveAttempted) for (const stage of stages) {
+        try { storageSafety.rollbackImageStage(stage); }
+        catch (rollbackError) { logStartup('capture staged rollback requires recovery', rollbackError); }
+      }
+      if (entry) { try { entry.database.close(); } catch (_) {} imageWriteDatabases.delete(jobId); }
+    }
+    throw error;
+  } finally {
+    if (entry?.database) delete entry.database.stageImageFiles;
+    closeCachedJobQueryDatabases();
+    closeCachedScopedQueryDatabases();
+    releaseDatabaseWriteLock();
+  }
+}
+
+async function storageDatabasePath(jobId) {
+  if (jobId == null) return prototypeDatabasePath;
+  const rows = await queryProgramSql(`SELECT root_path FROM jobs WHERE id = ${numericId(jobId)}`);
+  if (!rows.length) throw new Error('Job not found');
+  return jobDatabasePathForRow(rows[0]);
+}
+
+async function listStorageBackups(jobId) {
+  const databasePath = await storageDatabasePath(jobId);
+  return { databasePath, backups: storageSafety.listDatabaseBackups(databasePath) };
+}
+
+async function restoreStorageBackup(input) {
+  await acquireDatabaseWriteLock();
+  try {
+    if (activeProductionBatches.size) throw new Error('Pause or finish production before restoring a database.');
+    closeCachedProgramQueryDatabase();
+    const scope = input.jobId == null ? '' : `AND job_id = ${numericId(input.jobId)}`;
+    const conflicts = await queryProgramSql(`SELECT workstation_name FROM job_sessions WHERE session_status = 'open' AND expires_at > CURRENT_TIMESTAMP AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)} ${scope} LIMIT 1`);
+    if (conflicts.length) throw new Error(`Close this job on ${conflicts[0].workstation_name || 'the other workstation'} before restoring its database.`);
+    const databasePath = await storageDatabasePath(input.jobId);
+    const backupPath = path.resolve(String(input.backupPath || ''));
+    if (!storageSafety.listDatabaseBackups(databasePath).some((entry) => entry.path === backupPath)) throw new Error('Choose an existing backup for this database.');
+    const bytes = await fs.promises.readFile(backupPath);
+    const SQL = await getSqlModule();
+    const database = new SQL.Database(bytes);
+    try {
+      if (rowsFromDatabase(database, 'PRAGMA quick_check;')[0]?.quick_check !== 'ok') throw new Error('Backup failed database integrity validation.');
+      if (input.jobId != null && !rowsFromDatabase(database, `SELECT id FROM jobs WHERE id = ${numericId(input.jobId)}`).length) throw new Error('Backup belongs to a different job.');
+    } finally { database.close(); }
+    closeImageWriteDatabases();
+    imageSubjectOwners.clear(); imageAssetOwners.clear(); imagePersistedSignatures.clear();
+    closeCachedQueryDatabase(); closeCachedProgramQueryDatabase(); closeCachedJobQueryDatabases(); closeCachedScopedQueryDatabases();
+    await storageSafety.atomicWriteFile(databasePath, bytes, { backup: true, backupIntervalMs: 0 });
+    return { restored: true, databasePath, backupPath };
+  } finally { releaseDatabaseWriteLock(); }
+}
+
+async function writeResultJobSql(callback) {
+  return writeSql(callback, {
+    jobIds: (result) => result && result.jobId ? [result.jobId] : undefined
+  });
 }
 
 function safeFolderName(value) {
@@ -1557,7 +2254,7 @@ function normalizeStudentFieldSettings(settings = {}) {
 }
 
 async function getStudentFieldSettings() {
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT value_json AS valueJson
     FROM app_settings
     WHERE key = '${STUDENT_FIELD_SETTINGS_KEY}';
@@ -1576,7 +2273,7 @@ async function getStudentFieldSettings() {
 
 async function saveStudentFieldSettings(_event, input = {}) {
   const settings = normalizeStudentFieldSettings(input);
-  await writeSql((database) => {
+  await writeProgramSql((database) => {
     const statement = database.prepare(`
       INSERT OR REPLACE INTO app_settings (
         key,
@@ -1595,6 +2292,223 @@ async function saveStudentFieldSettings(_event, input = {}) {
     return settings;
   });
   return settings;
+}
+
+const TRECS_LOG_DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbxmvsv7AKGvQJCgjAji2yO35yAX-E0XFDUWVZPu5bU-cSayeG_w0TUBvbv5QPyKJJRrZA/exec';
+const TRECS_LOG_APP_MODES = new Set(['auto', 'server', 'lab', 'capture', 'workstation']);
+
+function trecsLogStationId() {
+  return String(process.env.COMPUTERNAME || os.hostname() || 'WORKSTATION').trim().toUpperCase();
+}
+
+function defaultTrecsLogSettings() {
+  return {
+    version: 1,
+    enabled: false,
+    webAppUrl: TRECS_LOG_DEFAULT_URL,
+    appMode: 'auto',
+    encryptedToken: '',
+    tokenUpdatedAt: null,
+    updatedAt: null
+  };
+}
+
+function normalizeTrecsLogUrl(value) {
+  const text = String(value || TRECS_LOG_DEFAULT_URL).trim();
+  let url;
+  try {
+    url = new URL(text);
+  } catch (_error) {
+    throw new Error('Enter a valid Apps Script web app URL');
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' || !/^\/macros\/s\/[^/]+\/exec$/.test(url.pathname)) {
+    throw new Error('The log URL must be a production script.google.com web app URL ending in /exec');
+  }
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function readTrecsLogSettingsFile() {
+  if (!fs.existsSync(trecsLogSettingsPath)) {
+    return defaultTrecsLogSettings();
+  }
+  try {
+    const stored = JSON.parse(fs.readFileSync(trecsLogSettingsPath, 'utf8'));
+    const appMode = TRECS_LOG_APP_MODES.has(String(stored.appMode || '').toLowerCase())
+      ? String(stored.appMode).toLowerCase()
+      : 'auto';
+    return {
+      ...defaultTrecsLogSettings(),
+      enabled: stored.enabled === true,
+      webAppUrl: normalizeTrecsLogUrl(stored.webAppUrl),
+      appMode,
+      encryptedToken: typeof stored.encryptedToken === 'string' ? stored.encryptedToken : '',
+      tokenUpdatedAt: stored.tokenUpdatedAt || null,
+      updatedAt: stored.updatedAt || null
+    };
+  } catch (_error) {
+    return defaultTrecsLogSettings();
+  }
+}
+
+function writeTrecsLogSettingsFile(settings) {
+  fs.mkdirSync(localWorkstationSettingsFolder, { recursive: true });
+  fs.writeFileSync(trecsLogSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+}
+
+function defaultTrecsLogQueue() {
+  return {
+    version: 1,
+    events: [],
+    lastUploadAt: null,
+    lastUploadError: null
+  };
+}
+
+function readTrecsLogQueueFile() {
+  if (!fs.existsSync(trecsLogQueuePath)) {
+    return defaultTrecsLogQueue();
+  }
+  try {
+    const stored = JSON.parse(fs.readFileSync(trecsLogQueuePath, 'utf8'));
+    return {
+      ...defaultTrecsLogQueue(),
+      events: Array.isArray(stored.events) ? stored.events.filter((event) => event && event.event_id) : [],
+      lastUploadAt: stored.lastUploadAt || null,
+      lastUploadError: stored.lastUploadError || null
+    };
+  } catch (_error) {
+    return defaultTrecsLogQueue();
+  }
+}
+
+function writeTrecsLogQueueFile(queue) {
+  fs.mkdirSync(localWorkstationSettingsFolder, { recursive: true });
+  fs.writeFileSync(trecsLogQueuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+}
+
+function resolvedTrecsLogAppMode(appMode) {
+  if (appMode && appMode !== 'auto') {
+    return appMode.toUpperCase();
+  }
+  return captureStationMode ? 'CAPTURE' : 'WORKSTATION';
+}
+
+function publicTrecsLogSettings(settings = readTrecsLogSettingsFile()) {
+  const queue = readTrecsLogQueueFile();
+  return {
+    version: settings.version || 1,
+    enabled: settings.enabled === true,
+    webAppUrl: settings.webAppUrl || TRECS_LOG_DEFAULT_URL,
+    appMode: settings.appMode || 'auto',
+    resolvedAppMode: resolvedTrecsLogAppMode(settings.appMode),
+    stationId: trecsLogStationId(),
+    computerName: process.env.COMPUTERNAME || os.hostname() || '',
+    tokenConfigured: Boolean(settings.encryptedToken),
+    tokenUpdatedAt: settings.tokenUpdatedAt || null,
+    updatedAt: settings.updatedAt || null,
+    encryptionAvailable: safeStorage.isEncryptionAvailable(),
+    storageScope: 'Current Windows user on this computer',
+    storageFolder: localWorkstationSettingsFolder,
+    pendingEvents: queue.events.length,
+    lastUploadAt: queue.lastUploadAt,
+    lastUploadError: queue.lastUploadError
+  };
+}
+
+function readTrecsLogToken(settings = readTrecsLogSettingsFile()) {
+  if (!settings.encryptedToken) {
+    throw new Error(`No Google Log token is saved for ${trecsLogStationId()}`);
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows protected storage is not available');
+  }
+  try {
+    return safeStorage.decryptString(Buffer.from(settings.encryptedToken, 'base64'));
+  } catch (_error) {
+    throw new Error('The saved Google Log token cannot be decrypted by this Windows user. Replace the token in Settings.');
+  }
+}
+
+async function getTrecsLogSettings() {
+  return publicTrecsLogSettings();
+}
+
+async function saveTrecsLogSettings(_event, input = {}) {
+  const existing = readTrecsLogSettingsFile();
+  const appModeValue = String(input.appMode || existing.appMode || 'auto').toLowerCase();
+  const appMode = TRECS_LOG_APP_MODES.has(appModeValue) ? appModeValue : 'auto';
+  const token = String(input.token || '').trim();
+  let encryptedToken = existing.encryptedToken;
+  let tokenUpdatedAt = existing.tokenUpdatedAt;
+
+  if (token) {
+    if (token.length > 1024) {
+      throw new Error('The station token is too long');
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Windows protected storage is not available');
+    }
+    encryptedToken = safeStorage.encryptString(token).toString('base64');
+    tokenUpdatedAt = new Date().toISOString();
+  }
+
+  const settings = {
+    version: 1,
+    enabled: input.enabled === true,
+    webAppUrl: normalizeTrecsLogUrl(input.webAppUrl || existing.webAppUrl),
+    appMode,
+    encryptedToken,
+    tokenUpdatedAt,
+    updatedAt: new Date().toISOString()
+  };
+  if (settings.enabled && !settings.encryptedToken) {
+    throw new Error(`Enter the token configured for ${trecsLogStationId()} before enabling Google Log`);
+  }
+  writeTrecsLogSettingsFile(settings);
+  if (settings.enabled) {
+    scheduleTrecsLogFlush();
+  }
+  return publicTrecsLogSettings(settings);
+}
+
+async function generateTrecsLogToken(_event, input = {}) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows protected storage is not available');
+  }
+  const existing = readTrecsLogSettingsFile();
+  const appModeValue = String(input.appMode || existing.appMode || 'auto').toLowerCase();
+  const appMode = TRECS_LOG_APP_MODES.has(appModeValue) ? appModeValue : 'auto';
+  const token = crypto.randomBytes(32).toString('base64url');
+  const settings = {
+    ...existing,
+    enabled: input.enabled === true,
+    webAppUrl: normalizeTrecsLogUrl(input.webAppUrl || existing.webAppUrl),
+    appMode,
+    encryptedToken: safeStorage.encryptString(token).toString('base64'),
+    tokenUpdatedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  writeTrecsLogSettingsFile(settings);
+  clipboard.writeText(token);
+  return {
+    ...publicTrecsLogSettings(settings),
+    copiedToClipboard: true
+  };
+}
+
+async function clearTrecsLogToken() {
+  const existing = readTrecsLogSettingsFile();
+  const settings = {
+    ...existing,
+    enabled: false,
+    encryptedToken: '',
+    tokenUpdatedAt: null,
+    updatedAt: new Date().toISOString()
+  };
+  writeTrecsLogSettingsFile(settings);
+  return publicTrecsLogSettings(settings);
 }
 
 const PRODUCTION_SYNC_SETTINGS_KEY = 'production_status_sync';
@@ -1640,6 +2554,248 @@ function httpsJsonRequest(urlValue, options = {}, body = null) {
     if (body) request.write(body);
     request.end();
   });
+}
+
+function trecsLogJsonRequest(urlValue, options = {}, body = null, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlValue);
+    const request = https.request({
+      method: options.method || 'GET',
+      hostname: url.hostname,
+      path: `${url.pathname}${url.search}`,
+      headers: options.headers || {}
+    }, (response) => {
+      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+        response.resume();
+        if (redirectCount >= 5) {
+          reject(new Error('The Google Log endpoint redirected too many times'));
+          return;
+        }
+        const redirectUrl = new URL(response.headers.location, url);
+        const redirectHostAllowed = redirectUrl.protocol === 'https:'
+          && (redirectUrl.hostname === 'script.google.com' || redirectUrl.hostname.endsWith('.googleusercontent.com'));
+        if (!redirectHostAllowed) {
+          reject(new Error('The Google Log endpoint redirected to an unexpected host'));
+          return;
+        }
+        const preserveRequest = [307, 308].includes(response.statusCode);
+        const redirectHeaders = preserveRequest ? { ...(options.headers || {}) } : {};
+        resolve(trecsLogJsonRequest(redirectUrl.toString(), {
+          method: preserveRequest ? options.method || 'GET' : 'GET',
+          headers: redirectHeaders
+        }, preserveRequest ? body : null, redirectCount + 1));
+        return;
+      }
+
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let payload;
+        try {
+          payload = JSON.parse(text);
+        } catch (_error) {
+          reject(new Error('Google Log returned a web page instead of JSON. Check the Apps Script deployment access and /exec URL.'));
+          return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(payload.error || `Google Log request failed with status ${response.statusCode}`));
+          return;
+        }
+        resolve(payload);
+      });
+    });
+    request.on('error', reject);
+    request.setTimeout(15000, () => request.destroy(new Error('Google Log request timed out')));
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+function trecsLogEvent(eventType, context = {}) {
+  const normalizedEventType = String(eventType || 'TRECS.EVENT').trim().toUpperCase();
+  const [category = 'TRECS', ...actionParts] = normalizedEventType.split('.');
+  const settings = readTrecsLogSettingsFile();
+  const event = {
+    schema_version: 1,
+    event_id: crypto.randomUUID(),
+    occurred_at_utc: new Date().toISOString(),
+    event_type: normalizedEventType,
+    category: context.category || category,
+    action: context.action || actionParts.join('.') || 'EVENT',
+    outcome: context.outcome || 'SUCCESS',
+    severity: context.severity || 'INFO',
+    message: context.message || normalizedEventType,
+    app_version: app.getVersion(),
+    app_mode: resolvedTrecsLogAppMode(settings.appMode),
+    computer_name: process.env.COMPUTERNAME || os.hostname() || '',
+    station_id: trecsLogStationId(),
+    operator_name: process.env.USERNAME || os.userInfo().username || '',
+    photographer_name: context.photographerName || null,
+    session_id: APP_SESSION_ID,
+    correlation_id: context.correlationId || null,
+    job_id: context.jobId === undefined ? null : context.jobId,
+    job_name: context.jobName || null,
+    school_id: context.schoolId === undefined ? null : context.schoolId,
+    school_name: context.schoolName || null,
+    school_year: context.schoolYear || null,
+    record_count: context.recordCount === undefined ? null : context.recordCount,
+    student_count: context.studentCount === undefined ? null : context.studentCount,
+    image_count: context.imageCount === undefined ? null : context.imageCount,
+    file_count: context.fileCount === undefined ? null : context.fileCount,
+    duration_ms: context.durationMs === undefined ? null : context.durationMs,
+    source_location: context.sourceLocation || null,
+    destination_location: context.destinationLocation || null,
+    error_code: context.errorCode || null,
+    error_message: context.errorMessage || null,
+    details_json: context.details || {}
+  };
+  return event;
+}
+
+let trecsLogFlushPromise = null;
+let trecsLogFlushTimer = null;
+
+function queueTrecsLogEvent(eventType, context = {}) {
+  const settings = readTrecsLogSettingsFile();
+  if (!settings.enabled || !settings.encryptedToken) {
+    return { queued: false, reason: 'disabled' };
+  }
+  const queue = readTrecsLogQueueFile();
+  const event = trecsLogEvent(eventType, context);
+  queue.events.push(event);
+  if (queue.events.length > 10000) {
+    queue.events = queue.events.slice(-10000);
+  }
+  writeTrecsLogQueueFile(queue);
+  scheduleTrecsLogFlush();
+  return { queued: true, eventId: event.event_id };
+}
+
+function scheduleTrecsLogFlush(delayMilliseconds = 250) {
+  if (trecsLogFlushTimer) {
+    return;
+  }
+  trecsLogFlushTimer = setTimeout(() => {
+    trecsLogFlushTimer = null;
+    flushTrecsLogQueue().catch((error) => logStartup('TRECS Log upload failed', error));
+  }, delayMilliseconds);
+  if (typeof trecsLogFlushTimer.unref === 'function') {
+    trecsLogFlushTimer.unref();
+  }
+}
+
+async function flushTrecsLogQueue() {
+  if (trecsLogFlushPromise) {
+    return trecsLogFlushPromise;
+  }
+  trecsLogFlushPromise = (async () => {
+    const settings = readTrecsLogSettingsFile();
+    if (!settings.enabled || !settings.encryptedToken) {
+      return { uploaded: 0, pending: readTrecsLogQueueFile().events.length };
+    }
+    const token = readTrecsLogToken(settings);
+    let uploaded = 0;
+    let queue = readTrecsLogQueueFile();
+    while (queue.events.length) {
+      const batch = queue.events.slice(0, 50);
+      const body = JSON.stringify({
+        station_id: trecsLogStationId(),
+        token,
+        events: batch
+      });
+      try {
+        const response = await trecsLogJsonRequest(settings.webAppUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body)
+          }
+        }, body);
+        if (!response || response.ok !== true) {
+          throw new Error(response && response.error ? response.error : 'Google Log did not accept the queued events');
+        }
+        const acceptedIds = Array.isArray(response.accepted_event_ids)
+          ? new Set(response.accepted_event_ids.map(String))
+          : new Set(batch.map((event) => String(event.event_id)));
+        const acceptedCount = batch.filter((event) => acceptedIds.has(String(event.event_id))).length;
+        if (!acceptedCount) {
+          throw new Error('Google Log did not acknowledge any queued events');
+        }
+        queue.events = queue.events.filter((event) => !acceptedIds.has(String(event.event_id)));
+        queue.lastUploadAt = new Date().toISOString();
+        queue.lastUploadError = null;
+        uploaded += acceptedCount;
+        writeTrecsLogQueueFile(queue);
+      } catch (error) {
+        queue.lastUploadError = error.message || String(error);
+        writeTrecsLogQueueFile(queue);
+        throw error;
+      }
+    }
+    return { uploaded, pending: 0 };
+  })();
+  try {
+    return await trecsLogFlushPromise;
+  } finally {
+    trecsLogFlushPromise = null;
+  }
+}
+
+async function testTrecsLogConnection() {
+  const settings = readTrecsLogSettingsFile();
+  if (!settings.enabled) {
+    throw new Error('Google Activity Log is disabled. Enable logging before testing the connection.');
+  }
+  const token = readTrecsLogToken(settings);
+  const eventId = crypto.randomUUID();
+  const occurredAt = new Date().toISOString();
+  const body = JSON.stringify({
+    station_id: trecsLogStationId(),
+    token,
+    events: [{
+      schema_version: 1,
+      event_id: eventId,
+      occurred_at_utc: occurredAt,
+      event_type: 'CONNECTION.TEST',
+      category: 'CONNECTION',
+      action: 'TEST',
+      outcome: 'SUCCESS',
+      severity: 'INFO',
+      message: 'TRECS logging connection test',
+      app_version: app.getVersion(),
+      app_mode: resolvedTrecsLogAppMode(settings.appMode),
+      computer_name: process.env.COMPUTERNAME || os.hostname() || '',
+      station_id: trecsLogStationId(),
+      operator_name: process.env.USERNAME || os.userInfo().username || '',
+      session_id: APP_SESSION_ID,
+      details_json: {
+        captureStationMode,
+        test: true
+      }
+    }]
+  });
+  const response = await trecsLogJsonRequest(settings.webAppUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body)
+    }
+  }, body);
+  if (!response || response.ok !== true) {
+    throw new Error(response && response.error ? response.error : 'Google Log did not accept the connection test');
+  }
+  if (Array.isArray(response.accepted_event_ids) && !response.accepted_event_ids.includes(eventId)) {
+    throw new Error('Google Log responded, but did not acknowledge the test event');
+  }
+  return {
+    ok: true,
+    stationId: trecsLogStationId(),
+    appMode: resolvedTrecsLogAppMode(settings.appMode),
+    eventId,
+    testedAt: occurredAt,
+    message: 'Connection successful. A CONNECTION.TEST row was added to TRECS LOG.'
+  };
 }
 
 function readServiceAccountCredentials(credentialsPath) {
@@ -1706,7 +2862,7 @@ async function googleSheetBatchUpdate(settings, updates) {
     valueInputOption: 'USER_ENTERED',
     data: updates.map((update) => ({
       range: `${quoteSheetName(settings.sheetName)}!${update.range}`,
-      values: [[update.value]]
+      values: update.values || [[update.value]]
     }))
   });
   const response = await httpsJsonRequest(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(settings.spreadsheetId)}/values:batchUpdate`, {
@@ -1744,7 +2900,7 @@ function normalizeProductionSyncSettings(input = {}) {
 }
 
 async function getProductionSyncSettings() {
-  const rows = await querySql(`SELECT value_json AS valueJson FROM app_settings WHERE key = '${PRODUCTION_SYNC_SETTINGS_KEY}';`);
+  const rows = await queryProgramSql(`SELECT value_json AS valueJson FROM app_settings WHERE key = '${PRODUCTION_SYNC_SETTINGS_KEY}';`);
   if (!rows.length) return defaultProductionSyncSettings();
   try {
     return normalizeProductionSyncSettings(JSON.parse(rows[0].valueJson));
@@ -1755,7 +2911,7 @@ async function getProductionSyncSettings() {
 
 async function saveProductionSyncSettings(_event, input = {}) {
   const settings = normalizeProductionSyncSettings(input);
-  await writeSql((database) => {
+  await writeProgramSql((database) => {
     database.run(`
       INSERT OR REPLACE INTO app_settings (key, value_json, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP);
@@ -1885,8 +3041,70 @@ async function productionSyncJobRows() {
   `);
 }
 
-function productionComputedValues(job) {
+const PRODUCTION_SYNC_COLUMNS = [
+  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
+  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
+  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
+  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
+  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
+  { key: 'render', label: 'RENDER', headers: ['RENDER'] },
+  { key: 'delivery', label: 'Delivery', headers: ['Delivery', 'Delivered'] },
+  { key: 'notes', label: 'Notes', headers: ['Notes'] },
+  { key: 'lastSync', label: 'Last TRECS Sync', headers: ['Last TRECS Sync', 'TRECS Sync'] }
+];
+
+const PRODUCTION_STATUS_SHEET_COLUMNS = [
+  { key: 'schoolName', label: 'School / Site' },
+  { key: 'jobType', label: 'Job TYPE' },
+  { key: 'jobName', label: 'Job Name' },
+  { key: 'subjects', label: 'Subjects' },
+  { key: 'photographed', label: 'Photographed' },
+  { key: 'orders', label: 'Orders' },
+  ...PRODUCTION_SYNC_COLUMNS.map((column) => ({ key: column.key, label: column.label }))
+];
+
+const PRODUCTION_MILESTONES = [
+  { key: 'schoolData', label: 'School Data', automatic: true },
+  { key: 'onsiteSetup', label: 'Onsite Setup', automatic: true },
+  { key: 'mergeData', label: 'EOD Loaded', automatic: true },
+  { key: 'adminDone', label: 'Admin Done', automatic: true },
+  { key: 'paperOrders', label: 'Paper Orders', automatic: true },
+  { key: 'onlineOrders', label: 'Online Orders', automatic: true },
+  { key: 'render', label: 'Render', automatic: true },
+  { key: 'delivery', label: 'Delivery', automatic: false }
+];
+
+const PRODUCTION_MILESTONE_STATUS = new Set(['not_started', 'in_progress', 'done', 'blocked']);
+
+function productionManualMilestoneValue(milestone) {
+  if (!milestone) return '';
+  if (milestone.status === 'done') return productionStatusValue(milestone.completedAt) || 'done';
+  if (milestone.status === 'in_progress') return 'started';
+  if (milestone.status === 'blocked') return 'blocked';
+  return '';
+}
+
+async function productionManualMilestones(jobIds = []) {
+  const ids = jobIds.map((id) => Number(id)).filter(Number.isFinite);
+  if (!ids.length) return new Map();
+  const rows = await querySql(`
+    SELECT job_id AS jobId, milestone_key AS milestoneKey, status, completed_at AS completedAt,
+           completed_by AS completedBy, source, notes, updated_at AS updatedAt
+    FROM job_milestones
+    WHERE job_id IN (${ids.join(',')});
+  `);
+  const byJob = new Map();
+  rows.forEach((row) => {
+    const jobKey = Number(row.jobId);
+    if (!byJob.has(jobKey)) byJob.set(jobKey, new Map());
+    byJob.get(jobKey).set(row.milestoneKey, row);
+  });
+  return byJob;
+}
+
+function productionComputedValues(job, manualMilestones = new Map()) {
   const values = {};
+  if (Number(job.subjects || 0) > 0) values.schoolData = 'done';
   if (job.onsiteSetupAt) values.onsiteSetup = 'done';
   if (Number(job.endOfDays || 0) > 0) values.mergeData = productionStatusValue(job.latestEndOfDayAt);
   if (job.adminDoneAt) values.adminDone = productionStatusValue(job.adminDoneAt);
@@ -1894,18 +3112,148 @@ function productionComputedValues(job) {
   if (Number(job.onlineOrders || 0) > 0) values.onlineOrders = productionStatusValue(job.latestOnlineOrderAt);
   if (Number(job.orders || 0) > 0 && Number(job.renderedOrders || 0) >= Number(job.orders || 0)) {
     values.render = productionStatusValue(job.latestRenderAt) || 'done';
+  } else if (Number(job.renderedOrders || 0) > 0) {
+    values.render = `${Number(job.renderedOrders || 0)}/${Number(job.orders || 0) || '?'} rendered`;
   }
+  values.delivery = productionManualMilestoneValue(manualMilestones.get('delivery'));
+  values.notes = optionalText(manualMilestones.get('notes')?.notes, 500) || '';
+  values.lastSync = shortSheetDate(new Date());
   return values;
 }
 
-const PRODUCTION_SYNC_COLUMNS = [
-  { key: 'onsiteSetup', label: 'TRECS Onsite Setup + Cam Cards', headers: ['STATUS-TRECS  Onsite Setup + Cam Cards', 'TRECS Onsite Setup Cam Cards'] },
-  { key: 'mergeData', label: 'TX to Server Merge DATA', headers: ['TX to Server    Merge DATA', 'TX to Server Merge DATA'] },
-  { key: 'adminDone', label: 'Admin Done DATE', headers: ['Admin Done DATE'] },
-  { key: 'paperOrders', label: 'Scan - Data Entry', headers: ['Scan - Data Entry'] },
-  { key: 'onlineOrders', label: 'ADD Online Orders', headers: ['ADD Online Orders'] },
-  { key: 'render', label: 'RENDER', headers: ['RENDER'] }
-];
+function productionMilestoneStatus(job, key, values, manualMilestones = new Map()) {
+  const manual = manualMilestones.get(key);
+  if (manual) {
+    return {
+      key,
+      status: manual.status || 'not_started',
+      value: productionManualMilestoneValue(manual),
+      source: manual.source || 'manual',
+      completedAt: manual.completedAt || null,
+      notes: manual.notes || ''
+    };
+  }
+  const value = values[key] || '';
+  return {
+    key,
+    status: value ? 'done' : 'not_started',
+    value,
+    source: 'computed',
+    completedAt: null,
+    notes: ''
+  };
+}
+
+async function getProductionStatusDashboard() {
+  const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
+  const rows = jobs.map((job) => {
+    const manualMilestones = manualByJob.get(Number(job.id)) || new Map();
+    const computed = productionComputedValues(job, manualMilestones);
+    const milestones = PRODUCTION_MILESTONES.map((milestone) => ({
+      ...milestone,
+      ...productionMilestoneStatus(job, milestone.key, computed, manualMilestones)
+    }));
+    const completed = milestones.filter((milestone) => milestone.status === 'done').length;
+    return {
+      jobId: job.id,
+      schoolName: job.clientName || job.trecsName || '',
+      trecsName: job.trecsName || '',
+      jobName: job.jobName || '',
+      jobType: job.jobType || '',
+      subjects: Number(job.subjects || 0),
+      photographed: Number(job.photographed || 0),
+      orders: Number(job.orders || 0),
+      milestones,
+      completedMilestones: completed,
+      totalMilestones: milestones.length,
+      computedValues: computed
+    };
+  });
+  return {
+    rows,
+    milestones: PRODUCTION_MILESTONES,
+    totals: {
+      jobs: rows.length,
+      completeJobs: rows.filter((row) => row.completedMilestones === row.totalMilestones).length,
+      milestones: rows.reduce((sum, row) => sum + row.totalMilestones, 0),
+      completedMilestones: rows.reduce((sum, row) => sum + row.completedMilestones, 0)
+    }
+  };
+}
+
+async function saveProductionMilestone(_event, input = {}) {
+  const jobId = Number(input.jobId);
+  const milestoneKey = optionalText(input.milestoneKey, 80);
+  const status = optionalText(input.status, 40) || 'not_started';
+  if (!Number.isFinite(jobId) || jobId < 1) throw new Error('Choose a production job first');
+  if (!PRODUCTION_MILESTONES.some((milestone) => milestone.key === milestoneKey)) throw new Error('Unknown production milestone');
+  if (!PRODUCTION_MILESTONE_STATUS.has(status)) throw new Error('Unknown production status');
+  const completedAt = status === 'done'
+    ? (optionalText(input.completedAt, 80) || new Date().toISOString())
+    : null;
+  const completedBy = optionalText(input.completedBy, 120);
+  const notes = optionalText(input.notes, 1000);
+  await writeJobSql(jobId, (database) => {
+    database.run(`
+      INSERT INTO job_milestones (job_id, milestone_key, status, completed_at, completed_by, source, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(job_id, milestone_key) DO UPDATE SET
+        status = excluded.status,
+        completed_at = excluded.completed_at,
+        completed_by = excluded.completed_by,
+        source = 'manual',
+        notes = excluded.notes,
+        updated_at = CURRENT_TIMESTAMP;
+    `, [jobId, milestoneKey, status, completedAt, completedBy, notes]);
+  });
+  return getProductionStatusDashboard();
+}
+
+async function buildProductionStatusSheet(_event, input = {}) {
+  const settings = normalizeProductionSyncSettings(input);
+  if (!settings.credentialsPath || !settings.spreadsheetId || !settings.sheetName) {
+    throw new Error('Production sync needs credentials, spreadsheet ID, and sheet tab');
+  }
+  const dashboard = await getProductionStatusDashboard();
+  const headers = PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => column.label);
+  const rows = dashboard.rows.map((row) => {
+    const values = row.computedValues || {};
+    return PRODUCTION_STATUS_SHEET_COLUMNS.map((column) => {
+      if (column.key === 'schoolName') return row.schoolName;
+      if (column.key === 'jobType') return row.jobType;
+      if (column.key === 'jobName') return row.jobName;
+      if (column.key === 'subjects') return row.subjects;
+      if (column.key === 'photographed') return row.photographed;
+      if (column.key === 'orders') return row.orders;
+      return values[column.key] || '';
+    });
+  });
+  const lastColumn = spreadsheetColumnName(headers.length - 1);
+  const titleRow = Array(headers.length).fill('');
+  titleRow[0] = 'TRECS Production Status';
+  const blankRows = Math.max(0, settings.headerRow - 2);
+  const dataBlankRows = Math.max(0, settings.firstDataRow - settings.headerRow - 1);
+  const values = [
+    titleRow,
+    ...Array.from({ length: blankRows }, () => Array(headers.length).fill('')),
+    headers,
+    ...Array.from({ length: dataBlankRows }, () => Array(headers.length).fill('')),
+    ...rows
+  ];
+  while (values.length < 500) values.push(Array(headers.length).fill(''));
+  const response = await googleSheetBatchUpdate(settings, [{
+    range: `A1:${lastColumn}${values.length}`,
+    values
+  }]);
+  return {
+    settings,
+    serviceAccountEmail: response.serviceAccountEmail,
+    updatedCells: Number(response.totalUpdatedCells || 0),
+    rows: rows.length,
+    columns: headers.length
+  };
+}
 
 async function previewProductionStatusSync(_event, input = {}) {
   const settings = normalizeProductionSyncSettings(input);
@@ -1922,6 +3270,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     columnIndexes[column.key] = productionHeaderIndex(headers, column.headers);
   });
   const jobs = await productionSyncJobRows();
+  const manualByJob = await productionManualMilestones(jobs.map((job) => job.id));
   const jobsByName = new Map();
   jobs.forEach((job) => {
     const keys = [job.clientName, job.trecsName].map(productionJobNameKey).filter(Boolean);
@@ -1946,7 +3295,7 @@ async function previewProductionStatusSync(_event, input = {}) {
     const job = candidates.find((candidate) => sheetJobType && sheetJobType.includes(String(candidate.jobType || '').toLowerCase()))
       || candidates.find((candidate) => /fall/i.test(candidate.jobName || ''))
       || candidates[0];
-    const computed = productionComputedValues(job);
+    const computed = productionComputedValues(job, manualByJob.get(Number(job.id)) || new Map());
     const rowUpdates = [];
     PRODUCTION_SYNC_COLUMNS.forEach((column) => {
       const columnIndex = columnIndexes[column.key];
@@ -2085,6 +3434,8 @@ function createCapturePackageSchema(database) {
       homeroom TEXT,
       track TEXT,
       team TEXT,
+      field1 TEXT,
+      field2 TEXT,
       photographed_status TEXT,
       notes TEXT
     );
@@ -2145,7 +3496,7 @@ function createCapturePackageSchema(database) {
 
 async function prepareLaptopPackage(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const jobRows = await querySql(`
+  const jobRows = await queryScopedSql(jobId, `
     WITH
       subject_counts AS (
         SELECT job_id, COUNT(*) AS subjects
@@ -2207,11 +3558,8 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   fs.mkdirSync(setupCroppedMedFolder, { recursive: true });
   fs.mkdirSync(setupExportsFolder, { recursive: true });
 
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId, { imageScope: 'cropped_med' });
   const setupDatabasePath = path.join(setupDatabaseFolder, 'job.db');
-  if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
-    fs.copyFileSync(jobDatabasePath, setupDatabasePath);
-  }
+  await writeJobDatabaseSnapshot(jobId, { imageScope: 'cropped_med', outputPath: setupDatabasePath });
 
   const jobRoot = resolveProjectPath(job.rootPath);
   const croppedMedSource = path.join(jobRoot, 'CroppedMed');
@@ -2232,7 +3580,7 @@ async function prepareLaptopPackage(_event, jobIdValue) {
     app: 'TRECS',
     createdAt: createdAt.toISOString(),
     workstation: process.env.COMPUTERNAME || os.hostname(),
-    sourceDatabasePath: prototypeDatabasePath,
+    sourceDatabasePath: path.join(resolveProjectPath(job.rootPath), 'Database', 'job.db'),
     school: {
       name: job.clientName,
       folderName: job.trecsName,
@@ -2263,7 +3611,7 @@ async function prepareLaptopPackage(_event, jobIdValue) {
   };
   const manifestPath = path.join(setupPath, 'onsite-setup.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  await writeSql((database) => {
+  await writeJobSql(jobId, (database) => {
     const statement = database.prepare(`
       INSERT INTO admin_item_batches (
         job_id,
@@ -2290,6 +3638,23 @@ async function prepareLaptopPackage(_event, jobIdValue) {
       ]);
     } finally {
       statement.free();
+    }
+  });
+
+  queueTrecsLogEvent('ONSITE_SETUP.CREATED', {
+    message: `Onsite setup created for ${job.clientName} / ${job.name}`,
+    jobId: job.id,
+    jobName: job.name,
+    schoolName: job.clientName,
+    studentCount: Number(job.subjects || 0),
+    imageCount: Number(job.images || 0),
+    fileCount: Number(copiedCroppedMed || 0),
+    sourceLocation: job.rootPath,
+    destinationLocation: setupPath,
+    details: {
+      jobType: job.type,
+      orders: Number(job.orders || 0),
+      packagePlanName: job.packagePlanName || null
     }
   });
 
@@ -2336,6 +3701,8 @@ function endOfDayBaselinePath(rootPathValue) {
   return path.join(resolveProjectPath(rootPathValue), 'Database', 'onsite-start.db');
 }
 
+const endOfDaySafety = require('./end-of-day-safety');
+
 function normalizeSubjectForCompare(row) {
   return {
     id: row.id,
@@ -2349,6 +3716,8 @@ function normalizeSubjectForCompare(row) {
     homeroom: row.homeroom || '',
     track: row.track || '',
     team: row.team || '',
+    field1: row.field1 || '',
+    field2: row.field2 || '',
     notes: row.notes || ''
   };
 }
@@ -2374,6 +3743,8 @@ function compareSubjectRows(currentRows, baselineRows) {
     ['homeroom', 'Homeroom'],
     ['track', 'Track'],
     ['team', 'Team'],
+    ['field1', 'Field1'],
+    ['field2', 'Field2'],
     ['notes', 'Notes']
   ];
 
@@ -2383,8 +3754,18 @@ function compareSubjectRows(currentRows, baselineRows) {
       id: row.id,
       ref: row.legacy_ref_num,
       name: row.display_name || [row.first_name, row.last_name].filter(Boolean).join(' '),
+      type: row.subject_type,
+      firstName: row.first_name,
+      lastName: row.last_name,
+      displayName: row.display_name,
+      externalId: row.external_id,
       grade: row.grade,
-      homeroom: row.homeroom
+      homeroom: row.homeroom,
+      track: row.track,
+      team: row.team,
+      field1: row.field1,
+      field2: row.field2,
+      notes: row.notes
     }));
 
   const editedSubjects = [];
@@ -2439,7 +3820,7 @@ function parseImageMetadata(metadataJson) {
 
 async function buildEndOfDayPreview(jobId) {
   const SQL = await getSqlModule();
-  const sourceDatabase = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
+  const sourceDatabase = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
 
   try {
     const jobRows = rowsFromDatabase(sourceDatabase, `
@@ -2474,6 +3855,7 @@ async function buildEndOfDayPreview(jobId) {
     const capturedImageWhere = localCaptureImageIds.length
       ? `AND ia.id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})`
       : 'AND 1 = 0';
+    const capturedImageIdsSeen = new Set();
     const capturedImages = rowsFromDatabase(sourceDatabase, `
       SELECT
         ia.id,
@@ -2508,7 +3890,38 @@ async function buildEndOfDayPreview(jobId) {
         ...row,
         rawPath: metadata.rawPath || localRow.cr3_path || null
       };
+    }).filter((row) => {
+      if (capturedImageIdsSeen.has(Number(row.id))) return false;
+      capturedImageIdsSeen.add(Number(row.id));
+      return true;
     });
+    const wrongReferenceMoves = localCaptureImageIds.length
+      ? rowsFromDatabase(sourceDatabase, `
+          SELECT
+            cia.id,
+            cia.image_asset_id AS imageAssetId,
+            ia.filename,
+            cia.source_subject_id AS sourceSubjectId,
+            source.legacy_ref_num AS sourceRef,
+            COALESCE(source.display_name, TRIM(COALESCE(source.first_name, '') || ' ' || COALESCE(source.last_name, ''))) AS sourceName,
+            cia.target_subject_id AS targetSubjectId,
+            target.legacy_ref_num AS targetRef,
+            COALESCE(target.display_name, TRIM(COALESCE(target.first_name, '') || ' ' || COALESCE(target.last_name, ''))) AS targetName,
+            cia.notes,
+            cia.photographer_name AS photographerName,
+            cia.workstation_name AS workstationName,
+            cia.created_at AS movedAt
+          FROM capture_image_actions cia
+          JOIN image_assets ia ON ia.id = cia.image_asset_id
+          LEFT JOIN subjects source ON source.id = cia.source_subject_id
+          LEFT JOIN subjects target ON target.id = cia.target_subject_id
+          WHERE cia.job_id = ${jobId}
+            AND cia.action_type = 'move'
+            AND cia.reason = 'wrong_student'
+            AND cia.image_asset_id IN (${localCaptureImageIds.map((id) => numericId(id)).join(', ')})
+          ORDER BY cia.created_at, cia.id;
+        `)
+      : [];
 
     const baselinePath = endOfDayBaselinePath(job.rootPath);
     let baselineRows = [];
@@ -2544,11 +3957,13 @@ async function buildEndOfDayPreview(jobId) {
         capturedImages: capturedImages.length,
         capturedRawFiles: capturedImages.filter((image) => image.rawPath).length,
         localCaptureEvents: localCapture.rows.length,
+        wrongReferenceMoves: wrongReferenceMoves.length,
         newSubjects: subjectChanges.newSubjects.length,
         editedSubjects: subjectChanges.editedSubjects.length,
         deletedSubjects: subjectChanges.deletedSubjects.length
       },
       capturedImages,
+      wrongReferenceMoves,
       localCaptureEvents: localCapture.rows,
       subjectChanges
     };
@@ -2561,24 +3976,22 @@ async function getEndOfDayPreview(_event, jobIdValue) {
   return buildEndOfDayPreview(numericId(jobIdValue));
 }
 
-function movePackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
-  if (!sourcePathValue) {
-    return null;
-  }
-
-  const sourcePath = resolveProjectPath(sourcePathValue);
+async function copyPackageFile(sourcePathValue, destinationFolder, fallbackName = null) {
+  const sourcePath = sourcePathValue && resolveProjectPath(sourcePathValue);
   if (!sourcePath || !fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
-    return null;
+    throw new Error(`Captured file is missing: ${sourcePathValue || '(no path)'}. Correct it before creating End of Day.`);
   }
-
   fs.mkdirSync(destinationFolder, { recursive: true });
   const destinationPath = uniquePath(destinationFolder, fallbackName || path.basename(sourcePath));
-  moveFile(sourcePath, destinationPath);
-  return path.relative(projectRoot, destinationPath);
+  const integrity = await endOfDaySafety.copyVerified(sourcePath, destinationPath);
+  return { sourcePath, destinationPath, relativePath: path.relative(projectRoot, destinationPath), integrity };
 }
 
 function endOfDayPackageDisplayName(preview, createdAt) {
   const timestamp = endOfDayTimestampForFolder(createdAt);
+  const school = preview.job && (preview.job.trecsName || preview.job.clientName || preview.job.name)
+    ? preview.job.trecsName || preview.job.clientName || preview.job.name
+    : 'School';
   const workstation = (preview.workstationNames && preview.workstationNames.length === 1)
     ? preview.workstationNames[0]
     : preview.workstationNames && preview.workstationNames.length > 1
@@ -2589,7 +4002,9 @@ function endOfDayPackageDisplayName(preview, createdAt) {
     : preview.photographerNames && preview.photographerNames.length > 1
       ? 'Multiple Photographers'
       : process.env.USERNAME || os.userInfo().username || 'Photographer';
-  return safeFolderName(`EOD - ${timestamp} - ${workstation} - ${photographer}`);
+  return safeFolderName(
+    `EOD-${safeFileToken(school)}_${timestamp}_${safeFileToken(workstation)}_${safeFileToken(photographer)}`
+  );
 }
 
 function clearPackagedCaptureLinks(database, jobId, copiedImages) {
@@ -2716,7 +4131,28 @@ function adjustedEndOfDaySubjectChanges(preview, adjustments = {}) {
 
 async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const jobId = numericId(jobIdValue);
+  for (const [webContentsId, watcher] of captureWatchers) {
+    if (watcher.queueAvailableFiles) watcher.queueAvailableFiles();
+    if (Number(watcher.jobId) !== jobId && !watcher.pendingCaptures.some((pending) => Number(pending.jobId) === jobId)) continue;
+    if (watcher.importing || watcher.pendingCaptures.length || watcher.warningOpen) {
+      throw new Error('Finish importing or skip the pending capture files before creating End of Day.');
+    }
+    closeCaptureWatcher(webContentsId);
+  }
   const preview = await buildEndOfDayPreview(jobId);
+  const journalPath = path.join(resolveProjectPath(preview.job.rootPath), 'Database', 'end-of-day-pending.json');
+  if (fs.existsSync(journalPath)) {
+    const pending = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    const pendingManifestPath = path.join(pending.packagePath, 'end-of-day-manifest.json');
+    if (fs.existsSync(pendingManifestPath)) {
+      const pendingManifest = JSON.parse(fs.readFileSync(pendingManifestPath, 'utf8'));
+      if (pendingManifest.state === 'complete') {
+        const cleanup = await finishEndOfDayCleanup(jobId, pending, journalPath);
+        return { packagePath: pending.packagePath, manifestPath: pendingManifestPath, databasePath: path.join(pending.packagePath, 'Database', 'job.db'), counts: { ...pendingManifest.counts, ...cleanup }, recovered: true };
+      }
+    }
+    // An interrupted build never removed its sources. Preserve that folder for diagnosis.
+  }
   const subjectChanges = adjustedEndOfDaySubjectChanges(preview, adjustments);
   const adjustedCounts = {
     ...preview.counts,
@@ -2729,18 +4165,24 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
   const packagePath = uniquePath(path.join(projectRoot, 'exports', 'end-of-day'), packageName);
   const databaseFolder = path.join(packagePath, 'Database');
   const jpgFolder = path.join(packagePath, 'JPG');
-  const rawFolder = path.join(packagePath, 'CR3');
+  const rawFolder = path.join(packagePath, 'RAW');
   fs.mkdirSync(databaseFolder, { recursive: true });
   fs.mkdirSync(jpgFolder, { recursive: true });
   fs.mkdirSync(rawFolder, { recursive: true });
+  const journal = { jobId, packageId: crypto.randomUUID(), packagePath, phase: 'building', files: [], copiedImages: [] };
+  endOfDaySafety.atomicJson(journalPath, journal);
   if (preview.hasBaseline && fs.existsSync(preview.baselinePath)) {
-    fs.copyFileSync(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
+    await endOfDaySafety.copyVerified(preview.baselinePath, path.join(databaseFolder, 'onsite-start.db'));
   }
 
   const copiedImages = [];
-  preview.capturedImages.forEach((image) => {
-    const jpgPath = movePackageFile(image.currentPath, jpgFolder);
-    const rawPath = movePackageFile(image.rawPath, rawFolder);
+  for (const image of preview.capturedImages) {
+    const jpg = await copyPackageFile(image.currentPath, jpgFolder);
+    if (!image.rawPath && /raw|cr[23]/i.test(image.captureFileMode || '')) {
+      throw new Error(`Missing RAW for ${image.filename}. The original JPG remains in capture storage.`);
+    }
+    const raw = image.rawPath ? await copyPackageFile(image.rawPath, rawFolder) : null;
+    journal.files.push(jpg, ...(raw ? [raw] : []));
     copiedImages.push({
       imageAssetId: image.id,
       captureSessionId: image.captureSessionId,
@@ -2749,87 +4191,103 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
       captureWorkstation: image.captureWorkstation || null,
       photographerName: image.photographerName || null,
       captureFileMode: image.captureFileMode || null,
+      status: image.status,
+      rejectedAt: image.rejectedAt || null,
       ref: image.ref,
       studentName: image.studentName,
       filename: image.filename,
-      jpgPath,
-      rawPath,
+      jpgPath: path.relative(packagePath, jpg.destinationPath),
+      rawPath: raw ? path.relative(packagePath, raw.destinationPath) : null,
+      jpgIntegrity: jpg.integrity,
+      rawIntegrity: raw ? raw.integrity : null,
       selected: image.selected === 1
     });
-  });
-
-  await writeSql((database) => {
-    copiedImages.forEach((image) => {
-      const currentPath = image.jpgPath || null;
-      const metadata = {
-        rawPath: image.rawPath || null,
-        fileMode: image.captureFileMode || null,
-        shootStage: image.shootStage || null,
-        captureSessionId: image.captureSessionId || null,
-        endOfDayPackage: path.relative(projectRoot, packagePath)
-      };
-      database.run(`
-        UPDATE image_assets
-        SET original_path = ?,
-            current_path = ?,
-            status = 'packaged',
-            metadata_json = ?,
-            imported_at = CURRENT_TIMESTAMP
-        WHERE id = ?;
-      `, [
-        currentPath,
-        currentPath,
-        JSON.stringify(metadata),
-        image.imageAssetId
-      ]);
-      if (currentPath) {
-        database.run(`
-          UPDATE image_versions
-          SET path = ?
-          WHERE image_asset_id = ?
-            AND version_type = 'original';
-        `, [currentPath, image.imageAssetId]);
-      }
-    });
-    return { closedImages: copiedImages.length };
-  });
-  await markLocalCaptureEventsPackaged(jobId, copiedImages);
+  }
+  journal.copiedImages = copiedImages;
+  endOfDaySafety.atomicJson(journalPath, journal);
   if (preview.localCaptureDatabasePath && fs.existsSync(preview.localCaptureDatabasePath)) {
-    fs.copyFileSync(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
+    await endOfDaySafety.copyVerified(preview.localCaptureDatabasePath, path.join(databaseFolder, 'capture.db'));
   }
 
   const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
   if (jobDatabasePath && fs.existsSync(jobDatabasePath)) {
-    fs.copyFileSync(jobDatabasePath, path.join(databaseFolder, 'job.db'));
+    await endOfDaySafety.copyVerified(jobDatabasePath, path.join(databaseFolder, 'job.db'));
   }
 
   const manifest = {
     packageType: 'end_of_day',
+    packageId: journal.packageId,
+    formatVersion: 2,
+    state: 'complete',
     app: 'TRECS',
     createdAt: createdAt.toISOString(),
     workstation: process.env.COMPUTERNAME || os.hostname(),
     photographerNames: preview.photographerNames || [],
     workstationNames: preview.workstationNames || [],
-    sourceDatabasePath: prototypeDatabasePath,
+    sourceDatabasePath: path.join(resolveProjectPath(preview.job.rootPath), 'Database', 'job.db'),
     job: preview.job,
     counts: adjustedCounts,
     copiedImages,
+    wrongReferenceMoves: preview.wrongReferenceMoves || [],
     subjectChanges,
     reviewAdjustments: adjustments || {},
     paths: {
       database: 'Database/job.db',
       localCaptureDatabase: preview.localCaptureEvents.length ? 'Database/capture.db' : null,
       onsiteStartDatabase: preview.hasBaseline ? 'Database/onsite-start.db' : null,
+      legacyTrecsImport: 'Legacy TRECS Import.xlsx',
       images: 'JPG',
-      rawImages: 'CR3'
+      rawImages: 'RAW'
     }
   };
 
-  const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  const SQL = await getSqlModule();
+  const packageDatabase = new SQL.Database(fs.readFileSync(jobDatabasePath));
+  try {
+    const legacyImportResult = writeLegacyTrecsImportWorkbook(
+      path.join(packagePath, manifest.paths.legacyTrecsImport),
+      manifest,
+      rowsFromOptionalTable(packageDatabase, 'subjects')
+    );
+    manifest.legacyTrecsImport = {
+      newRecords: legacyImportResult.newRecords,
+      changedSubjects: legacyImportResult.changedSubjects,
+      fieldChanges: legacyImportResult.fieldChanges
+    };
+    const workbookDescriptor = fs.openSync(path.join(packagePath, manifest.paths.legacyTrecsImport), 'r+');
+    try { fs.fsyncSync(workbookDescriptor); } finally { fs.closeSync(workbookDescriptor); }
+  } finally {
+    packageDatabase.close();
+  }
 
-  const cleanup = await writeSql((database) => clearPackagedCaptureLinks(database, jobId, copiedImages));
-  const refreshedJobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const manifestPath = path.join(packagePath, 'end-of-day-manifest.json');
+  manifest.databaseIntegrity = await endOfDaySafety.fileDigest(path.join(databaseFolder, 'job.db'));
+  // Complete, flushed manifest is the commit point. No laptop records or sources
+  // are removed until the entire portable package has passed verification.
+  endOfDaySafety.atomicJson(manifestPath, manifest);
+  journal.phase = 'complete';
+  endOfDaySafety.atomicJson(journalPath, journal);
+  const cleanup = await finishEndOfDayCleanup(jobId, journal, journalPath);
+  const refreshedJobDatabasePath = jobDatabasePath;
+
+  queueTrecsLogEvent('END_OF_DAY.CREATED', {
+    message: `End of Day created for ${preview.job.clientName} / ${preview.job.name}`,
+    photographerName: (preview.photographerNames || []).join(', ') || null,
+    jobId: preview.job.id,
+    jobName: preview.job.name,
+    schoolName: preview.job.clientName,
+    studentCount: Number(adjustedCounts.newSubjects || 0),
+    imageCount: Number(adjustedCounts.capturedImages || 0),
+    fileCount: copiedImages.filter((image) => image.jpgPath || image.rawPath).length,
+    sourceLocation: preview.job.rootPath,
+    destinationLocation: packagePath,
+    details: {
+      rawFiles: Number(adjustedCounts.capturedRawFiles || 0),
+      newSubjects: Number(adjustedCounts.newSubjects || 0),
+      editedSubjects: Number(adjustedCounts.editedSubjects || 0),
+      workstationNames: preview.workstationNames || []
+    }
+  });
 
   return {
     packagePath,
@@ -2838,6 +4296,7 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
     jobDatabasePath: refreshedJobDatabasePath,
     counts: {
       ...adjustedCounts,
+      retainedFiles: cleanup.retainedFiles || [],
       resetSubjects: cleanup.resetSubjects || 0
     }
   };
@@ -2846,18 +4305,97 @@ async function createEndOfDayPackage(_event, jobIdValue, adjustments = {}) {
 ipcMain.handle('end-of-day:preview', getEndOfDayPreview);
 ipcMain.handle('end-of-day:create', createEndOfDayPackage);
 
-async function writeSql(updateDatabase) {
-  acquireDatabaseWriteLock();
+async function writeSql(updateDatabase, options = {}) {
+  closeCachedQueryDatabase();
+  closeCachedProgramQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
+  await acquireDatabaseWriteLock();
+  let database;
+
+  try {
+    // Writes still load all job databases so newly allocated row IDs remain
+    // globally unique. The persistence scope below prevents rewriting jobs that
+    // were not changed.
+    database = await openWorkingDatabase();
+    const validateIds = await reserveDatabaseRecordIds(database);
+    database.run('BEGIN TRANSACTION');
+    const result = updateDatabase(database);
+    validateIds();
+    database.run('COMMIT');
+    const requestedJobIds = typeof options.jobIds === 'function'
+      ? options.jobIds(result)
+      : options.jobIds;
+    await persistWorkingDatabase(database, { jobIds: requestedJobIds });
+    return result;
+  } catch (error) {
+    try {
+      if (database) database.run('ROLLBACK');
+    } catch (_rollbackError) {
+      // The original database error is more useful than a rollback failure.
+    }
+    throw error;
+  } finally {
+    if (database) database.close();
+    releaseDatabaseWriteLock();
+  }
+}
+
+async function finishEndOfDayCleanup(jobId, journal, journalPath) {
+  const packageInfo = { packageFolder: journal.packagePath, ...readEndOfDayPackage(journal.packagePath) };
+  await endOfDaySafety.validatePackage(packageInfo);
+  const copiedImages = journal.copiedImages || packageInfo.manifest.copiedImages || [];
+  let cleanup = { resetSubjects: 0 };
+  if (journal.phase !== 'database_committed') {
+    cleanup = await writeJobSql(jobId, (database) => {
+      for (const image of copiedImages) {
+        const currentPath = path.relative(projectRoot, path.join(journal.packagePath, image.jpgPath));
+        const old = rowsFromDatabase(database, `SELECT metadata_json FROM image_assets WHERE id = ${numericId(image.imageAssetId)} AND job_id = ${jobId};`)[0];
+        const metadata = { ...parseImageMetadata(old && old.metadata_json), rawPath: image.rawPath ? path.relative(projectRoot, path.join(journal.packagePath, image.rawPath)) : null, endOfDayPackageId: journal.packageId, endOfDayPackage: path.relative(projectRoot, journal.packagePath) };
+        database.run("UPDATE image_assets SET original_path = ?, current_path = ?, status = 'packaged', metadata_json = ? WHERE id = ? AND job_id = ?;", [currentPath, currentPath, JSON.stringify(metadata), image.imageAssetId, jobId]);
+        database.run("UPDATE image_versions SET path = ? WHERE image_asset_id = ? AND version_type = 'original';", [currentPath, image.imageAssetId]);
+      }
+      return clearPackagedCaptureLinks(database, jobId, copiedImages);
+    });
+    await markLocalCaptureEventsPackaged(jobId, copiedImages);
+    journal.phase = 'database_committed';
+    endOfDaySafety.atomicJson(journalPath, journal);
+  }
+  const retainedFiles = [];
+  for (const file of journal.files || []) {
+    if (!fs.existsSync(file.sourcePath)) continue;
+    try {
+      await endOfDaySafety.verifyFile(file.destinationPath, file.integrity);
+      await endOfDaySafety.verifyFile(file.sourcePath, file.integrity);
+      await fs.promises.unlink(file.sourcePath);
+    } catch (error) {
+      retainedFiles.push({ path: file.sourcePath, reason: error.message });
+    }
+  }
+  if (retainedFiles.length) {
+    journal.retainedFiles = retainedFiles;
+    endOfDaySafety.atomicJson(journalPath, journal);
+  } else {
+    fs.unlinkSync(journalPath);
+  }
+  return { ...cleanup, retainedFiles };
+}
+
+async function writeProgramSql(updateDatabase) {
+  closeCachedQueryDatabase();
+  closeCachedProgramQueryDatabase();
+  closeCachedJobQueryDatabases();
+  closeCachedScopedQueryDatabases();
+  await acquireDatabaseWriteLock();
   let database;
 
   try {
     const SQL = await getSqlModule();
-    const databaseBytes = fs.readFileSync(prototypeDatabasePath);
-    database = new SQL.Database(databaseBytes);
+    database = new SQL.Database(fs.readFileSync(prototypeDatabasePath));
     database.run('BEGIN TRANSACTION');
     const result = updateDatabase(database);
     database.run('COMMIT');
-    fs.writeFileSync(prototypeDatabasePath, Buffer.from(database.export()));
+    await storageSafety.atomicWriteFile(prototypeDatabasePath, Buffer.from(database.export()), { backup: true });
     return result;
   } catch (error) {
     try {
@@ -2876,12 +4414,70 @@ function jobLockExpirySql() {
   return `datetime('now', '+${JOB_LOCK_TTL_SECONDS} seconds')`;
 }
 
+function localProcessIsRunning(pidValue) {
+  const pid = Number(pidValue);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  if (pid === process.pid) {
+    return true;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but this user cannot signal it.
+    return error && error.code === 'EPERM';
+  }
+}
+
+function expireAbandonedLocalJobSessions(database, jobId) {
+  const localWorkstation = systemInfo().computerName.trim().toLowerCase();
+  if (!localWorkstation) {
+    return 0;
+  }
+
+  const candidates = rowsFromDatabase(database, `
+    SELECT id, workstation_name AS workstationName, metadata_json AS metadataJson
+    FROM job_sessions
+    WHERE job_id = ${jobId}
+      AND session_status = 'open'
+      AND session_uuid <> ${sqlLiteral(APP_SESSION_ID)};
+  `);
+  let expired = 0;
+  candidates.forEach((candidate) => {
+    if (String(candidate.workstationName || '').trim().toLowerCase() !== localWorkstation) {
+      return;
+    }
+    let metadata;
+    try {
+      metadata = JSON.parse(candidate.metadataJson || '{}');
+    } catch (_error) {
+      return;
+    }
+    // A different session cannot still own this process's PID. Windows may
+    // reuse a PID after the previous TRECS process exits.
+    const processIsRunning = Number(metadata.pid) === process.pid
+      ? false
+      : localProcessIsRunning(metadata.pid);
+    if (processIsRunning !== false) {
+      return;
+    }
+    database.run(`UPDATE job_sessions
+      SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
+      WHERE id = ${Number(candidate.id)} AND session_status = 'open';`);
+    expired += database.getRowsModified();
+  });
+  return expired;
+}
+
 async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
   const jobId = numericId(jobIdValue);
   const scope = ['job_write', 'batch_render'].includes(String(scopeValue)) ? String(scopeValue) : 'job_write';
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'expired', closed_at = CURRENT_TIMESTAMP
       WHERE session_status = 'open' AND (expires_at IS NULL OR expires_at <= CURRENT_TIMESTAMP);`);
+    expireAbandonedLocalJobSessions(database, jobId);
     const job = rowsFromDatabase(database, `SELECT j.id, j.name, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId} LIMIT 1;`)[0];
     if (!job) throw new Error('Job not found');
     const conflict = rowsFromDatabase(database, `
@@ -2906,7 +4502,7 @@ async function acquireJobSession(_event, jobIdValue, scopeValue = 'job_write') {
 async function heartbeatJobSessions(_event, jobIdsValue = []) {
   const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   if (!jobIds.length) return { refreshed: 0 };
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET last_seen_at = CURRENT_TIMESTAMP, expires_at = ${jobLockExpirySql()}
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
     return { refreshed: database.getRowsModified() };
@@ -2916,7 +4512,7 @@ async function heartbeatJobSessions(_event, jobIdsValue = []) {
 async function releaseJobSession(_event, jobIdsValue = []) {
   const jobIds = Array.from(new Set((Array.isArray(jobIdsValue) ? jobIdsValue : [jobIdsValue]).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
   if (!jobIds.length) return { released: 0 };
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open' AND job_id IN (${jobIds.join(',')});`);
     return { released: database.getRowsModified() };
@@ -2924,7 +4520,7 @@ async function releaseJobSession(_event, jobIdsValue = []) {
 }
 
 async function releaseAllOwnedJobSessions() {
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`UPDATE job_sessions SET session_status = 'closed', closed_at = CURRENT_TIMESTAMP, expires_at = CURRENT_TIMESTAMP
       WHERE session_uuid = ${sqlLiteral(APP_SESSION_ID)} AND session_status = 'open';`);
     return { released: database.getRowsModified() };
@@ -2932,7 +4528,7 @@ async function releaseAllOwnedJobSessions() {
 }
 
 async function getJobSessions() {
-  return querySql(`SELECT js.id, js.job_id AS jobId, j.name AS jobName, c.display_name AS clientName,
+  return queryProgramSql(`SELECT js.id, js.job_id AS jobId, j.name AS jobName, c.display_name AS clientName,
     js.workstation_name AS workstationName, js.user_name AS userName, js.lock_scope AS scope,
     js.opened_at AS openedAt, js.last_seen_at AS lastSeenAt, js.expires_at AS expiresAt
     FROM job_sessions js JOIN jobs j ON j.id = js.job_id JOIN clients c ON c.id = j.client_id
@@ -2955,6 +4551,7 @@ async function getDashboardData() {
 
   const jobs = await querySql(`
     SELECT
+      j.id,
       COALESCE(c.trecs_name, c.display_name, '') AS location,
       j.name AS job,
       j.type,
@@ -3000,13 +4597,13 @@ ipcMain.handle('dashboard:get', getDashboardData);
 
 async function getPackageEditorData(_event, packagePlanIdValue = null) {
   const requestedPlanId = packagePlanIdValue ? numericId(packagePlanIdValue) : null;
-  const plans = await querySql(`
+  const plans = await queryProgramSql(`
     SELECT id, name, version, active, legacy_name AS legacyName
     FROM package_plans
     ORDER BY active DESC, name, version DESC;
   `);
   const selectedPlanId = requestedPlanId || (plans.length ? Number(plans[0].id) : null);
-  let products = await querySql(`
+  let products = await queryProgramSql(`
     SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
     FROM products
     ORDER BY category, name;
@@ -3019,14 +4616,14 @@ async function getPackageEditorData(_event, packagePlanIdValue = null) {
     product.reviewNotes = metadata.review_notes || '';
     product.renderStatus = productRenderSupport(product);
   });
-  const codes = selectedPlanId ? await querySql(`
+  const codes = selectedPlanId ? await queryProgramSql(`
     SELECT id, code, name, active, legacy_code_name AS legacyCodeName, metadata_json AS metadataJson
     FROM package_codes
     WHERE package_plan_id = ${selectedPlanId}
     ORDER BY CAST(code AS INTEGER), code;
   `) : [];
   const codeIds = codes.map((row) => Number(row.id));
-  const items = codeIds.length ? await querySql(`
+  const items = codeIds.length ? await queryProgramSql(`
     SELECT pci.id, pci.package_code_id AS packageCodeId, pci.raw_value AS rawValue,
            pci.product_id AS productId, pci.quantity, pci.sort_order AS sortOrder,
            p.name AS productName, p.category
@@ -3049,7 +4646,7 @@ async function createPackagePlan(_event, input = {}) {
   const name = optionalText(input.name, 255);
   if (!name) throw new Error('Package plan name is required');
   const version = Math.max(1, Number.parseInt(input.version || '1', 10) || 1);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run(`INSERT INTO package_plans (name, version, active) VALUES (?, ?, 1);`, [name, version]);
     return { id: Number(database.exec('SELECT last_insert_rowid() AS id;')[0].values[0][0]), name, version };
   });
@@ -3061,7 +4658,7 @@ async function savePackageCode(_event, input = {}) {
   if (!code) throw new Error('Package code is required');
   const name = optionalText(input.name, 255) || '';
   const incomingItems = Array.isArray(input.items) ? input.items : [];
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     let packageCodeId = input.id ? numericId(input.id) : null;
     if (packageCodeId) {
       database.run(`UPDATE package_codes SET code = ?, name = ?, active = ?, legacy_code_name = COALESCE(legacy_code_name, ?) WHERE id = ? AND package_plan_id = ?;`,
@@ -3085,7 +4682,7 @@ async function savePackageCode(_event, input = {}) {
 
 async function deletePackageCode(_event, packageCodeIdValue) {
   const packageCodeId = numericId(packageCodeIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     database.run('DELETE FROM package_codes WHERE id = ?;', [packageCodeId]);
     return { deleted: packageCodeId };
   });
@@ -3123,12 +4720,44 @@ function normalizeProductInput(input = {}) {
   };
 }
 
+function ensureEventPackageProducts(database) {
+  let changed = false;
+  const products = [
+    ['Event 5x7', 'event_item', '5x7', { event_render: '5x7', description: 'Event render card, separate from regular portrait units' }],
+    ['Event 4 Wallets', 'event_item', 'wallet', { event_render: 'wallets', description: 'Event render card with four wallets' }],
+    ['Event Digital Download', 'event_item', null, { event_render: 'digital_download', description: 'Event render card with digital download QR code' }]
+  ];
+  products.forEach(([name, category, size, metadata]) => {
+    const existing = rowsFromDatabase(database, `SELECT category, size, requires_image AS requiresImage, metadata_json AS metadataJson FROM products WHERE name = '${sqlQuote(name)}' LIMIT 1;`)[0];
+    const metadataJson = JSON.stringify(metadata);
+    if (existing
+      && existing.category === category
+      && String(existing.size || '') === String(size || '')
+      && Number(existing.requiresImage || 0) === 1
+      && String(existing.metadataJson || '') === metadataJson) {
+      return;
+    }
+    database.run(`
+      INSERT INTO products (name, category, size, requires_image, metadata_json, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(name) DO UPDATE SET
+        category = excluded.category,
+        size = excluded.size,
+        requires_image = excluded.requires_image,
+        metadata_json = excluded.metadata_json,
+        updated_at = datetime('now');
+    `, [name, category, size, metadataJson]);
+    changed = true;
+  });
+  return changed;
+}
+
 async function createProduct(_event, input = {}) {
   const normalized = normalizeProductInput(input);
   const productId = normalized.id;
   const { name, category, size, requiresImage } = normalized;
   if (!name) throw new Error('Product name is required');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     if (productId) {
       const existing = rowsFromDatabase(database, `SELECT id, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
       if (!existing) throw new Error('Product was not found.');
@@ -3201,7 +4830,7 @@ function csvCell(value) {
 
 async function saveProductsBatch(_event, products = []) {
   if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const saved = saveProductRows(database, products);
     return { saved: saved.length };
   });
@@ -3209,7 +4838,7 @@ async function saveProductsBatch(_event, products = []) {
 
 async function saveProductsAsDefault(_event, products = []) {
   if (!Array.isArray(products) || !products.length) throw new Error('No products were provided.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     saveProductRows(database, products);
     const rows = rowsFromDatabase(database, `
       SELECT id, name, category, size, requires_image AS requiresImage, metadata_json AS metadataJson
@@ -3237,7 +4866,7 @@ SELECT id, '${sqlQuote(alias.alias)}', '${sqlQuote(alias.notes || 'Default produ
 
 async function deleteProduct(_event, productIdValue) {
   const productId = numericId(productIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const product = rowsFromDatabase(database, `SELECT id, name FROM products WHERE id = ${productId} LIMIT 1;`)[0];
     if (!product) throw new Error('Product was not found.');
     const usage = rowsFromDatabase(database, `SELECT COUNT(*) AS count FROM package_code_items WHERE product_id = ${productId};`)[0]?.count || 0;
@@ -3256,7 +4885,7 @@ async function seedDefaultProducts() {
   ];
   const seedPath = candidates.find((candidate) => fs.existsSync(candidate));
   if (!seedPath) throw new Error('Could not find database/product_seed.sql.');
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const before = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
     const seedSql = fs.readFileSync(seedPath, 'utf8').replace(/^\s*BEGIN TRANSACTION;\s*/i, '').replace(/\s*COMMIT;\s*$/i, '');
     database.run(seedSql);
@@ -3276,6 +4905,7 @@ async function seedDefaultProducts() {
       database.run(`INSERT OR IGNORE INTO products (name, category, size, requires_image, metadata_json) VALUES (?, 'image_prep', NULL, 1, ?);`,
         [name, JSON.stringify({ image_prep_folder: folder })]);
     });
+    ensureEventPackageProducts(database);
     const after = rowsFromDatabase(database, 'SELECT COUNT(*) AS count FROM products;')[0]?.count || 0;
     return { seedPath, productCount: Number(after), added: Math.max(0, Number(after) - Number(before)) };
   });
@@ -3283,6 +4913,7 @@ async function seedDefaultProducts() {
 
 function productRenderSupport(product) {
   const category = String(product.category || '');
+  if (category === 'event_item') return 'event_item';
   if (category === 'image_prep') return 'image_prep';
   if (category === 'digital') return 'digital_download';
   if (category === 'specialty' || isPhotoshopHandoffProduct(product)) return 'photoshop_handoff';
@@ -3585,7 +5216,7 @@ async function writeDigitalDownloadTest(webContents, product, outputFolder, opti
 
 async function testProductRender(event, productIdValue) {
   const productId = numericId(productIdValue);
-  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  const rows = await queryProgramSql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
   if (!rows.length) throw new Error('Product was not found.');
   const outputFolder = path.join(projectRoot, 'exports', 'product-render-tests', safeFolderName(rows[0].name) || `product-${productId}`);
   return rasterizeProductRenderTest(event.sender, rows[0], outputFolder);
@@ -3593,7 +5224,7 @@ async function testProductRender(event, productIdValue) {
 
 async function testPackageItemRender(event, input = {}) {
   const productId = numericId(input.productId);
-  const rows = await querySql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
+  const rows = await queryProgramSql(`SELECT id, name, category, size, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`);
   if (!rows.length) throw new Error('Product was not found.');
   const product = rows[0];
   const quantity = Math.max(1, Math.min(999, Number.parseInt(input.quantity || '1', 10) || 1));
@@ -3693,9 +5324,9 @@ function formatStatusForError(status) {
 
 async function testPackageCodeRender(event, packageCodeIdValue) {
   const packageCodeId = numericId(packageCodeIdValue);
-  const codeRows = await querySql(`SELECT id, code, name FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`);
+  const codeRows = await queryProgramSql(`SELECT id, code, name FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`);
   if (!codeRows.length) throw new Error('Package code was not found.');
-  const items = await querySql(`
+  const items = await queryProgramSql(`
     SELECT pci.id, pci.quantity, p.id AS productId, p.name, p.category, p.size, p.metadata_json AS metadataJson
     FROM package_code_items pci
     JOIN products p ON p.id = pci.product_id
@@ -3861,7 +5492,7 @@ async function testPackageCodeRender(event, packageCodeIdValue) {
 
 async function markProductReviewed(_event, productIdValue, reviewedValue = true) {
   const productId = numericId(productIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const row = rowsFromDatabase(database, `SELECT id, name, metadata_json AS metadataJson FROM products WHERE id = ${productId} LIMIT 1;`)[0];
     if (!row) throw new Error('Product was not found.');
     const metadata = parseProductMetadata(row.metadataJson);
@@ -3874,7 +5505,7 @@ async function markProductReviewed(_event, productIdValue, reviewedValue = true)
 
 async function markPackageCodeReviewed(_event, packageCodeIdValue, reviewedValue = true) {
   const packageCodeId = numericId(packageCodeIdValue);
-  return writeSql((database) => {
+  return writeProgramSql((database) => {
     const row = rowsFromDatabase(database, `SELECT id, code, name, metadata_json AS metadataJson FROM package_codes WHERE id = ${packageCodeId} LIMIT 1;`)[0];
     if (!row) throw new Error('Package code was not found.');
     const metadata = parseProductMetadata(row.metadataJson);
@@ -4074,16 +5705,24 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
            j.package_plan_id AS packagePlanId, COALESCE(pp.name, '') AS packagePlan,
            COUNT(DISTINCT o.id) AS orders,
            COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' THEN o.id END) AS paidOrders,
-           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND s.primary_image_asset_id IS NOT NULL THEN o.id END) AS readyOrders
+           COUNT(DISTINCT CASE WHEN o.paid_status = 'paid' AND (s.primary_image_asset_id IS NOT NULL OR oi.image_asset_id IS NOT NULL) THEN o.id END) AS readyOrders,
+           COUNT(DISTINCT ee.id) AS eventImages
     FROM jobs j
     JOIN clients c ON c.id = j.client_id
     LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
     LEFT JOIN orders o ON o.job_id = j.id
     LEFT JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.event_job_id = j.id
     GROUP BY j.id
     ORDER BY c.display_name, j.name;
   `);
-  const jobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.readyOrders) > 0)?.id || jobs[0]?.id || null);
+  const jobId = jobIdValue
+    ? numericId(jobIdValue)
+    : (jobs.find((job) => Number(job.readyOrders) > 0 && !['event', 'qr_event'].includes(String(job.type || '').toLowerCase()))?.id
+      || jobs.find((job) => Number(job.readyOrders) > 0)?.id
+      || jobs[0]?.id
+      || null);
   if (!jobId) return { jobs, selectedJobId: null, filters: { grades: [], homerooms: [], orders: [] } };
   const filters = {
     grades: (await querySql(`SELECT DISTINCT COALESCE(s.grade, '') AS value FROM subjects s JOIN orders o ON o.subject_id = s.id WHERE o.job_id = ${jobId} AND o.paid_status = 'paid' ORDER BY value;`)).map((row) => row.value).filter(Boolean),
@@ -4092,7 +5731,7 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
       SELECT o.id, s.legacy_ref_num AS ref,
              COALESCE(s.display_name, TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.last_name, ''))) AS subjectName,
              GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
-             CASE WHEN s.primary_image_asset_id IS NULL THEN 0 ELSE 1 END AS hasPhoto
+             CASE WHEN s.primary_image_asset_id IS NULL AND MAX(oi.image_asset_id) IS NULL THEN 0 ELSE 1 END AS hasPhoto
       FROM orders o JOIN subjects s ON s.id = o.subject_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
       WHERE o.job_id = ${jobId} AND o.paid_status = 'paid'
@@ -4102,8 +5741,8 @@ async function getUnitRenderSetup(_event, jobIdValue = null) {
   return { jobs, selectedJobId: jobId, filters };
 }
 
-async function chooseUnitRenderOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseUnitRenderOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Unit Render Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -4324,6 +5963,378 @@ function unitRenderOrderWhereClause(jobId, source, sourceValue) {
   return filters.join(' AND ');
 }
 
+function eventUnitRenderWhereClause(jobId, source, sourceValue) {
+  const filters = [`o.job_id = ${jobId}`, `o.paid_status = 'paid'`];
+  if (source === 'grade') filters.push(`s.grade = '${sqlQuote(sourceValue)}'`);
+  if (source === 'homeroom') filters.push(`s.homeroom = '${sqlQuote(sourceValue)}'`);
+  if (source === 'individual') filters.push(`o.id = ${Number(sourceValue) || 0}`);
+  return filters.join(' AND ');
+}
+
+function eventUnitSortValue(order, sortBy) {
+  if (sortBy === 'ref') return `${order.ref || ''}_${order.lastName || ''}_${order.firstName || ''}`;
+  if (sortBy === 'homeroom') return `${order.homeroom || 'No Homeroom'}_${order.lastName || ''}_${order.firstName || ''}_${order.imageNumber || ''}`;
+  return `${String(order.imageNumber || '').padStart(12, '0')}_${order.lastName || ''}_${order.firstName || ''}`;
+}
+
+function eventProductKind(item) {
+  const metadata = parseProductMetadata(item.metadataJson);
+  const text = String(item.productName || item.rawValue || item.packageCodeName || item.packageCode || '').toLowerCase();
+  const category = String(item.category || '').toLowerCase();
+  if (category === 'event_item') {
+    const eventRender = String(metadata.event_render || '').toLowerCase();
+    if (eventRender === 'digital_download') return 'digital';
+    if (eventRender === 'wallets') return 'wallets';
+    if (eventRender === '5x7') return '5x7';
+  }
+  if (category === 'event_item' && /download/.test(text)) return 'digital';
+  if (category === 'event_item' && /wallet/.test(text)) return 'wallets';
+  if (category === 'event_item' && /5\s*x\s*7|5x7/.test(text)) return '5x7';
+  if (category === 'digital' || /digital|download|zipfile|zip\s*file/.test(text)) return 'digital';
+  if (/wallet/.test(text)) return 'wallets';
+  if (/5\s*x\s*7|5x7/.test(text)) return '5x7';
+  return '';
+}
+
+function numericOrderCodeCount(order) {
+  return String(order.packageCodes || '')
+    .split(/[.,\s]+/)
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .reduce((total, value) => total + value, 0);
+}
+
+function eventCardsForOrder(order, items, mode) {
+  const cards = [];
+  const count = numericOrderCodeCount(order);
+  if (mode === 'count_5x7') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: '5x7', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  if (mode === 'count_wallets') {
+    for (let index = 0; index < count; index += 1) cards.push({ kind: 'wallets', label: `${index + 1} of ${count}` });
+    return cards;
+  }
+  items.forEach((item) => {
+    const kind = eventProductKind(item);
+    if (!kind) return;
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    for (let copy = 0; copy < quantity; copy += 1) {
+      cards.push({ kind, label: item.productName || item.rawValue || item.packageCodeName || item.packageCode || kind });
+    }
+  });
+  return cards;
+}
+
+function eventOverlaySources(jobRootPath) {
+  const templateFolder = path.join(resolveProjectPath(jobRootPath) || projectRoot, 'Templates');
+  return {
+    horizontal: imageDataUrlFromPath(path.join(templateFolder, 'Horizontal.png')),
+    vertical: imageDataUrlFromPath(path.join(templateFolder, 'Vertical.png'))
+  };
+}
+
+function eventDownloadUrl(order) {
+  return `https://download.islandphotography.net/EVENT/${encodeURIComponent(order.jobName || 'EVENT')}/${encodeURIComponent(path.basename(order.imagePath || order.filename || 'image.jpg'))}`;
+}
+
+async function rasterizeEventCard(webContents, imageSource, overlaySources, cardData) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event render image.'));
+      image.src = source;
+    });
+    const drawCover = (context, image, x, y, width, height) => {
+      const scale = Math.max(width / image.width, height / image.height);
+      const scaledWidth = image.width * scale;
+      const scaledHeight = image.height * scale;
+      context.drawImage(image, x + (width - scaledWidth) / 2, y + (height - scaledHeight) / 2, scaledWidth, scaledHeight);
+    };
+    const rotatedImage = (image) => {
+      const temp = document.createElement('canvas');
+      temp.width = image.naturalHeight;
+      temp.height = image.naturalWidth;
+      const tempContext = temp.getContext('2d');
+      tempContext.translate(0, temp.height);
+      tempContext.rotate(-Math.PI / 2);
+      tempContext.drawImage(image, 0, 0);
+      return temp;
+    };
+    Promise.all([
+      load(${JSON.stringify(imageSource)}),
+      load(${JSON.stringify(overlaySources.horizontal || null)}),
+      load(${JSON.stringify(overlaySources.vertical || null)}),
+      load(${JSON.stringify(cardData.qrSource || null)})
+    ]).then(([sourceImage, horizontalOverlay, verticalOverlay, qrImage]) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1650;
+        canvas.height = 2400;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        if (sourceImage) {
+          const sourceWasHorizontal = sourceImage.naturalWidth > sourceImage.naturalHeight;
+          const photoImage = sourceWasHorizontal ? rotatedImage(sourceImage) : sourceImage;
+          if (${JSON.stringify(cardData.kind)} === 'wallets') {
+            const walletSlots = [
+              [38, 38, 750, 1087],
+              [826, 38, 750, 1087],
+              [38, 1126, 750, 1087],
+              [826, 1126, 750, 1087]
+            ];
+            walletSlots.forEach(([x, y, width, height]) => {
+              context.save();
+              context.beginPath();
+              context.rect(x, y, width, height);
+              context.clip();
+              drawCover(context, photoImage, x, y, width, height);
+              context.restore();
+            });
+          } else {
+            context.save();
+            context.beginPath();
+            context.rect(0, 0, 1650, 2250);
+            context.clip();
+            if (photoImage.width === 1650 && photoImage.height === 2250) {
+              context.drawImage(photoImage, 0, 0);
+            } else {
+              drawCover(context, photoImage, 75, 0, 1500, 2250);
+              const overlay = sourceWasHorizontal ? horizontalOverlay : verticalOverlay;
+              if (overlay) context.drawImage(overlay, 0, 0, 1650, 2250);
+            }
+            context.restore();
+          }
+        }
+        context.fillStyle = '#fff';
+        context.fillRect(0, 2175, 1650, 225);
+        context.fillStyle = '#111';
+        context.textBaseline = 'alphabetic';
+        context.font = '40px Arial';
+        context.textAlign = 'left';
+        context.fillText(${JSON.stringify(`${cardData.ref || ''}: ${cardData.imageNumber || ''}`)} + '   Count: ' + ${JSON.stringify(cardData.label || '')}, 150, 2225);
+        context.fillText(${JSON.stringify(`${cardData.homeroom || ''}: ${cardData.lastName || ''}, ${cardData.firstName || ''}`)}, 150, 2270);
+        context.font = '30px Arial';
+        context.fillText(${JSON.stringify(cardData.sequenceLabel || '')}, 60, 2380);
+        context.fillText(${JSON.stringify(cardData.studioLine || '')}, 150, 2305);
+        if (qrImage) {
+          context.fillStyle = '#fff';
+          context.fillRect(1140, 2180, 230, 210);
+          context.drawImage(qrImage, 1150, 2188, 190, 190);
+        }
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+async function rasterizeEventStackSheet(webContents, cardSources, pageNumber, totalPages) {
+  return webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    const load = (source) => new Promise((imageResolve, imageReject) => {
+      if (!source) { imageResolve(null); return; }
+      const image = new Image();
+      image.onload = () => imageResolve(image);
+      image.onerror = () => imageReject(new Error('Could not decode an event stack card.'));
+      image.src = source;
+    });
+    Promise.all(${JSON.stringify(cardSources)}.map(load)).then((images) => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 3300;
+        canvas.height = 5100;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        const slots = [[0, 150], [1650, 150], [0, 2550], [1650, 2550]];
+        images.forEach((image, index) => {
+          if (image) context.drawImage(image, slots[index][0], slots[index][1], 1650, 2400);
+        });
+        context.fillStyle = '#111';
+        context.font = '38px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'alphabetic';
+        context.fillText('Page ' + ${Number(pageNumber)} + ' of ' + ${Number(totalPages)}, 1650, 5050);
+        resolve(canvas.toDataURL('image/jpeg', .94));
+      } catch (error) { reject(error.message); }
+    }).catch((error) => reject(error.message));
+  })`);
+}
+
+function pdfEscape(value) {
+  return String(value || '').replace(/[\\()]/g, (character) => `\\${character}`);
+}
+
+function writeJpegImagesPdf(outputPath, imagePaths, pageWidthPoints = 792, pageHeightPoints = 1224) {
+  const objects = [];
+  const addObject = (body) => {
+    objects.push(Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'binary'));
+    return objects.length;
+  };
+  const catalogId = addObject('');
+  const pagesId = addObject('');
+  const pageIds = [];
+  imagePaths.forEach((imagePath, index) => {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageId = addObject(Buffer.concat([
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width 3300 /Height 5100 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imageBuffer.length} >>\nstream\n`, 'binary'),
+      imageBuffer,
+      Buffer.from('\nendstream', 'binary')
+    ]));
+    const content = `q\n${pageWidthPoints} 0 0 ${pageHeightPoints} 0 0 cm\n/Im${index + 1} Do\nQ`;
+    const contentId = addObject(`<< /Length ${Buffer.byteLength(content, 'binary')} >>\nstream\n${content}\nendstream`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidthPoints} ${pageHeightPoints}] /Resources << /XObject << /Im${index + 1} ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+    pageIds.push(pageId);
+  });
+  objects[catalogId - 1] = Buffer.from(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`, 'binary');
+  objects[pagesId - 1] = Buffer.from(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`, 'binary');
+  const chunks = [Buffer.from(`%PDF-1.4\n% TRECS ${pdfEscape(path.basename(outputPath))}\n`, 'binary')];
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets[index + 1] = Buffer.concat(chunks).length;
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`, 'binary'), object, Buffer.from('\nendobj\n', 'binary'));
+  });
+  const xrefOffset = Buffer.concat(chunks).length;
+  const xref = [`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`];
+  for (let index = 1; index <= objects.length; index += 1) {
+    xref.push(`${String(offsets[index]).padStart(10, '0')} 00000 n \n`);
+  }
+  xref.push(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`);
+  chunks.push(Buffer.from(xref.join(''), 'binary'));
+  fs.writeFileSync(outputPath, Buffer.concat(chunks));
+}
+
+async function runEventUnitRender(event, input, jobRow) {
+  const jobId = numericId(input.jobId);
+  const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
+  const source = String(input.source || 'all');
+  const sourceValue = optionalText(input.sourceValue, 255);
+  const sortBy = String(input.sortBy || 'imageNumber');
+  const eventPlanMode = String(input.eventPlanMode || 'package_plan');
+  const orders = await queryScopedSql(jobId, `
+    SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId,
+           s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
+           c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
+           j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
+           GROUP_CONCAT(DISTINCT oi.package_code) AS packageCodes,
+           ee.image_number AS imageNumber, ia.filename,
+           ia.current_path AS imagePath
+    FROM orders o
+    JOIN jobs j ON j.id = o.job_id
+    JOIN clients c ON c.id = j.client_id
+    JOIN subjects s ON s.id = o.subject_id
+    LEFT JOIN package_plans pp ON pp.id = j.package_plan_id
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN event_subject_links esl ON esl.order_id = o.id
+    LEFT JOIN event_entries ee ON ee.id = esl.event_entry_id
+    LEFT JOIN image_assets ia ON ia.id = COALESCE(oi.image_asset_id, ee.event_image_asset_id)
+    WHERE ${eventUnitRenderWhereClause(jobId, source, sourceValue)}
+    GROUP BY o.id
+    ORDER BY ee.image_number COLLATE NOCASE, s.last_name, s.first_name, o.id;
+  `);
+  const selectedOrders = orders.sort((a, b) => eventUnitSortValue(a, sortBy).localeCompare(eventUnitSortValue(b, sortBy), undefined, { numeric: true, sensitivity: 'base' }));
+  const schoolName = selectedOrders[0]?.clientName || jobRow.clientName || 'School';
+  const runDate = /^\d{4}-\d{2}-\d{2}$/.test(input.renderDate || '') ? input.renderDate : new Date().toISOString().slice(0, 10);
+  const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`), 'Event Render');
+  const cardFolder = path.join(outputFolder, 'EventCards');
+  const sheetFolder = path.join(outputFolder, 'StackSheets');
+  fs.mkdirSync(outputFolder, { recursive: true });
+  const itemRows = selectedOrders.length ? await queryScopedSql(jobId, `
+    SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue,
+           p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN jobs j ON j.id = o.job_id
+    LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
+    LEFT JOIN package_code_items pci ON pci.package_code_id = pc.id
+    LEFT JOIN products p ON p.id = pci.product_id
+    WHERE oi.order_id IN (${selectedOrders.map((order) => Number(order.id)).join(',')})
+    ORDER BY oi.order_id, oi.id, pci.sort_order;
+  `) : [];
+  const itemsByOrder = new Map(selectedOrders.map((order) => [Number(order.id), []]));
+  itemRows.forEach((item) => itemsByOrder.get(Number(item.orderId))?.push(item));
+  const overlaySources = eventOverlaySources(selectedOrders[0]?.rootPath || jobRow.rootPath);
+  const result = { eventRender: true, jobId, outputFolder, orders: selectedOrders.length, cards: 0, sheetPages: 0, pdfPath: '', missingPhotos: [], unsupportedItems: [], files: [], orderResults: [] };
+  if (input.eventIndividualCards === false && input.eventStackSheets === false && input.eventPdf === false) throw new Error('Select at least one event output.');
+  const cardSources = [];
+  const cardPaths = [];
+  let cardSequence = 1;
+  for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    if (typeof input.stopRequested === 'function' && input.stopRequested()) { result.interrupted = input.stopRequested(); break; }
+    const order = selectedOrders[orderIndex];
+    const before = outputSnapshot(result);
+    event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `Event ${order.imageNumber || order.ref || order.id}` });
+    const items = itemsByOrder.get(Number(order.id)) || [];
+    const cards = eventCardsForOrder(order, items, eventPlanMode);
+    if (!cards.length) {
+      result.unsupportedItems.push({ orderId: order.id, ref: order.ref, item: order.packageCodes || 'No event product mapping' });
+      result.orderResults.push(orderRenderOutcome(order, before, result, input));
+      continue;
+    }
+    const imageSource = imageDataUrlFromPath(order.imagePath);
+    if (!imageSource) {
+      result.missingPhotos.push({ orderId: order.id, ref: order.ref, imageNumber: order.imageNumber });
+      result.orderResults.push(orderRenderOutcome(order, before, result, input));
+      continue;
+    }
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
+      const card = cards[cardIndex];
+      const qrPath = card.kind === 'digital' ? path.join(os.tmpdir(), `trecs-event-qr-${APP_SESSION_ID}-${Date.now()}-${order.id}-${cardIndex}.png`) : '';
+      if (qrPath) await createQrCodePng(eventDownloadUrl(order), qrPath, 220);
+      const dataUrl = await rasterizeEventCard(event.sender, imageSource, overlaySources, {
+        ...card,
+        ref: order.ref,
+        imageNumber: order.imageNumber || path.basename(order.imagePath || ''),
+        firstName: order.firstName,
+        lastName: order.lastName,
+        homeroom: order.homeroom,
+        sequenceLabel: String(cardSequence),
+        studioLine: `Island Photography ${new Date().getFullYear()}-${new Date().getFullYear() + 1}: 559-456-1400`,
+        qrSource: qrPath ? imageDataUrlFromPath(qrPath) : ''
+      });
+      if (qrPath) fs.rmSync(qrPath, { force: true });
+      const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
+      const fileName = `${String(cardSequence).padStart(5, '0')}_${safeFolderName(eventUnitSortValue(order, sortBy))}_${card.kind === 'wallets' ? '4Wallets' : card.kind === 'digital' ? 'DigitalDownload' : '5x7'}.jpg`;
+      if (input.eventIndividualCards !== false) {
+        fs.mkdirSync(cardFolder, { recursive: true });
+        const cardPath = path.join(cardFolder, fileName);
+        fs.writeFileSync(cardPath, jpeg);
+        cardPaths.push(cardPath);
+        result.files.push(cardPath);
+      }
+      cardSources.push(dataUrl);
+      result.cards += 1;
+      cardSequence += 1;
+    }
+    result.orderResults.push(orderRenderOutcome(order, before, result, input));
+  }
+  const sheetPaths = [];
+  if ((input.eventStackSheets !== false || input.eventPdf !== false) && cardSources.length) {
+    fs.mkdirSync(sheetFolder, { recursive: true });
+    const pages = Math.ceil(cardSources.length / 4);
+    for (let pageIndex = 0; pageIndex < pages; pageIndex += 1) {
+      const pageCards = [0, 1, 2, 3].map((slotIndex) => cardSources[slotIndex * pages + pageIndex] || null);
+      const dataUrl = await rasterizeEventStackSheet(event.sender, pageCards, pageIndex + 1, pages);
+      const sheetPath = path.join(sheetFolder, `${safeFolderName(schoolName)}_EventStack_${String(pageIndex + 1).padStart(4, '0')}.jpg`);
+      fs.writeFileSync(sheetPath, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+      sheetPaths.push(sheetPath);
+      result.sheetPages += 1;
+      result.files.push(sheetPath);
+    }
+  }
+  if (input.eventPdf !== false && sheetPaths.length) {
+    const pdfPath = path.join(outputFolder, `${safeFolderName(schoolName)}_Event_StackCut.pdf`);
+    writeJpegImagesPdf(pdfPath, sheetPaths);
+    result.pdfPath = pdfPath;
+    result.files.push(pdfPath);
+  }
+  fs.writeFileSync(path.join(outputFolder, 'event-unit-render-report.json'), JSON.stringify({ ...result, createdAt: new Date().toISOString() }, null, 2));
+  event.sender.send('unit-render:progress', { current: selectedOrders.length, total: selectedOrders.length, message: 'Event render complete' });
+  return result;
+}
+
 async function imagePrepExport(event, input = {}) {
   const jobId = numericId(input.jobId);
   const source = String(input.source || 'all');
@@ -4335,7 +6346,7 @@ async function imagePrepExport(event, input = {}) {
   }
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']);
   if (!allowedSources.has(source)) throw new Error('Invalid ImagePrep source.');
-  const orders = await querySql(`
+  const orders = await queryScopedSql(jobId, `
     SELECT o.id, s.id AS subjectId, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_large' ORDER BY iv.id DESC LIMIT 1), ia.current_path) AS imagePath
@@ -4348,7 +6359,7 @@ async function imagePrepExport(event, input = {}) {
     ORDER BY s.last_name, s.first_name, o.id;
   `);
   if (!orders.length) throw new Error('No paid orders matched this ImagePrep export.');
-  const itemRows = await querySql(`
+  const itemRows = await queryScopedSql(jobId, `
     SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pci.raw_value AS rawValue,
            p.name AS productName, p.category, p.metadata_json AS metadataJson
     FROM order_items oi
@@ -4596,12 +6607,24 @@ async function rasterizeDigitalDownloadCard(webContents, imageSource, templateSo
   })`);
 }
 
+const { outputSnapshot, orderRenderOutcome, completedOrderIds, renderJobStatus } = require('./production-outcomes');
+
 async function runUnitRender(event, input = {}) {
   const jobId = numericId(input.jobId); const outputParentFolder = normalizeText(input.outputFolder, 'Output folder', 1000);
   if (!fs.existsSync(outputParentFolder) || !fs.statSync(outputParentFolder).isDirectory()) throw new Error('Choose a valid output folder.');
   const source = String(input.source || 'all'); const sourceValue = optionalText(input.sourceValue, 255); const sortBy = String(input.sortBy || 'homeroom');
   const allowedSources = new Set(['all', 'grade', 'homeroom', 'individual']); if (!allowedSources.has(source)) throw new Error('Invalid render source.');
-  const orders = await querySql(`
+  const selectedJobRows = await queryProgramSql(`
+    SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
+    FROM jobs j JOIN clients c ON c.id = j.client_id
+    WHERE j.id = ${jobId}
+    LIMIT 1;
+  `);
+  const selectedJob = selectedJobRows[0] || null;
+  if (['event', 'qr_event'].includes(String(selectedJob?.type || '').toLowerCase())) {
+    return runEventUnitRender(event, input, selectedJob);
+  }
+  const orders = await queryScopedSql(jobId, `
     SELECT o.id, o.paid_status AS paidStatus, s.id AS subjectId, s.legacy_ref_num AS ref, s.external_id AS externalId, s.first_name AS firstName, s.last_name AS lastName, s.grade, s.homeroom,
            c.display_name AS clientName, j.name AS jobName, j.root_path AS rootPath, j.package_plan_id AS packagePlanId, COALESCE(pp.name, 'Standard') AS packagePlan,
            GROUP_CONCAT(oi.package_code, '.') AS packageCodes,
@@ -4612,19 +6635,13 @@ async function runUnitRender(event, input = {}) {
     GROUP BY o.id ORDER BY s.last_name, s.first_name, o.id;
   `);
   const selectedOrders = orders;
-  const jobSummaryRows = await querySql(`
-    SELECT c.display_name AS clientName, j.name AS jobName
-    FROM jobs j JOIN clients c ON c.id = j.client_id
-    WHERE j.id = ${jobId}
-    LIMIT 1;
-  `);
-  const jobSummary = jobSummaryRows[0] || {};
+  const jobSummary = selectedJob || {};
   const job = await adminJobSummary(jobId);
   const schoolName = selectedOrders[0]?.clientName || jobSummary.clientName || 'School';
-  const runDate = new Date().toISOString().slice(0, 10);
+  const runDate = /^\d{4}-\d{2}-\d{2}$/.test(input.renderDate || '') ? input.renderDate : new Date().toISOString().slice(0, 10);
   const outputFolder = path.join(outputParentFolder, safeFolderName(`${schoolName}_${runDate}`));
   fs.mkdirSync(outputFolder, { recursive: true });
-  const itemRows = selectedOrders.length ? await querySql(`
+  const itemRows = selectedOrders.length ? await queryScopedSql(jobId, `
     SELECT oi.order_id AS orderId, oi.package_code AS packageCode, pc.name AS packageCodeName, pci.raw_value AS rawValue, p.name AS productName, p.category, p.metadata_json AS metadataJson, COALESCE(pci.quantity, 1) AS quantity
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN jobs j ON j.id = o.job_id
     LEFT JOIN package_codes pc ON pc.package_plan_id = COALESCE(oi.package_plan_id, j.package_plan_id) AND pc.code = oi.package_code
@@ -4640,7 +6657,7 @@ async function runUnitRender(event, input = {}) {
     return folder;
   };
   const recipes = new Map(pictureUnitRecipes().map((recipe) => [recipe.name.toLowerCase(), recipe]));
-  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, zipFiles: 0, idCards: 0, deferredComposites: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, addons: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [] };
+  const result = { jobId, outputFolder, orders: selectedOrders.length, units: 0, tenByThirteens: 0, digitalDownloads: 0, zipFiles: 0, idCards: 0, deferredComposites: 0, envelopes: 0, largeEnvelopes: 0, labels: 0, addons: 0, missingPhotos: [], missingImagePrep: [], unsupportedItems: [], errors: [], orderResults: [] };
   const addonInstructions = [[
     'Action',
     'Image',
@@ -4653,10 +6670,15 @@ async function runUnitRender(event, input = {}) {
     'Homeroom'
   ]];
   const addonCopiedImages = new Set();
+  const writtenDownloadArchives = new Set();
   const itemTally = new Map();
   const idCardSubjects = [];
   for (let orderIndex = 0; orderIndex < selectedOrders.length; orderIndex += 1) {
+    if (typeof input.stopRequested === 'function' && input.stopRequested()) { result.interrupted = input.stopRequested(); break; }
     const order = selectedOrders[orderIndex]; const items = itemsByOrder.get(Number(order.id)) || [];
+    const before = outputSnapshot(result);
+    try {
+    if (!items.length) result.unsupportedItems.push({ orderId: order.id, item: 'No product mapping' });
     event.sender.send('unit-render:progress', { current: orderIndex, total: selectedOrders.length, message: `${order.firstName || ''} ${order.lastName || ''}`.trim() });
     const imagePrepItem = items.find(isImagePrepItem);
     const preparedPath = imagePrepItem ? preparedImagePathForOrder(order, imagePrepItem) : null;
@@ -4667,7 +6689,7 @@ async function runUnitRender(event, input = {}) {
     if (input.includeCompositeNotice && items.some(isDeferredCompositeItem)) {
       contents.push('Class/Star composite will be delivered after makeup day');
     }
-    const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}`);
+    const prefix = safeFolderName(`${unitRenderSortValue(order, sortBy)}_${order.ref || order.id}_order${order.id}`);
     if (input.includeUnits !== false) {
       let notedMissingImagePrep = false;
       let notedMissingPhoto = false;
@@ -4681,6 +6703,11 @@ async function runUnitRender(event, input = {}) {
           continue;
         }
         if (isIdCardItem(item)) {
+          if (!envelopeImageSource) {
+            if (!notedMissingPhoto) result.missingPhotos.push({ orderId: order.id, ref: order.ref });
+            notedMissingPhoto = true;
+            continue;
+          }
           const copies = Math.max(1, Number(item.quantity || 1));
           for (let copy = 0; copy < copies; copy += 1) {
             idCardSubjects.push({
@@ -4757,9 +6784,11 @@ async function runUnitRender(event, input = {}) {
           fs.writeFileSync(path.join(folders.digitalDownloads, `${prefix}_DigitalDownload_${itemIndex + 1}.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
           fs.rmSync(qrPath, { force: true });
           const zipEntries = zipSourceEntriesForOrder(order, items.filter(isImagePrepItem));
-          if (zipEntries.length) {
+          const archivePath = path.join(folders.zip, `${prefix}_DigitalDownload.zip`);
+          if (zipEntries.length && !writtenDownloadArchives.has(archivePath)) {
             ensureRenderFolder(folders.zip);
-            writeStoredZip(path.join(folders.zip, `${prefix}_DigitalDownload.zip`), zipEntries);
+            writeStoredZip(archivePath, zipEntries);
+            writtenDownloadArchives.add(archivePath);
             result.zipFiles += 1;
           }
           result.digitalDownloads += 1;
@@ -4786,17 +6815,17 @@ async function runUnitRender(event, input = {}) {
             });
             const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
             ensureRenderFolder(folders.tenByThirteens);
-            fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
+            fs.writeFileSync(path.join(folders.tenByThirteens, `${prefix}_${itemIndex + 1}_${safeFolderName(item.productName || item.rawValue || '10x13')}_${copy + 1}.jpg`), jpeg);
             result.tenByThirteens += 1;
           }
           continue;
         }
         const recipe = recipes.get(String(item.rawValue || '').toLowerCase()) || recipes.get(String(item.productName || '').toLowerCase());
-        if (!recipe) { if (item.rawValue || item.productName) result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName }); continue; }
+        if (!recipe) { result.unsupportedItems.push({ orderId: order.id, item: item.rawValue || item.productName || `Unmapped code ${item.packageCode || ''}` }); continue; }
         for (let copy = 0; copy < Number(item.quantity || 1); copy += 1) for (let sheetIndex = 0; sheetIndex < recipe.sheets.length; sheetIndex += 1) {
           const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, recipe.sheets[sheetIndex], `${recipe.name} — ${sheetIndex + 1} of ${recipe.sheets.length}`);
           const jpeg = setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300);
-          ensureRenderFolder(folders.units); fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
+          ensureRenderFolder(folders.units); fs.writeFileSync(path.join(folders.units, `${prefix}_${String(itemIndex + 1).padStart(2, '0')}_${safeFolderName(recipe.name)}_copy${copy + 1}_${sheetIndex + 1}.jpg`), jpeg); result.units += 1;
         }
       }
     }
@@ -4807,6 +6836,10 @@ async function runUnitRender(event, input = {}) {
     if (input.includeEnvelopes !== false && hasSmall) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, false, envelopeTemplateDataUrl(order, false)), 2625, 3975); ensureRenderFolder(folders.envelopes); fs.writeFileSync(path.join(folders.envelopes, `${prefix}_Envelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.envelopes += 1; }
     if (input.includeEnvelopes !== false && hasLarge) { const dataUrl = await rasterizeUnitSheet(event.sender, envelopeSvg(order, contents, envelopeImageSource, true, envelopeTemplateDataUrl(order, true)), 3450, 4950); ensureRenderFolder(folders.largeEnvelopes); fs.writeFileSync(path.join(folders.largeEnvelopes, `${prefix}_BigEnvelope.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.largeEnvelopes += 1; }
     if (input.includeLabels) { const dataUrl = await rasterizeUnitSheet(event.sender, orderLabelSvg(order, contents, envelopeImageSource), 1200, 600); ensureRenderFolder(folders.labels); fs.writeFileSync(path.join(folders.labels, `${prefix}_Label.jpg`), setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300)); result.labels += 1; }
+    } catch (error) {
+      result.errors.push({ orderId: order.id, ref: order.ref, message: error.message || String(error) });
+    }
+    result.orderResults.push(orderRenderOutcome(order, before, result, input));
   }
   if (result.addons) {
     ensureRenderFolder(folders.addons);
@@ -4821,7 +6854,7 @@ async function runUnitRender(event, input = {}) {
       directorySchoolYear: String(new Date().getFullYear())
     }, idCardOutputPath, idCardOutputPath);
   }
-  result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [item.item, item])).values());
+  result.unsupportedItems = Array.from(new Map(result.unsupportedItems.map((item) => [`${item.orderId}:${item.item}`, item])).values());
   result.reports = {
     delivery: writeUnitRenderDeliveryReport(outputFolder, jobSummary, selectedOrders, itemsByOrder, sortBy),
     summary: writeUnitRenderJobSummaryReport(outputFolder, jobSummary, result, itemTally)
@@ -4883,7 +6916,7 @@ async function saveStudentList(_event, input = {}) {
   const listId = input.id ? numericId(input.id) : null;
   const name = normalizeText(input.name, 'List name', 120);
   const memberIds = Array.from(new Set((Array.isArray(input.memberIds) ? input.memberIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0)));
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const subjects = memberIds.length ? rowsFromDatabase(database, `SELECT id FROM subjects WHERE job_id = ${jobId} AND id IN (${memberIds.join(',')});`) : [];
     if (subjects.length !== memberIds.length) throw new Error('One or more selected students do not belong to this job.');
     let id = listId;
@@ -4904,12 +6937,12 @@ async function saveStudentList(_event, input = {}) {
 
 async function deleteStudentList(_event, listIdValue) {
   const listId = numericId(listIdValue);
-  return writeSql((database) => {
-    const existing = rowsFromDatabase(database, `SELECT id FROM subject_groups WHERE id = ${listId} AND group_type = 'list';`)[0];
+  return writeResultJobSql((database) => {
+    const existing = rowsFromDatabase(database, `SELECT id, job_id AS jobId FROM subject_groups WHERE id = ${listId} AND group_type = 'list';`)[0];
     if (!existing) throw new Error('Student list not found.');
     database.run('DELETE FROM subject_group_members WHERE group_id = ?;', [listId]);
     database.run('DELETE FROM subject_groups WHERE id = ?;', [listId]);
-    return { id: listId, deleted: true };
+    return { id: listId, jobId: Number(existing.jobId), deleted: true };
   });
 }
 
@@ -4975,7 +7008,7 @@ async function onlineOrderPreviewData(jobIdValue, filePathValue, mappingValue = 
   if (rows.length < 2) throw new Error('Online order file has no data rows.');
   const columns = onlineOrderColumns(rows);
   const mapping = mappingValue || guessedOnlineOrderMapping(columns);
-  const subjects = await querySql(`SELECT id, legacy_ref_num AS ref, external_id AS externalId, first_name AS firstName, last_name AS lastName, primary_image_asset_id AS primaryImageId FROM subjects WHERE job_id = ${jobId};`);
+  const subjects = await queryJobSql(jobId, `SELECT id, legacy_ref_num AS ref, external_id AS externalId, first_name AS firstName, last_name AS lastName, primary_image_asset_id AS primaryImageId FROM subjects WHERE job_id = ${jobId};`);
   const seen = new Set();
   const previewRows = rows.slice(1).map((row, index) => {
     const values = Object.fromEntries(ONLINE_ORDER_FIELDS.map((field) => [field.key, importRowValue(row, mapping, field.key)]));
@@ -5005,7 +7038,7 @@ async function importOnlineOrders(_event, input = {}) {
   const validRows = preview.rows.filter((row) => row.status === 'ready');
   if (!validRows.length) throw new Error('There are no matched online orders ready to import.');
   const importedAt = new Date().toISOString();
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(preview.jobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT package_plan_id AS packagePlanId, root_path AS rootPath FROM jobs WHERE id = ${preview.jobId};`)[0];
     if (!job) throw new Error('Job not found.');
     let inserted = 0; let updated = 0; const orderIds = [];
@@ -5037,61 +7070,104 @@ async function importOnlineOrders(_event, input = {}) {
   return { ...result, fileName: preview.fileName, copiedSourcePath };
 }
 
+const activeProductionBatches = new Map();
+const activeProductionJobs = new Map();
+
 async function getBatchRenderSetup() {
   const setup = await getUnitRenderSetup(null, null);
-  const history = await querySql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
-    COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status = 'failed' THEN 1 ELSE 0 END) AS failedJobs
+  const history = await queryProgramSql(`SELECT rb.id, rb.name, rb.status, rb.output_path AS outputPath, rb.created_at AS createdAt, rb.started_at AS startedAt, rb.finished_at AS finishedAt,
+    COUNT(rbj.id) AS jobs, SUM(CASE WHEN rbj.status = 'completed' THEN 1 ELSE 0 END) AS completedJobs, SUM(CASE WHEN rbj.status IN ('failed', 'completed_with_errors') THEN 1 ELSE 0 END) AS failedJobs
     FROM render_batches rb LEFT JOIN render_batch_jobs rbj ON rbj.render_batch_id = rb.id
     GROUP BY rb.id ORDER BY rb.id DESC LIMIT 20;`);
-  return { jobs: setup.jobs, history, locks: await getJobSessions() };
+  const details = history.length ? await queryProgramSql(`SELECT render_batch_id AS batchId, job_id AS jobId, status, error_message AS errorMessage, output_path AS outputPath, result_json AS resultJson FROM render_batch_jobs WHERE render_batch_id IN (${history.map((batch) => Number(batch.id)).join(',')}) ORDER BY sort_order;`) : [];
+  return { jobs: setup.jobs, history: history.map((batch) => ({ ...batch, activeHere: activeProductionBatches.has(Number(batch.id)), details: details.filter((row) => Number(row.batchId) === Number(batch.id)).map((row) => ({ ...row, result: JSON.parse(row.resultJson || 'null') })) })), locks: await getJobSessions() };
 }
 
 async function runBatchRender(event, input = {}) {
   const jobIds = Array.from(new Set((Array.isArray(input.jobIds) ? input.jobIds : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))).sort((a, b) => a - b);
-  if (jobIds.length < 2) throw new Error('Select at least two jobs for a batch render.');
+  if (!jobIds.length) throw new Error('Select at least one job for the production queue.');
   const outputFolder = path.resolve(normalizeText(input.outputFolder, 'Output folder', 1000));
   if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) throw new Error('Choose a valid output folder.');
-  const acquired = [];
-  try {
-    for (const jobId of jobIds) {
-      const lock = await acquireJobSession(event, jobId, 'batch_render');
-      if (!lock.acquired) throw new Error(`${lock.job.clientName} / ${lock.job.name} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
-      acquired.push(jobId);
-    }
-    const jobs = await querySql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
+    const jobs = await queryProgramSql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id IN (${jobIds.join(',')}) ORDER BY c.display_name, j.name;`);
+    if (jobs.length !== jobIds.length) throw new Error('One or more selected jobs no longer exist.');
     const name = optionalText(input.name, 160) || `Production Batch ${new Date().toLocaleString()}`;
-    const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom') };
-    const batch = await writeSql((database) => {
-      database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, started_at, created_by) VALUES (?, ?, 'running', ?, ?, CURRENT_TIMESTAMP, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
+    const options = { includeUnits: input.includeUnits !== false, includeEnvelopes: input.includeEnvelopes !== false, includeLabels: Boolean(input.includeLabels), sortBy: String(input.sortBy || 'homeroom'), renderDate: new Date().toISOString().slice(0, 10) };
+    const batch = await writeProgramSql((database) => {
+      database.run(`INSERT INTO render_batches (job_id, name, status, output_path, options_json, created_by) VALUES (?, ?, 'queued', ?, ?, ?);`, [jobIds[0], name, outputFolder, JSON.stringify(options), systemInfo().userName]);
       const batchId = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
       const statement = database.prepare(`INSERT INTO render_batch_jobs (render_batch_id, job_id, sort_order, status) VALUES (?, ?, ?, 'queued');`);
       try { jobs.forEach((job, index) => statement.run([batchId, job.id, index])); } finally { statement.free(); }
       return { id: Number(batchId), name };
     });
-    const results = []; let failed = 0;
+    return executeProductionBatch(event, batch.id);
+}
+
+async function executeProductionBatch(event, batchIdValue) {
+  const batchId = numericId(batchIdValue);
+  if (activeProductionBatches.has(batchId)) throw new Error('This batch is already running on this workstation.');
+  const control = { stop: null };
+  activeProductionBatches.set(batchId, control);
+  const acquired = [];
+  try {
+    const [batch] = await queryProgramSql(`SELECT id, name, output_path AS outputFolder, options_json AS optionsJson FROM render_batches WHERE id = ${batchId};`);
+    if (!batch) throw new Error('Production batch not found.');
+    if (!fs.existsSync(batch.outputFolder)) throw new Error('The saved output folder is unavailable. Reconnect the output drive before resuming.');
+    const options = JSON.parse(batch.optionsJson || '{}');
+    const jobs = await queryProgramSql(`SELECT j.id, j.name AS jobName, c.display_name AS clientName, rbj.status, rbj.output_path AS outputPath, rbj.result_json AS resultJson FROM render_batch_jobs rbj JOIN jobs j ON j.id = rbj.job_id JOIN clients c ON c.id = j.client_id WHERE rbj.render_batch_id = ${batchId} ORDER BY rbj.sort_order;`);
+    for (const job of jobs.filter((job) => job.status !== 'completed').sort((a, b) => a.id - b.id)) {
+      if (activeProductionJobs.has(Number(job.id))) throw new Error(`${job.clientName} / ${job.jobName} is already in a running production queue on this workstation.`);
+      activeProductionJobs.set(Number(job.id), batchId);
+      const lock = await acquireJobSession(event, job.id, 'batch_render');
+      if (!lock.acquired) throw new Error(`${job.clientName} / ${job.jobName} is in use by ${lock.conflict.userName || 'another user'} on ${lock.conflict.workstationName || 'another workstation'}.`);
+      acquired.push(job.id);
+    }
+    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), finished_at = NULL WHERE id = ?;`, [batchId]));
+    const results = [];
     for (let index = 0; index < jobs.length; index += 1) {
-      const job = jobs[index]; const jobOutput = path.join(outputFolder, safeFolderName(`${job.clientName}_${job.jobName}`)); fs.mkdirSync(jobOutput, { recursive: true });
-      event.sender.send('batch-render:progress', { current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
-      await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batch.id, job.id]));
+      const job = jobs[index];
+      if (job.status === 'completed') { results.push({ job, status: job.status, result: JSON.parse(job.resultJson || 'null') }); continue; }
+      if (control.stop) break;
+      const jobOutput = job.outputPath || path.join(batch.outputFolder, `Batch_${batchId}`, safeFolderName(`${job.clientName}_${job.jobName}_${job.id}`));
+      fs.mkdirSync(jobOutput, { recursive: true });
+      event.sender.send('batch-render:progress', { batchId, current: index, total: jobs.length, job, message: `Rendering ${job.clientName} / ${job.jobName}` });
+      await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP, finished_at = NULL, error_message = NULL, output_path = ? WHERE render_batch_id = ? AND job_id = ?;`, [jobOutput, batchId, job.id]));
       try {
-        const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options });
-        results.push({ job, status: 'completed', result });
-        await writeSql((database) => {
-          database.run(`UPDATE render_batch_jobs SET status = 'completed', result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [JSON.stringify(result), batch.id, job.id]);
-          database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ? AND paid_status = 'paid' AND subject_id IN (SELECT id FROM subjects WHERE job_id = ? AND primary_image_asset_id IS NOT NULL);`, [job.id, job.id]);
-        });
+        const result = await runUnitRender(event, { jobId: job.id, outputFolder: jobOutput, source: 'all', ...options, stopRequested: () => control.stop });
+        const status = renderJobStatus(result);
+        const completedIds = completedOrderIds(result);
+        if (completedIds.length) await writeJobSql(job.id, (database) => database.run(`UPDATE orders SET render_status = 'rendered', updated_at = CURRENT_TIMESTAMP WHERE job_id = ${Number(job.id)} AND id IN (${completedIds.join(',')});`));
+        results.push({ job, status, result });
+        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [status, JSON.stringify(result), batchId, job.id]));
       } catch (error) {
-        failed += 1; results.push({ job, status: 'failed', error: error.message });
-        await writeSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batch.id, job.id]));
+        results.push({ job, status: 'failed', error: error.message });
+        await writeProgramSql((database) => database.run(`UPDATE render_batch_jobs SET status = 'failed', error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE render_batch_id = ? AND job_id = ?;`, [error.message, batchId, job.id]));
       }
     }
-    const status = failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed';
-    await writeSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batch.id]));
-    event.sender.send('batch-render:progress', { current: jobs.length, total: jobs.length, message: 'Batch render complete' });
-    return { batchId: batch.id, name: batch.name, status, outputFolder, results };
+    const failed = results.filter((item) => ['failed', 'completed_with_errors'].includes(item.status)).length;
+    const status = control.stop || (failed ? (failed === jobs.length ? 'failed' : 'completed_with_errors') : 'completed');
+    await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, JSON.stringify(results), batchId]));
+    event.sender.send('batch-render:progress', { batchId, current: results.length, total: jobs.length, message: `Production batch ${status.replace(/_/g, ' ')}` });
+    return { batchId, name: batch.name, status, outputFolder: batch.outputFolder, results };
   } finally {
+    activeProductionBatches.delete(batchId);
+    for (const [jobId, owner] of activeProductionJobs) if (owner === batchId) activeProductionJobs.delete(jobId);
     if (acquired.length) await releaseJobSession(event, acquired);
   }
+}
+
+async function controlProductionBatch(event, input = {}) {
+  const batchId = numericId(input.batchId);
+  const action = String(input.action || '');
+  if (['resume', 'retry'].includes(action)) return executeProductionBatch(event, batchId);
+  if (!['pause', 'cancel'].includes(action)) throw new Error('Invalid production queue action.');
+  const status = action === 'pause' ? 'paused' : 'cancelled';
+  const control = activeProductionBatches.get(batchId);
+  if (control) { control.stop = status; return { batchId, status: `${action}_requested` }; }
+  const [batch] = await queryProgramSql(`SELECT status FROM render_batches WHERE id = ${batchId};`);
+  if (!batch) throw new Error('Production batch not found.');
+  if (batch.status === 'running') throw new Error('This batch is running on another workstation. Pause it there, or resume here after its reservation expires.');
+  await writeProgramSql((database) => database.run(`UPDATE render_batches SET status = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, batchId]));
+  return { batchId, status };
 }
 
 ipcMain.handle('student-lists:get-setup', getStudentListSetup);
@@ -5103,6 +7179,7 @@ ipcMain.handle('online-orders:import', importOnlineOrders);
 ipcMain.handle('batch-render:get-setup', getBatchRenderSetup);
 ipcMain.handle('batch-render:choose-output-folder', chooseUnitRenderOutputFolder);
 ipcMain.handle('batch-render:run', runBatchRender);
+ipcMain.handle('batch-render:control', controlProductionBatch);
 
 function eventImageNumber(filename) {
   return path.basename(String(filename || ''), path.extname(String(filename || ''))).trim();
@@ -5170,7 +7247,7 @@ async function getEventWorkflowSetup(_event, eventJobIdValue = null, entryIdValu
 
 async function configureEventFallJob(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const fallJobId = numericId(input.fallJobId);
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const rows = rowsFromDatabase(database, `SELECT e.id AS eventJobId, e.client_id AS eventClientId, f.id AS fallJobId, f.client_id AS fallClientId FROM jobs e JOIN jobs f ON f.id = ${fallJobId} WHERE e.id = ${eventJobId};`);
     if (!rows.length || Number(rows[0].eventClientId) !== Number(rows[0].fallClientId)) throw new Error('The event and fall jobs must belong to the same school.');
     const current = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
@@ -5189,7 +7266,7 @@ async function importEventImageFolderCore(eventJobIdValue, folderPathValue) {
   const eventJobId = numericId(eventJobIdValue); const sourceFolder = path.resolve(normalizeText(folderPathValue, 'Event image folder', 1000));
   if (!fs.existsSync(sourceFolder) || !fs.statSync(sourceFolder).isDirectory()) throw new Error('Event image folder was not found.');
   const files = eventImageFiles(sourceFolder); if (!files.length) throw new Error('The selected folder does not contain JPG, JPEG, or PNG event images.');
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT id, root_path AS rootPath FROM jobs WHERE id = ${eventJobId};`)[0]; if (!job) throw new Error('Event job not found.');
     const fallLink = rowsFromDatabase(database, `SELECT target_job_id AS fallJobId FROM job_links WHERE source_job_id = ${eventJobId} AND relationship_type = 'event_fall' LIMIT 1;`)[0];
     const destinationFolder = path.join(resolveProjectPath(job.rootPath), 'EventImages'); fs.mkdirSync(destinationFolder, { recursive: true });
@@ -5242,8 +7319,7 @@ async function searchEventFallStudents(_event, input = {}) {
 async function saveEventMatch(_event, input = {}) {
   const eventJobId = numericId(input.eventJobId); const entryId = numericId(input.entryId); const fallSubjectId = numericId(input.fallSubjectId);
   const orderText = optionalText(input.orderCodes, 500); const paidStatus = normalizePaidStatus(input.paidStatus || 'unknown'); const notes = optionalText(input.notes, 2000);
-  if (!input.confirmed) throw new Error('Confirm that the fall thumbnail matches the student in the event photo.');
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(eventJobId, (database) => {
     const row = rowsFromDatabase(database, `SELECT ee.id, ee.event_image_asset_id AS eventImageId, ee.fall_job_id AS fallJobId, j.package_plan_id AS packagePlanId,
       s.id AS subjectId FROM event_entries ee JOIN jobs j ON j.id = ee.event_job_id JOIN subjects s ON s.id = ${fallSubjectId}
       WHERE ee.id = ${entryId} AND ee.event_job_id = ${eventJobId} AND s.job_id = ee.fall_job_id LIMIT 1;`)[0];
@@ -5280,7 +7356,7 @@ async function saveEventMatch(_event, input = {}) {
 
 async function removeEventSubjectLink(_event, linkIdValue) {
   const linkId = numericId(linkIdValue);
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
     const link = rowsFromDatabase(database, `SELECT esl.id, esl.event_entry_id AS entryId, esl.order_id AS orderId, ee.event_job_id AS eventJobId FROM event_subject_links esl JOIN event_entries ee ON ee.id = esl.event_entry_id WHERE esl.id = ${linkId};`)[0];
     if (!link) throw new Error('Event student link not found.');
     if (link.orderId) { database.run('DELETE FROM payments WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM order_items WHERE order_id = ?;', [link.orderId]); database.run('DELETE FROM orders WHERE id = ?;', [link.orderId]); }
@@ -5288,7 +7364,7 @@ async function removeEventSubjectLink(_event, linkIdValue) {
     const counts = rowsFromDatabase(database, `SELECT COUNT(*) AS links, SUM(CASE WHEN order_id IS NOT NULL THEN 1 ELSE 0 END) AS orders FROM event_subject_links WHERE event_entry_id = ${Number(link.entryId)};`)[0];
     const status = Number(counts.orders || 0) > 0 ? 'coded' : Number(counts.links || 0) > 0 ? 'linked' : 'unlinked';
     database.run(`UPDATE event_entries SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;`, [status, link.entryId]);
-    return { id: linkId, entryId: link.entryId, eventJobId: link.eventJobId, status };
+    return { id: linkId, jobId: Number(link.eventJobId), entryId: link.entryId, eventJobId: link.eventJobId, status };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.eventJobId);
   return result;
@@ -5374,10 +7450,7 @@ function ensureCompositeGradeTitleTable(database) {
 }
 
 async function compositeGradeTitleRows(jobId) {
-  await mutateSql((database) => {
-    ensureCompositeGradeTitleTable(database);
-  });
-  return querySql(`SELECT homeroom, grade_title AS gradeTitle, reviewed FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
+  return queryJobSql(jobId, `SELECT homeroom, grade_title AS gradeTitle, reviewed FROM composite_grade_titles WHERE job_id = ${Number(jobId)};`);
 }
 
 async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
@@ -5385,7 +7458,7 @@ async function saveCompositeGradeTitleOverrides(jobId, overrides = {}) {
     .map(([homeroom, title]) => [String(homeroom || '').trim(), String(title || '').trim()])
     .filter(([homeroom, title]) => homeroom && title);
   if (!entries.length) return;
-  await mutateSql((database) => {
+  await writeJobSql(jobId, (database) => {
     ensureCompositeGradeTitleTable(database);
     entries.forEach(([homeroom, title]) => {
       database.run(`
@@ -5407,13 +7480,13 @@ function compositeSchoolYear(jobName) {
 async function compositeJobData(jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const jobs = await querySql(`
+  const jobs = await queryProgramSql(`
     SELECT j.id, j.name AS jobName, j.type, j.root_path AS rootPath, c.display_name AS clientName
     FROM jobs j JOIN clients c ON c.id = j.client_id WHERE j.id = ${jobId};
   `);
   if (!jobs.length) throw new Error('Job was not found.');
   const job = jobs[0];
-  const subjects = await querySql(`
+  const subjects = await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
@@ -5430,7 +7503,7 @@ async function compositeJobData(jobIdValue) {
     subject.photoPath = compositeImagePath(subject, job.rootPath);
     subject.hasPhoto = Boolean(subject.photoPath);
   });
-  const orderProducts = await querySql(`
+  const orderProducts = await queryScopedSql(jobId, `
     SELECT o.id AS orderId, o.subject_id AS subjectId, o.paid_status AS paidStatus,
            COALESCE(pm.name, pd.name, pci.raw_value, '') AS productName, COALESCE(pci.quantity, oi.quantity, 1) AS quantity
     FROM orders o JOIN jobs j ON j.id = o.job_id JOIN order_items oi ON oi.order_id = o.id
@@ -5450,7 +7523,7 @@ async function compositeJobData(jobIdValue) {
   });
   subjects.forEach((subject) => { subject.purchases = purchases.get(Number(subject.id)) || { traditional: 0, star: 0 }; });
   const gradeTitles = new Map((await compositeGradeTitleRows(jobId)).map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
-  const allStaff = await querySql(`
+  const allStaff = await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.grade, s.homeroom, s.subject_type AS subjectType, s.photographed_status AS photographedStatus,
            COALESCE((SELECT iv.path FROM image_versions iv WHERE iv.image_asset_id = s.primary_image_asset_id AND iv.version_type = 'cropped_med' ORDER BY iv.id DESC LIMIT 1),
@@ -5476,7 +7549,7 @@ async function compositeJobData(jobIdValue) {
     classMap.get(subject.homeroom)[subject.staff ? 'staff' : 'students'].push(subject);
   });
   const staffById = new Map(allStaff.map((subject) => [Number(subject.id), subject]));
-  const staffAssignments = await querySql(`SELECT subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, sort_order AS sortOrder FROM staff_assignments WHERE job_id = ${jobId} ORDER BY sort_order, id;`);
+  const staffAssignments = await queryJobSql(jobId, `SELECT subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, sort_order AS sortOrder FROM staff_assignments WHERE job_id = ${jobId} ORDER BY sort_order, id;`);
   const teacherCompositeTitles = new Map();
   staffAssignments.forEach((assignment) => {
     if (assignment.role !== 'teacher' || !assignment.homeroom || Number(assignment.includeInComposites || 0) === 0) return;
@@ -5516,7 +7589,7 @@ async function getCompositeSetup(_event, jobIdValue = null) {
   const selectedJobId = jobIdValue ? numericId(jobIdValue) : (jobs.find((job) => Number(job.classes) > 0)?.id || jobs[0]?.id || null);
   if (!selectedJobId) return { jobs, selectedJobId: null, job: null, classes: [] };
   const data = await compositeJobData(selectedJobId);
-  const keyStaffRows = await querySql(`
+  const keyStaffRows = await queryJobSql(selectedJobId, `
     SELECT subject_id AS subjectId, role
     FROM staff_assignments
     WHERE job_id = ${Number(selectedJobId)}
@@ -5726,8 +7799,8 @@ async function previewComposite(event, input = {}) {
   return { dataUrl, width: previewWidth, height: previewHeight, fullWidth: 3000, fullHeight: 2400, layout: (type === 'star' ? starCompositeLayout(group.students.length) : traditionalCompositeLayout(group.students.length))?.label || '', studentCount: group.students.length };
 }
 
-async function chooseCompositeOutputFolder() {
-  const result = await dialog.showOpenDialog({ title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
+async function chooseCompositeOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), { title: 'Choose Class Composite Output Folder', properties: ['openDirectory', 'createDirectory'] });
   return result.canceled || !result.filePaths.length ? { canceled: true } : { canceled: false, folderPath: result.filePaths[0] };
 }
 
@@ -5875,7 +7948,7 @@ async function testCompositeLayouts(event) {
 
 async function testPackagePlanRenders(event, packagePlanIdValue) {
   const packagePlanId = numericId(packagePlanIdValue);
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT DISTINCT p.id, p.name, p.category, p.size, p.metadata_json AS metadataJson
     FROM package_code_items pci
     JOIN package_codes pc ON pc.id = pci.package_code_id
@@ -5926,12 +7999,20 @@ ipcMain.handle('composite:render', runCompositeRender);
 ipcMain.handle('composite:test-layouts', testCompositeLayouts);
 ipcMain.handle('settings:student-fields:get', getStudentFieldSettings);
 ipcMain.handle('settings:student-fields:save', saveStudentFieldSettings);
+ipcMain.handle('trecs-log:settings:get', getTrecsLogSettings);
+ipcMain.handle('trecs-log:settings:save', saveTrecsLogSettings);
+ipcMain.handle('trecs-log:token:generate', generateTrecsLogToken);
+ipcMain.handle('trecs-log:token:clear', clearTrecsLogToken);
+ipcMain.handle('trecs-log:connection:test', testTrecsLogConnection);
 ipcMain.handle('production-sync:settings:get', getProductionSyncSettings);
 ipcMain.handle('production-sync:settings:save', saveProductionSyncSettings);
 ipcMain.handle('production-sync:choose-credentials', chooseProductionSyncCredentials);
 ipcMain.handle('production-sync:preview', previewProductionStatusSync);
 ipcMain.handle('production-sync:push', pushProductionStatusSync);
 ipcMain.handle('production-sync:test', testProductionStatusSync);
+ipcMain.handle('production-sync:dashboard', getProductionStatusDashboard);
+ipcMain.handle('production-sync:milestone-save', saveProductionMilestone);
+ipcMain.handle('production-sync:build-sheet', buildProductionStatusSheet);
 
 async function getJobsData() {
   const jobs = await querySql(`
@@ -6284,6 +8365,17 @@ function normalizeIdCardSortMethod(value) {
     throw new Error('Invalid ID card sort method');
   }
   return sort;
+}
+
+function normalizeIdCardBackgroundOverride(value) {
+  const fileName = optionalText(value, 255) || '';
+  if (!fileName) {
+    return '';
+  }
+  if (path.basename(fileName) !== fileName || !/\.(bmp|jpe?g|png)$/i.test(fileName)) {
+    throw new Error('Invalid ID card background override');
+  }
+  return fileName;
 }
 
 function normalizeCameraCardSource(value) {
@@ -7111,7 +9203,7 @@ function idCardJavaClasspath() {
 
 async function activeIdCardTemplate(templateType, preferredId = null) {
   const idFilter = preferredId ? `AND id = ${numericId(preferredId)}` : '';
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -7144,6 +9236,33 @@ async function activeIdCardTemplate(templateType, preferredId = null) {
   };
 }
 
+async function activeIdCardTemplateById(templateId) {
+  const id = normalizeNullableId(templateId, 'ID card template');
+  if (!id) {
+    return null;
+  }
+  const rows = await queryProgramSql(`
+    SELECT
+      id,
+      name,
+      template_type AS templateType,
+      template_json AS templateJson
+    FROM id_card_templates
+    WHERE id = ${id}
+      AND active = 1
+    LIMIT 1;
+  `);
+  if (!rows.length) {
+    throw new Error('The selected ID card template is no longer available');
+  }
+  return {
+    id: Number(rows[0].id),
+    name: rows[0].name,
+    templateType: rows[0].templateType,
+    template: JSON.parse(rows[0].templateJson)
+  };
+}
+
 function idCardSchoolYear(value) {
   return String(value || '2025-2026')
     .replace(/^school year:\s*/i, '')
@@ -7162,6 +9281,8 @@ function idCardSubjectTsvRow(subject) {
     subject.homeroom,
     subject.track,
     subject.team,
+    subject.field1,
+    subject.field2,
     subject.subjectType,
     absoluteWorkspacePath(image.path)
   ].map(tsvValue).join('\t');
@@ -7311,11 +9432,20 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
   if (!idCardSubjects.length) {
     throw new Error('No students matched the ID card render options');
   }
+  if (options.idCardBackgroundOverride) {
+    const backgroundPath = path.join(resolveProjectPath(job.rootPath), 'ID_Templates', options.idCardBackgroundOverride);
+    if (!fs.existsSync(backgroundPath)) {
+      throw new Error('The selected ID card background is no longer available');
+    }
+  }
 
-  const [studentTemplate, staffTemplate] = await Promise.all([
+  const overrideTemplate = await activeIdCardTemplateById(options.idCardTemplateOverrideId);
+  const [defaultStudentTemplate, defaultStaffTemplate] = overrideTemplate ? [null, null] : await Promise.all([
     activeIdCardTemplate('student', job.studentIdTemplateId),
     activeIdCardTemplate('staff', job.facultyIdTemplateId).catch(async () => activeIdCardTemplate('student', job.studentIdTemplateId))
   ]);
+  const studentTemplate = overrideTemplate || defaultStudentTemplate;
+  const staffTemplate = overrideTemplate || defaultStaffTemplate;
   const timestamp = timestampForFolder(new Date());
   const studentTemplatePath = path.join(outputFolder, `id-card-student-template-${timestamp}.json`);
   const staffTemplatePath = path.join(outputFolder, `id-card-staff-template-${timestamp}.json`);
@@ -7334,7 +9464,7 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     staffTemplatePath,
     tsvPath,
     base64Arg(idCardSchoolYear(options.directorySchoolYear)),
-    '',
+    options.idCardBackgroundOverride || '',
     'false'
   ], { cwd: bundledResourceRoot });
 
@@ -7350,6 +9480,10 @@ async function renderIdCardSheets(job, subjects, options, outputPath, absoluteOu
     templates: {
       student: { id: studentTemplate.id, name: studentTemplate.name },
       staff: { id: staffTemplate.id, name: staffTemplate.name }
+    },
+    overrides: {
+      template: overrideTemplate ? { id: overrideTemplate.id, name: overrideTemplate.name } : null,
+      background: options.idCardBackgroundOverride || null
     },
     backgroundFolder: path.join(job.rootPath, 'ID_Templates'),
     gradeBackgrounds: {
@@ -7446,9 +9580,10 @@ async function renderCameraCardSheets(job, subjects, options, outputPath, absolu
 }
 
 async function adminJobSummary(jobId) {
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       j.id,
+      j.client_id AS clientId,
       j.name AS job,
       j.type,
       j.root_path AS rootPath,
@@ -7492,8 +9627,8 @@ function normalizeIdTemplateType(value) {
 
 async function listIdTemplates(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const { folder } = await idTemplateFolderForJob(jobId);
-  const templateRows = await querySql(`
+  const { job, folder } = await idTemplateFolderForJob(jobId);
+  const templateRows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -7523,6 +9658,8 @@ async function listIdTemplates(_event, jobIdValue) {
     .sort((first, second) => first.fileName.localeCompare(second.fileName, undefined, { sensitivity: 'base' }));
   return {
     folder: path.relative(projectRoot, folder),
+    studentIdTemplateId: job.studentIdTemplateId || null,
+    facultyIdTemplateId: job.facultyIdTemplateId || null,
     templates,
     backgrounds
   };
@@ -7555,7 +9692,7 @@ async function chooseIdTemplateBackground(event, jobIdValue) {
 async function loadIdTemplate(_event, jobIdValue, fileNameValue) {
   numericId(jobIdValue);
   const templateId = numericId(fileNameValue);
-  const rows = await querySql(`
+  const rows = await queryProgramSql(`
     SELECT
       id,
       name,
@@ -7598,7 +9735,7 @@ async function saveIdTemplate(_event, jobIdValue, input = {}) {
     elements: template.elements || {},
     updatedAt: new Date().toISOString()
   };
-  const savedId = await writeSql((database) => {
+  const savedId = await writeProgramSql((database) => {
     const existingId = input.id
       ? Number(input.id)
       : Number(rowsFromDatabase(database, `
@@ -7649,7 +9786,7 @@ async function saveIdTemplate(_event, jobIdValue, input = {}) {
 }
 
 async function adminSubjectRows(jobId) {
-  return querySql(`
+  return queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -7747,7 +9884,7 @@ async function adminSubjectRows(jobId) {
 }
 
 async function adminListNames(jobId) {
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT name
     FROM subject_groups
     WHERE job_id = ${jobId}
@@ -7772,7 +9909,7 @@ async function adminListSubjectIds(jobId, listName) {
     return new Set();
   }
 
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT sgm.subject_id AS subjectId
     FROM subject_group_members sgm
     JOIN subject_groups sg ON sg.id = sgm.group_id
@@ -7784,7 +9921,7 @@ async function adminListSubjectIds(jobId, listName) {
 
 function adminItemDefinitionsForStage(stage) {
   return Array.from(ADMIN_ITEM_TYPES.entries())
-    .filter(([_type, item]) => item.stages.includes(stage))
+    .filter(([type, item]) => type !== 'id_cards' && item.stages.includes(stage))
     .map(([type, item]) => ({
       type,
       label: item.label,
@@ -7858,6 +9995,92 @@ function outputFileName(baseName, outputStem) {
   return `${name}-${outputStem}${extension}`;
 }
 
+const { exportSisDelivery, stickerPageSvg } = require('./school-deliverables');
+
+async function availableProductionImage(subject) {
+  for (const candidate of [subject.croppedLargePath, subject.croppedMediumPath, subject.originalImagePath, subject.imagePath]) {
+    const imagePath = candidate ? resolveProjectPath(candidate) : null;
+    if (!imagePath) continue;
+    try { if ((await fs.promises.stat(imagePath)).isFile()) return imagePath; } catch { /* Try the next available version. */ }
+  }
+  return '';
+}
+
+async function renderSisDelivery(job, subjects, options, absoluteOutputPath) {
+  const outputFolder = absoluteOutputPath.replace(/\.csv$/i, '_files');
+  const output = await exportSisDelivery({ subjects: sisExportSubjects(subjects), formats: options.sisFormats, outputFolder,
+    resolveImage: availableProductionImage,
+    resize: (filePath, width, height) => imageProcessor.resize(filePath, width, height, { fit: 'contain' }) });
+  const columns = ['Format', 'Status', 'Ref', 'Student ID', 'First', 'Last', 'Grade', 'Image Source', 'Image Target', 'Message'];
+  await fs.promises.writeFile(absoluteOutputPath, csvRows(columns, output.rows));
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ job, ...output.manifest }, null, 2));
+  return { displayPath: outputFolder, renderedFiles: output.files, subjects: output.manifest.selectedSubjects, exceptions: output.rows.filter((row) => row.Status === 'Exception').length };
+}
+
+async function renderStickerSheets(event, job, subjects, options, listSubjectIds, absoluteOutputPath) {
+  const selected = selectedStickerSubjects(subjects, options, listSubjectIds);
+  const rows = buildStickerRows(selected, options);
+  const output = buildStickerPrintOutput(job, subjects, options, listSubjectIds);
+  const folder = absoluteOutputPath.replace(/\.csv$/i, '_sheets');
+  await fs.promises.mkdir(folder, { recursive: true });
+  const files = [];
+  const missingPhotos = new Set();
+  for (let page = 1; page <= output.manifest.pages; page += 1) {
+    const pageRows = rows.filter((row) => row.Page === page);
+    const sources = new Map();
+    for (const row of pageRows) {
+      if (sources.has(String(row.Ref))) continue;
+      const subject = selected.find((item) => String(item.ref) === String(row.Ref));
+      const sourcePath = subject && await availableProductionImage(subject);
+      try { sources.set(String(row.Ref), sourcePath ? (await imageProcessor.preview(sourcePath, 'thumbnail')).dataUrl : ''); }
+      catch { sources.set(String(row.Ref), ''); }
+      if (!sources.get(String(row.Ref))) missingPhotos.add(String(row.Ref));
+    }
+    const jpeg = await rasterizeUnitSheet(event.sender, stickerPageSvg(pageRows, sources, page), 2550, 3300);
+    const filePath = path.join(folder, `Stickers_${String(page).padStart(4, '0')}.jpg`);
+    await fs.promises.writeFile(filePath, setJpegDensity(Buffer.from(jpeg.split(',')[1], 'base64'), 300));
+    files.push(filePath);
+  }
+  const pdfPath = files.length ? path.join(folder, 'Stickers.pdf') : null;
+  if (pdfPath) writeJpegImagesPdf(pdfPath, files, 612, 792);
+  await fs.promises.writeFile(absoluteOutputPath, output.csv);
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ ...output.manifest, renderedFiles: files, pdfPath, missingPhotos: [...missingPhotos], pageSize: '8.5 x 11 inches at 300 dpi; legacy 6 x 6 positions' }, null, 2));
+  return { displayPath: pdfPath || folder, pdfPath, renderedFiles: files, subjects: selected.length, exceptions: missingPhotos.size };
+}
+
+async function renderStaffPackages(event, job, subjects, absoluteOutputPath) {
+  const items = await queryProgramSql(`SELECT pci.raw_value AS rawValue, p.name AS productName, COALESCE(pci.quantity, 1) AS quantity FROM package_plans pp JOIN package_codes pc ON pc.package_plan_id = pp.id JOIN package_code_items pci ON pci.package_code_id = pc.id LEFT JOIN products p ON p.id = pci.product_id WHERE UPPER(pp.name) = 'STAFF' AND pc.code = '101' ORDER BY pci.sort_order;`);
+  if (!items.length) throw new Error('Configure package plan STAFF, code 101 in the Package Editor before rendering staff packages (the same plan used by legacy TRECS).');
+  const recipes = new Map(pictureUnitRecipes().flatMap((recipe) => [recipe.name, ...(recipe.aliases || [])].map((name) => [name.toLowerCase(), recipe])));
+  const planned = items.map((item) => ({ ...item, recipe: recipes.get(String(item.rawValue || item.productName || '').toLowerCase()) }));
+  const unsupported = planned.filter((item) => !item.recipe);
+  if (unsupported.length) throw new Error(`Staff package has unsupported print layouts: ${unsupported.map((item) => item.rawValue || item.productName).join(', ')}. Choose supported picture units in STAFF / 101.`);
+  const staff = subjects.filter((subject) => ['staff', 'faculty'].includes(subject.subjectType) || subject.grade === 'FAC');
+  const folder = absoluteOutputPath.replace(/\.csv$/i, '_sheets');
+  await fs.promises.mkdir(folder, { recursive: true });
+  const files = [];
+  const rows = [];
+  for (const subject of staff) {
+    const sourcePath = await availableProductionImage(subject);
+    if (!sourcePath) { rows.push({ Ref: subject.ref, Name: subjectDisplayName(subject), Status: 'Missing Image', Files: '' }); continue; }
+    const imageSource = (await imageProcessor.preview(sourcePath, 'original')).dataUrl;
+    const subjectFiles = [];
+    for (let itemIndex = 0; itemIndex < planned.length; itemIndex += 1) {
+      const item = planned[itemIndex];
+      for (let copy = 1; copy <= Number(item.quantity); copy += 1) for (let sheet = 0; sheet < item.recipe.sheets.length; sheet += 1) {
+        const dataUrl = await rasterizePhotoUnitSheet(event.sender, imageSource, item.recipe.sheets[sheet], { schoolName: job.clientName || job.location, studentName: subjectDisplayName(subject), printInfo: `Staff ${item.recipe.name}` });
+        const destination = path.join(folder, `${safeFolderName(subject.ref || subject.id)}_${itemIndex + 1}_${safeFolderName(item.recipe.name)}_copy${copy}_${sheet + 1}.jpg`);
+        await fs.promises.writeFile(destination, setJpegDensity(Buffer.from(dataUrl.split(',')[1], 'base64'), 300));
+        subjectFiles.push(destination); files.push(destination);
+      }
+    }
+    rows.push({ Ref: subject.ref, Name: subjectDisplayName(subject), Status: 'Rendered', Files: subjectFiles.join('; ') });
+  }
+  await fs.promises.writeFile(absoluteOutputPath, csvRows(['Ref', 'Name', 'Status', 'Files'], rows));
+  await fs.promises.writeFile(absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'), JSON.stringify({ plan: 'STAFF', code: '101', renderedFiles: files, subjects: rows, sheetSize: '8 x 10.5 inches at 300 dpi; existing picture-unit layouts' }, null, 2));
+  return { displayPath: folder, renderedFiles: files, subjects: staff.length, exceptions: rows.filter((row) => row.Status !== 'Rendered').length };
+}
+
 function buildSisExportOutput(job, subjects, options, outputStem) {
   const selectedSubjects = sisExportSubjects(subjects);
   const formats = normalizeSisFormats(options.sisFormats);
@@ -7917,7 +10140,7 @@ function buildSisExportOutput(job, subjects, options, outputStem) {
       sort: 'last name, first name',
       excludes: ['blank first or last name'],
       imageFolder: 'CroppedMed',
-      imageCopying: 'Prototype creates map and exception files; physical image copy/resize will be added in the render pass.'
+      imageCopying: 'The delivery pass validates, copies and resizes images before writing native map entries.'
     }
   };
 
@@ -8039,7 +10262,7 @@ async function getAdminItems(_event, jobIdValue, stageValue = 'original_picture_
     adminJobSummary(jobId),
     adminSubjectRows(jobId),
     adminListNames(jobId),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         shoot_stage AS shootStage,
@@ -8086,7 +10309,7 @@ async function getPictureDayPrep(_event, jobIdValue) {
   const [job, listNames, adminBatches, endOfDayImports] = await Promise.all([
     adminJobSummary(jobId),
     adminListNames(jobId),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         shoot_stage AS shootStage,
@@ -8104,7 +10327,7 @@ async function getPictureDayPrep(_event, jobIdValue) {
       ORDER BY created_at DESC, id DESC
       LIMIT 25;
     `),
-    querySql(`
+    queryJobSql(jobId, `
       SELECT
         id,
         package_name AS packageName,
@@ -8173,6 +10396,8 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     idCardReason: normalizeIdCardReason(input.idCardReason || (stage === 'makeup_day' ? 'makeup_day' : 'admin_batch')),
     idCardSortMethod: normalizeIdCardSortMethod(input.idCardSortMethod),
     idCardPhotographedOnly: input.idCardPhotographedOnly !== false,
+    idCardTemplateOverrideId: normalizeNullableId(input.idCardTemplateOverrideId, 'ID card template'),
+    idCardBackgroundOverride: normalizeIdCardBackgroundOverride(input.idCardBackgroundOverride),
     cameraCardSource: normalizeCameraCardSource(input.cameraCardSource),
     cameraCardSourceValue: optionalText(input.cameraCardSourceValue, 255) || '',
     cameraCardListName: optionalText(input.cameraCardListName, 255) || '',
@@ -8210,30 +10435,15 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     writeMissingPhotoWorkbook(absoluteOutputPath, subjects);
   } else if (type === 'sticker_prints') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.stickerListName);
-    const stickerOutput = buildStickerPrintOutput(job, subjects, options, listSubjectIds);
-    fs.writeFileSync(absoluteOutputPath, stickerOutput.csv);
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(stickerOutput.manifest, null, 2)
-    );
+    renderDetails = await renderStickerSheets(_event, job, subjects, options, listSubjectIds, absoluteOutputPath);
+  } else if (type === 'staff_picture_packages') {
+    renderDetails = await renderStaffPackages(_event, job, subjects, absoluteOutputPath);
   } else if (type === 'sis_export') {
-    const outputStem = path.basename(outputPath, path.extname(outputPath));
-    const sisOutput = buildSisExportOutput(job, subjects, options, outputStem);
-    fs.writeFileSync(absoluteOutputPath, sisOutput.summaryCsv);
-    sisOutput.files.forEach((file) => {
-      const filePath = path.join(path.dirname(outputPath), file.relativePath);
-      const absoluteFilePath = adminOutputAbsolutePath(filePath);
-      fs.mkdirSync(path.dirname(absoluteFilePath), { recursive: true });
-      fs.writeFileSync(absoluteFilePath, file.content);
-    });
-    fs.writeFileSync(
-      absoluteOutputPath.replace(/\.csv$/i, '.manifest.json'),
-      JSON.stringify(sisOutput.manifest, null, 2)
-    );
+    renderDetails = await renderSisDelivery(job, subjects, options, absoluteOutputPath);
   } else if (type === 'id_cards') {
     const listSubjectIds = await adminListSubjectIds(jobId, options.idCardListName);
     const idCardSubjects = selectedIdCardSubjects(subjects, options, listSubjectIds);
-    await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
+    renderDetails = await renderIdCardSheets(job, idCardSubjects, options, outputPath, absoluteOutputPath);
   } else if (type === 'camera_cards') {
     const cameraListName = options.cameraCardSource === 'list'
       ? (options.cameraCardListName || options.cameraCardSourceValue)
@@ -8249,7 +10459,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
     fs.writeFileSync(absoluteOutputPath, content);
   }
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const statement = database.prepare(`
       INSERT INTO admin_item_batches (
         job_id,
@@ -8261,7 +10471,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         created_by,
         completed_at
       )
-      VALUES (?, ?, ?, 'complete', ?, ?, ?, CURRENT_TIMESTAMP);
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
     `);
 
     try {
@@ -8269,6 +10479,7 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         jobId,
         stage,
         type,
+        renderDetails.exceptions ? 'complete_with_exceptions' : 'complete',
         JSON.stringify(options),
         outputPath,
         process.env.USERNAME || os.userInfo().username || null
@@ -8286,11 +10497,35 @@ async function renderAdminItem(_event, jobIdValue, input = {}) {
         pdfPath: renderDetails.pdfPath || null,
         subjects: renderDetails.subjects || null,
         renderedFiles: renderDetails.renderedFiles || [],
+        exceptions: renderDetails.exceptions || 0,
         type,
         stage
       };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  if (type === 'camera_cards') {
+    queueTrecsLogEvent('CAMERA_CARDS.CREATED', {
+      message: `Camera cards created for ${job.clientName} / ${job.job}`,
+      jobId: job.id,
+      jobName: job.job,
+      schoolId: job.clientId,
+      schoolName: job.clientName,
+      recordCount: Number(result.subjects || 0),
+      studentCount: Number(result.subjects || 0),
+      fileCount: options.cameraCardPdfOnly ? 1 : result.renderedFiles.length,
+      sourceLocation: job.rootPath,
+      destinationLocation: result.absoluteOutputPath,
+      details: {
+        batchId: result.id,
+        shootStage: stage,
+        source: options.cameraCardSource,
+        sourceValue: options.cameraCardSourceValue || options.cameraCardListName || null,
+        sortMethod: options.cameraCardSortMethod,
+        pdfOnly: options.cameraCardPdfOnly,
+        renderedFiles: result.renderedFiles
+      }
+    });
+  }
   return result;
 }
 
@@ -8361,7 +10596,7 @@ async function createClient(_event, input = {}) {
   const zip = optionalText(input.zip, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeProgramSql((database) => {
     const statement = database.prepare(`
       INSERT INTO clients (
         reference_number,
@@ -8400,7 +10635,6 @@ async function createClient(_event, input = {}) {
       trecsName
     };
   });
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -8529,6 +10763,23 @@ async function readPreviousTrecsAccessData(studentsDatabasePath) {
   return JSON.parse(output);
 }
 
+async function readLegacyTrecsSchools(programDataPath) {
+  await ensureAccessJobImportReader();
+  const output = await processOutput('java', [
+    '-cp',
+    [
+      'tools',
+      path.join('JARS', 'jackcess-4.0.0.jar'),
+      path.join('JARS', 'commons-lang3-3.11.jar'),
+      path.join('JARS', 'commons-logging-1.2.jar')
+    ].join(path.delimiter),
+    'AccessJobImportJson',
+    programDataPath,
+    'schools'
+  ], { cwd: bundledResourceRoot });
+  return JSON.parse(output).schools || [];
+}
+
 function oldTrecsText(row, column) {
   const value = row ? row[column] : null;
   return value === null || value === undefined ? '' : String(value).trim();
@@ -8555,6 +10806,152 @@ function oldTrecsOnlineOrderReference(notes) {
   const match = String(notes || '').match(/ONLINE ORDER\s*:?\s*(\d+)/i);
   return match ? match[1] : '';
 }
+
+async function importLegacyTrecsSchools(event, input = {}) {
+  const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+  const configuredCandidate = path.join(projectRoot, 'ProgramData.accdb');
+  const suppliedCandidate = 'T:\\2026_2027 TRECS_new\\ProgramData.accdb';
+  const defaultPath = [configuredCandidate, suppliedCandidate].find((candidate) => fs.existsSync(candidate));
+  let sourcePath = process.env.TRECS_UI_TEST === '1' && input.sourcePath
+    ? path.resolve(String(input.sourcePath))
+    : null;
+  if (!sourcePath) {
+    const selection = await dialog.showOpenDialog(ownerWindow, {
+      title: 'Import Schools from Previous TRECS ProgramData',
+      ...(defaultPath ? { defaultPath } : {}),
+      properties: ['openFile'],
+      filters: [
+        { name: 'Microsoft Access Database', extensions: ['accdb', 'mdb'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (selection.canceled || !selection.filePaths.length) {
+      return { canceled: true };
+    }
+    sourcePath = selection.filePaths[0];
+  }
+  if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+    throw new Error('The selected ProgramData Access file was not found.');
+  }
+
+  const sourceRows = await readLegacyTrecsSchools(sourcePath);
+  const schools = sourceRows.map((row) => {
+    const displayName = oldTrecsText(row, 'SchoolName') || oldTrecsText(row, 'TrecsName');
+    const trecsName = oldTrecsText(row, 'TrecsName') || (displayName ? safeFolderName(displayName) : '');
+    return {
+      referenceNumber: oldTrecsText(row, 'ReferenceNumber'),
+      displayName,
+      trecsName,
+      phone: oldTrecsText(row, 'Phone'),
+      address: oldTrecsText(row, 'Address'),
+      city: oldTrecsText(row, 'City'),
+      state: oldTrecsText(row, 'State'),
+      zip: oldTrecsText(row, 'Zipcode'),
+      notes: oldTrecsText(row, 'Notes')
+    };
+  }).filter((school) => school.displayName || school.trecsName);
+
+  if (!schools.length) {
+    throw new Error('No usable records were found in the Schools table.');
+  }
+
+  if (!(process.env.TRECS_UI_TEST === '1' && input.skipConfirmation === true)) {
+    const confirmation = await dialog.showMessageBox(ownerWindow, {
+      type: 'question',
+      title: 'Import Previous TRECS Schools',
+      message: `Import ${schools.length} school${schools.length === 1 ? '' : 's'} from ${path.basename(sourcePath)}?`,
+      detail: 'Existing schools are matched by TRECS name or reference number and updated. Unmatched schools are added.',
+      buttons: ['Import Schools', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    });
+    if (confirmation.response !== 0) {
+      return { canceled: true, sourcePath, sourceRows: schools.length };
+    }
+  }
+
+  const result = await writeProgramSql((database) => {
+    let added = 0;
+    let updated = 0;
+    let skipped = 0;
+    const updatedIds = new Set();
+    const insertStatement = database.prepare(`
+      INSERT INTO clients (
+        reference_number, display_name, trecs_name, phone,
+        address, city, state, zip, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    const updateStatement = database.prepare(`
+      UPDATE clients
+      SET reference_number = COALESCE(NULLIF(?, ''), reference_number),
+          display_name = COALESCE(NULLIF(?, ''), display_name),
+          trecs_name = COALESCE(NULLIF(?, ''), trecs_name),
+          phone = COALESCE(NULLIF(?, ''), phone),
+          address = COALESCE(NULLIF(?, ''), address),
+          city = COALESCE(NULLIF(?, ''), city),
+          state = COALESCE(NULLIF(?, ''), state),
+          zip = COALESCE(NULLIF(?, ''), zip),
+          notes = COALESCE(NULLIF(?, ''), notes)
+      WHERE id = ?;
+    `);
+
+    try {
+      schools.forEach((school) => {
+        const matches = rowsFromDatabase(database, `
+          SELECT id
+          FROM clients
+          WHERE lower(COALESCE(trecs_name, '')) = lower(${sqlLiteral(school.trecsName)})
+             OR (${sqlLiteral(school.referenceNumber)} != '' AND lower(COALESCE(reference_number, '')) = lower(${sqlLiteral(school.referenceNumber)}))
+          ORDER BY CASE WHEN lower(COALESCE(trecs_name, '')) = lower(${sqlLiteral(school.trecsName)}) THEN 0 ELSE 1 END, id
+          LIMIT 1;
+        `);
+        const values = [
+          school.referenceNumber,
+          school.displayName,
+          school.trecsName,
+          school.phone,
+          school.address,
+          school.city,
+          school.state,
+          school.zip,
+          school.notes
+        ];
+        if (matches.length) {
+          const clientId = Number(matches[0].id);
+          updateStatement.run([...values, clientId]);
+          if (!updatedIds.has(clientId)) {
+            updatedIds.add(clientId);
+            updated += 1;
+          } else {
+            skipped += 1;
+          }
+        } else {
+          insertStatement.run(values);
+          added += 1;
+        }
+      });
+    } finally {
+      insertStatement.free();
+      updateStatement.free();
+    }
+
+    database.run(`
+      INSERT INTO migration_sources (source_type, source_path, imported_at, metadata_json)
+      VALUES ('old_program_schools', ?, CURRENT_TIMESTAMP, ?)
+      ON CONFLICT(source_type, source_path) DO UPDATE SET
+        imported_at = CURRENT_TIMESTAMP,
+        metadata_json = excluded.metadata_json;
+    `, [sourcePath, JSON.stringify({ table: 'Schools', sourceRows: schools.length, added, updated, skipped })]);
+
+    return { added, updated, skipped, total: schools.length };
+  });
+
+  return { canceled: false, sourcePath, ...result };
+}
+
+ipcMain.handle('clients:import-legacy-schools', importLegacyTrecsSchools);
 
 function isImportableImage(filePath) {
   return ['.jpg', '.jpeg', '.png'].includes(path.extname(filePath).toLowerCase());
@@ -8678,7 +11075,7 @@ async function syncCroppedImages(_event, jobIdValue) {
     throw new Error('Job folder was not found');
   }
 
-  const imageRows = await querySql(`
+  const imageRows = await queryJobSql(jobId, `
     SELECT
       id,
       filename,
@@ -8691,7 +11088,7 @@ async function syncCroppedImages(_event, jobIdValue) {
     scanCroppedImageFolder(jobRoot, folder.folder, folder.versionType, imageRows)
   ));
   const entries = scanned.flatMap((result) => result.entries);
-  const syncResult = await writeSql((database) => {
+  const syncResult = await writeJobSql(jobId, (database) => {
     const deleteStatement = database.prepare(`
       DELETE FROM image_versions
       WHERE image_asset_id = ?
@@ -8770,7 +11167,7 @@ async function generateCroppedMediumImages(event, jobIdValue) {
 
   sendProgress({ done: 0, created, skipped, failed, filename: '', status: 'starting' });
 
-  files.forEach((name, index) => {
+  for (const [index, name] of files.entries()) {
     const sourcePath = path.join(sourceFolder, name);
     const extension = path.extname(name).toLowerCase();
     const outputName = ['.jpg', '.jpeg'].includes(extension)
@@ -8778,20 +11175,24 @@ async function generateCroppedMediumImages(event, jobIdValue) {
       : `${path.basename(name, path.extname(name))}.jpg`;
     const destinationPath = path.join(destinationFolder, outputName);
 
-    if (fs.existsSync(destinationPath)) {
+    if (await derivativeIsFresh(sourcePath, destinationPath)) {
       skipped += 1;
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'skipped' });
-      return;
+      continue;
     }
 
     try {
-      const image = nativeImage.createFromPath(sourcePath);
-      if (image.isEmpty()) {
-        throw new Error('Could not read image');
+      const signature = await sourceSignature(sourcePath);
+      const resized = await imageProcessor.resize(sourcePath, 480, 600);
+      const bytes = setJpegDensity(Buffer.from(resized.bytes), 300);
+      const temporary = `${destinationPath}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(temporary, bytes);
+        await fs.promises.rename(temporary, destinationPath);
+        await writeDerivativeSignature(destinationPath, signature);
+      } finally {
+        await fs.promises.unlink(temporary).catch(() => {});
       }
-      const resized = image.resize({ width: 480, height: 600, quality: 'best' });
-      const bytes = setJpegDensity(resized.toJPEG(92), 300);
-      fs.writeFileSync(destinationPath, bytes);
       created += 1;
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'created' });
     } catch (error) {
@@ -8799,7 +11200,7 @@ async function generateCroppedMediumImages(event, jobIdValue) {
       errors.push({ filename: name, message: error.message || String(error) });
       sendProgress({ done: index + 1, created, skipped, failed, filename: name, status: 'failed' });
     }
-  });
+  }
 
   const syncResult = await syncCroppedImages(null, jobId);
   const result = {
@@ -8985,6 +11386,41 @@ function upsertImportedRowsById(database, tableName, rows) {
   }
 }
 
+function nextDatabaseId(database, tableName) {
+  const rows = rowsFromDatabase(database, `SELECT COALESCE(MAX(id), 0) + 1 AS id FROM ${tableName};`);
+  const sequence = databaseHasTable(database, 'sqlite_sequence')
+    ? rowsFromDatabase(database, `SELECT seq FROM sqlite_sequence WHERE name = ${sqlLiteral(tableName)}`)[0]?.seq : 0;
+  return Math.max(Number(rows[0]?.id || 1), Number(sequence || 0) + 1);
+}
+
+function mergeImportedSubjectCodeRows(database, rows) {
+  if (!rows.length) {
+    return;
+  }
+
+  const statement = database.prepare(`
+    INSERT OR IGNORE INTO subject_codes (
+      subject_id,
+      code_type,
+      code,
+      created_at
+    )
+    VALUES (?, ?, ?, ?);
+  `);
+  try {
+    rows.forEach((row) => {
+      statement.run([
+        row.subject_id,
+        row.code_type,
+        row.code,
+        row.created_at || null
+      ]);
+    });
+  } finally {
+    statement.free();
+  }
+}
+
 function mergeImportedImageVersionRows(database, rows) {
   if (!rows.length) {
     return;
@@ -9145,13 +11581,11 @@ function clearImportedJobRows(database, jobIdValue) {
     );
     DELETE FROM event_entries WHERE event_job_id = ${jobId};
     DELETE FROM job_links WHERE source_job_id = ${jobId} OR target_job_id = ${jobId};
-    DELETE FROM sync_record_mappings WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
-    DELETE FROM sync_conflicts WHERE sync_package_id IN (SELECT id FROM sync_packages WHERE job_id = ${jobId});
-    DELETE FROM sync_packages WHERE job_id = ${jobId};
-    DELETE FROM render_tasks WHERE render_batch_id IN (SELECT id FROM render_batches WHERE job_id = ${jobId});
     DELETE FROM render_batches WHERE job_id = ${jobId};
-    DELETE FROM exports WHERE job_id = ${jobId};
     DELETE FROM admin_item_batches WHERE job_id = ${jobId};
+    DELETE FROM end_of_day_imports WHERE job_id = ${jobId};
+    DELETE FROM job_milestones WHERE job_id = ${jobId};
+    DELETE FROM capture_image_actions WHERE job_id = ${jobId};
     DELETE FROM envelope_scans WHERE job_id = ${jobId};
     DELETE FROM image_import_events WHERE job_id = ${jobId};
     DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE job_id = ${jobId});
@@ -9165,11 +11599,10 @@ function clearImportedJobRows(database, jobIdValue) {
     DELETE FROM capture_sessions WHERE job_id = ${jobId};
     DELETE FROM subject_group_members WHERE group_id IN (SELECT id FROM subject_groups WHERE job_id = ${jobId});
     DELETE FROM subject_groups WHERE job_id = ${jobId};
+    DELETE FROM staff_assignments WHERE job_id = ${jobId};
+    DELETE FROM duplicate_record_reviews WHERE job_id = ${jobId};
+    DELETE FROM composite_grade_titles WHERE job_id = ${jobId};
     DELETE FROM subject_codes WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId});
-    DELETE FROM subject_field_values
-    WHERE subject_id IN (SELECT id FROM subjects WHERE job_id = ${jobId})
-       OR field_definition_id IN (SELECT id FROM job_field_definitions WHERE job_id = ${jobId});
-    DELETE FROM job_field_definitions WHERE job_id = ${jobId};
     DELETE FROM subjects WHERE job_id = ${jobId};
     DELETE FROM jobs WHERE id = ${jobId};
   `);
@@ -9196,7 +11629,7 @@ function readEndOfDayPackage(packageFolder) {
     throw new Error('That folder is not a TRECS End of Day package');
   }
 
-  const databasePath = path.join(packageFolder, manifest.paths && manifest.paths.database ? manifest.paths.database : 'Database/job.db');
+  const databasePath = endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.database ? manifest.paths.database : 'Database/job.db');
   if (!fs.existsSync(databasePath)) {
     throw new Error('Database\\job.db was not found in that folder');
   }
@@ -9205,8 +11638,8 @@ function readEndOfDayPackage(packageFolder) {
     manifest,
     manifestPath,
     databasePath,
-    imagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'),
-    rawImagesFolder: path.join(packageFolder, manifest.paths && manifest.paths.rawImages ? manifest.paths.rawImages : (manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'))
+    imagesFolder: endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'),
+    rawImagesFolder: endOfDaySafety.insidePackage(packageFolder, manifest.paths && manifest.paths.rawImages ? manifest.paths.rawImages : (manifest.paths && manifest.paths.images ? manifest.paths.images : 'Images'))
   };
 }
 
@@ -9232,6 +11665,7 @@ async function chooseEndOfDayPackageFolder(event) {
     }
   }
 
+  const importReview = manifest ? await reviewEndOfDayImport(null, { packageFolder: folderPath }) : null;
   return {
     canceled: false,
     folderPath,
@@ -9239,7 +11673,8 @@ async function chooseEndOfDayPackageFolder(event) {
     databasePath,
     hasManifest: fs.existsSync(manifestPath),
     hasDatabase: fs.existsSync(databasePath),
-    manifest
+    manifest,
+    importReview
   };
 }
 
@@ -9254,10 +11689,12 @@ const END_OF_DAY_SUBJECT_FIELD_COLUMNS = {
   homeroom: 'homeroom',
   track: 'track',
   team: 'team',
+  field1: 'field1',
+  field2: 'field2',
   notes: 'notes'
 };
 
-function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
+async function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
   const copiedByImageId = new Map((packageInfo.manifest.copiedImages || []).map((image) => [Number(image.imageAssetId), image]));
   const destinationFolder = path.join(resolveProjectPath(rootPathValue), UNPROCESSED_IMAGE_FOLDER);
   let copied = 0;
@@ -9265,40 +11702,46 @@ function copyEndOfDayImageFiles(packageInfo, imageRows, rootPathValue) {
 
   fs.mkdirSync(destinationFolder, { recursive: true });
 
-  const rows = imageRows.map((row) => {
+  const rows = [];
+  for (const row of imageRows) {
     const copiedImage = copiedByImageId.get(Number(row.id));
     if (!copiedImage) {
-      return row;
+      throw new Error(`Image ${row.id} is not listed in the package manifest.`);
     }
 
     let currentPath = row.current_path;
     let metadata = parseImageMetadata(row.metadata_json);
-    const jpgSource = copiedImage.jpgPath ? path.join(packageInfo.imagesFolder, path.basename(copiedImage.jpgPath)) : null;
-    const rawSource = copiedImage.rawPath ? path.join(packageInfo.rawImagesFolder, path.basename(copiedImage.rawPath)) : null;
-
-    if (jpgSource && fs.existsSync(jpgSource) && fs.statSync(jpgSource).isFile()) {
-      const destinationPath = uniquePath(destinationFolder, path.basename(jpgSource));
-      fs.copyFileSync(jpgSource, destinationPath);
+    const jpgSource = endOfDaySafety.packageImageSource(packageInfo, copiedImage, 'jpg');
+    const rawSource = endOfDaySafety.packageImageSource(packageInfo, copiedImage, 'raw');
+    if (!jpgSource) throw new Error(`JPG is missing for image ${row.id}.`);
+    {
+      // Stable destinations make a copy interrupted before DB commit retryable.
+      const token = packageInfo.identity.contentId.slice(0, 16);
+      const destinationPath = path.join(destinationFolder, `${path.parse(jpgSource).name}_eod_${token}_${row.id}${path.extname(jpgSource)}`);
+      await endOfDaySafety.copyVerified(jpgSource, destinationPath, copiedImage.jpgIntegrity);
       currentPath = path.relative(projectRoot, destinationPath);
       importedPathByImageId.set(Number(row.id), currentPath);
       copied += 1;
     }
 
     if (rawSource) {
+      const destinationPath = path.join(destinationFolder, `${path.parse(rawSource).name}_eod_${packageInfo.identity.contentId.slice(0, 16)}_${row.id}${path.extname(rawSource)}`);
+      await endOfDaySafety.copyVerified(rawSource, destinationPath, copiedImage.rawIntegrity);
+      copied += 1;
       metadata = {
         ...metadata,
-        rawPath: rawSource
+        rawPath: path.relative(projectRoot, destinationPath)
       };
     }
 
-    return {
+    rows.push({
       ...row,
       original_path: currentPath,
       current_path: currentPath,
-      status: 'imported',
+      status: copiedImage.status === 'rejected' || row.status === 'rejected' ? 'rejected' : 'imported',
       metadata_json: Object.keys(metadata).length ? JSON.stringify(metadata) : row.metadata_json
-    };
-  });
+    });
+  }
 
   return { rows, copied, importedPathByImageId };
 }
@@ -9310,6 +11753,73 @@ function endOfDayIncludedNewSubjectIds(manifest) {
 function endOfDayEditedSubjects(manifest) {
   return (manifest.subjectChanges && manifest.subjectChanges.editedSubjects) || [];
 }
+
+function endOfDayBaselineSubjects(SQL, packageInfo) {
+  const relative = packageInfo.manifest.paths && packageInfo.manifest.paths.onsiteStartDatabase;
+  if (!relative) return [];
+  const filename = endOfDaySafety.insidePackage(packageInfo.packageFolder, relative);
+  if (!fs.existsSync(filename)) return [];
+  const database = new SQL.Database(fs.readFileSync(filename));
+  try { return rowsFromOptionalTable(database, 'subjects'); } finally { database.close(); }
+}
+
+function alreadyImportedEndOfDay(imports, identity, packageFolder) {
+  return imports.some((row) => {
+    const manifest = parseImageMetadata(row.manifest_json);
+    return row.package_folder === packageFolder
+      || manifest.packageId === identity.packageId
+      || (identity.manifestId && (manifest.importIdentity?.manifestId || endOfDaySafety.manifestIdentity(manifest)) === identity.manifestId)
+      || (manifest.importIdentity && (manifest.importIdentity.packageId === identity.packageId || manifest.importIdentity.contentId === identity.contentId));
+  });
+}
+
+async function reviewEndOfDayImport(_event, input = {}) {
+  const packageFolder = normalizeText(input.packageFolder, 'End of Day package folder', 1000);
+  const packageInfo = { packageFolder, ...readEndOfDayPackage(packageFolder) };
+  const identity = await endOfDaySafety.validatePackage(packageInfo);
+  const manifest = { ...packageInfo.manifest, subjectChanges: adjustedEndOfDaySubjectChanges({ subjectChanges: packageInfo.manifest.subjectChanges || {} }, input.adjustments || {}) };
+  const jobId = numericId(manifest.job && manifest.job.id);
+  const currentSubjects = await queryJobSql(jobId, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
+  const imports = await queryJobSql(jobId, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+  if (alreadyImportedEndOfDay(imports, identity, packageFolder)) throw new Error('This End of Day package has already been loaded, even if its folder was moved or renamed.');
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(packageInfo.databasePath));
+  try {
+    const imageIds = new Set((manifest.copiedImages || []).map((row) => Number(row.imageAssetId)));
+    const requiredIds = new Set([
+      ...endOfDayIncludedNewSubjectIds(manifest),
+      ...endOfDayEditedSubjects(manifest).map((row) => Number(row.id)),
+      ...rowsFromOptionalTable(database, 'subject_images').filter((row) => imageIds.has(Number(row.image_asset_id))).map((row) => Number(row.subject_id))
+    ]);
+    const packageSubjects = rowsFromOptionalTable(database, 'subjects').filter((row) => requiredIds.has(Number(row.id)));
+    const plan = endOfDaySafety.planSubjectMerge({ currentSubjects, packageSubjects, baselineSubjects: endOfDayBaselineSubjects(SQL, packageInfo), manifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+    return { packageId: identity.packageId, conflicts: plan.conflicts, validatedImages: imageIds.size };
+  } finally { database.close(); }
+}
+
+ipcMain.handle('end-of-day:review-import', reviewEndOfDayImport);
+
+ipcMain.handle('storage:list-backups', (_event, jobId) => listStorageBackups(jobId));
+ipcMain.handle('recovery:list-jobs', () => queryProgramSql('SELECT j.id, j.name, j.root_path AS rootPath, c.display_name AS clientName FROM jobs j LEFT JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;'));
+ipcMain.handle('storage:restore-backup', async (_event, input) => {
+  if (captureWatchers.size) throw new Error('Stop capture before restoring a database backup.');
+  return restoreStorageBackup(input);
+});
+ipcMain.handle('images:integrity', async (_event, jobIdValue) => {
+  const jobId = numericId(jobIdValue);
+  const databasePath = await storageDatabasePath(jobId);
+  const database = await openWorkingDatabase({ jobIds: [jobId], readOnly: true, requireExisting: true });
+  let data;
+  try {
+    data = {
+      subjects: rowsFromDatabase(database, `SELECT * FROM subjects WHERE job_id = ${jobId};`),
+      images: rowsFromDatabase(database, `SELECT ia.*, cs.file_mode AS captureFileMode FROM image_assets ia LEFT JOIN capture_sessions cs ON cs.id = ia.capture_session_id WHERE ia.job_id = ${jobId};`),
+      versions: rowsFromDatabase(database, `SELECT iv.* FROM image_versions iv JOIN image_assets ia ON ia.id = iv.image_asset_id WHERE ia.job_id = ${jobId};`),
+      links: rowsFromDatabase(database, `SELECT si.* FROM subject_images si JOIN subjects s ON s.id = si.subject_id WHERE s.job_id = ${jobId};`)
+    };
+  } finally { database.close(); }
+  return require('./photo-integrity').inspectPhotoIntegrity({ ...data, resolvePath: resolveProjectPath, databaseFolder: path.dirname(databasePath) });
+});
 
 async function approveEndOfDayPackage(_event, input = {}) {
   const packageFolder = normalizeText(input.packageFolder, 'End of Day package folder', 1000);
@@ -9325,6 +11835,8 @@ async function approveEndOfDayPackage(_event, input = {}) {
     ...packageInfo.manifest,
     subjectChanges: approvedSubjectChanges
   };
+  packageInfo.identity = await endOfDaySafety.validatePackage(packageInfo);
+  approvedManifest.importIdentity = packageInfo.identity;
   const jobId = numericId(approvedManifest.job && approvedManifest.job.id);
   const imageIds = new Set((approvedManifest.copiedImages || []).map((image) => Number(image.imageAssetId)).filter(Boolean));
   const newSubjectIds = endOfDayIncludedNewSubjectIds(approvedManifest);
@@ -9353,7 +11865,20 @@ async function approveEndOfDayPackage(_event, input = {}) {
       .map((id) => packageSubjectsById.get(Number(id)))
       .filter(Boolean);
 
-    result = await writeSql((database) => {
+    if (packageTables.image_assets.length !== imageIds.size) throw new Error('The package database is missing image records listed in its manifest.');
+    if (subjectRowsToImport.length !== changedSubjectIds.size) throw new Error('The package database is missing a student referenced by its changes or images.');
+    if (packageTables.image_assets.some((row) => Number(row.job_id) !== jobId) || subjectRowsToImport.some((row) => Number(row.job_id) !== jobId)) throw new Error('The package contains records from a different job.');
+    const baselineSubjects = endOfDayBaselineSubjects(SQL, packageInfo);
+    const currentSubjects = await queryJobSql(jobId, `SELECT * FROM subjects WHERE job_id = ${jobId};`);
+    const importHistory = await queryJobSql(jobId, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+    if (alreadyImportedEndOfDay(importHistory, packageInfo.identity, packageFolder)) throw new Error('This End of Day package has already been loaded, even if its folder was moved or renamed.');
+    const preliminaryPlan = endOfDaySafety.planSubjectMerge({ currentSubjects, packageSubjects: subjectRowsToImport, baselineSubjects, manifest: approvedManifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+    if (preliminaryPlan.conflicts.length) return { requiresReview: true, conflicts: preliminaryPlan.conflicts };
+    const targetJob = (await queryProgramSql(`SELECT root_path AS rootPath FROM jobs WHERE id = ${jobId};`))[0];
+    if (!targetJob) throw new Error('The matching job is not loaded on this computer.');
+    const imageCopyResult = await copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, targetJob.rootPath);
+
+    result = await writeJobSql(jobId, (database) => {
       const jobRows = rowsFromDatabase(database, `
         SELECT id, root_path AS rootPath
         FROM jobs
@@ -9364,10 +11889,17 @@ async function approveEndOfDayPackage(_event, input = {}) {
         throw new Error('The matching job is not loaded on this computer');
       }
 
+      const previousImports = rowsFromDatabase(database, `SELECT package_folder, manifest_json FROM end_of_day_imports WHERE job_id = ${jobId};`);
+      if (alreadyImportedEndOfDay(previousImports, packageInfo.identity, packageFolder)) {
+        throw new Error('This End of Day package has already been loaded for this job');
+      }
+
+      const mergePlan = endOfDaySafety.planSubjectMerge({ currentSubjects: rowsFromDatabase(database, `SELECT * FROM subjects WHERE job_id = ${jobId};`), packageSubjects: subjectRowsToImport, baselineSubjects, manifest: approvedManifest, fieldColumns: END_OF_DAY_SUBJECT_FIELD_COLUMNS, resolutions: input.resolutions || [] });
+      if (mergePlan.conflicts.length) throw new Error('Student records changed while this import was being prepared. Reopen the package to review the latest conflicts.');
+
       ensureJobFolders(jobRows[0].rootPath);
-      const imageCopyResult = copyEndOfDayImageFiles(packageInfo, packageTables.image_assets, jobRows[0].rootPath);
-      const imageRows = imageCopyResult.rows;
-      const imageVersionRows = packageTables.image_versions.map((row) => {
+      const copiedImageRows = imageCopyResult.rows;
+      const copiedImageVersionRows = packageTables.image_versions.filter((row) => row.version_type === 'original').map((row) => {
         const importedPath = imageCopyResult.importedPathByImageId.get(Number(row.image_asset_id));
         return importedPath && row.version_type === 'original'
           ? { ...row, path: importedPath }
@@ -9375,47 +11907,96 @@ async function approveEndOfDayPackage(_event, input = {}) {
       });
       const copiedFiles = imageCopyResult.copied;
 
+      const subjectIdMap = mergePlan.subjectIdMap;
+      let nextSubjectId = nextDatabaseId(database, 'subjects');
+      newSubjectIds.forEach((sourceSubjectId) => {
+        if (subjectIdMap.has(Number(sourceSubjectId))) return;
+        subjectIdMap.set(Number(sourceSubjectId), nextSubjectId);
+        nextSubjectId += 1;
+      });
+
+      const referencedCaptureSessionIds = new Set(copiedImageRows
+        .map((row) => Number(row.capture_session_id))
+        .filter(Boolean));
+      const captureSessionIdMap = new Map();
+      let nextCaptureSessionId = nextDatabaseId(database, 'capture_sessions');
+      packageTables.capture_sessions
+        .filter((row) => referencedCaptureSessionIds.has(Number(row.id)))
+        .forEach((row) => {
+          captureSessionIdMap.set(Number(row.id), nextCaptureSessionId);
+          nextCaptureSessionId += 1;
+        });
+
+      const imageIdMap = new Map();
+      let nextImageId = nextDatabaseId(database, 'image_assets');
+      copiedImageRows.forEach((row) => {
+        imageIdMap.set(Number(row.id), nextImageId);
+        nextImageId += 1;
+      });
+
       const newSubjectRows = subjectRowsToImport
-        .filter((row) => newSubjectIds.has(Number(row.id)))
+        .filter((row) => newSubjectIds.has(Number(row.id)) && !mergePlan.linkedNewIds.has(Number(row.id)))
         .map((row) => {
-      const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
+          const sourceSubjectId = Number(row.id);
+          const manifestSubject = ((approvedManifest.subjectChanges && approvedManifest.subjectChanges.newSubjects) || [])
             .find((subject) => Number(subject.id) === Number(row.id));
           return {
             ...row,
+            id: subjectIdMap.get(sourceSubjectId),
+            job_id: jobId,
+            primary_image_asset_id: imageIdMap.get(Number(row.primary_image_asset_id)) || null,
             display_name: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'name') ? manifestSubject.name : row.display_name,
             grade: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'grade') ? manifestSubject.grade : row.grade,
             homeroom: manifestSubject && Object.prototype.hasOwnProperty.call(manifestSubject, 'homeroom') ? manifestSubject.homeroom : row.homeroom
           };
         });
       upsertImportedRowsById(database, 'subjects', newSubjectRows);
-      upsertImportedRowsById(database, 'subject_codes', packageTables.subject_codes.filter((row) => newSubjectIds.has(Number(row.subject_id))));
-      upsertImportedRowsById(database, 'capture_sessions', packageTables.capture_sessions);
+      mergeImportedSubjectCodeRows(database, packageTables.subject_codes
+        .filter((row) => newSubjectIds.has(Number(row.subject_id)) && !mergePlan.linkedNewIds.has(Number(row.subject_id)))
+        .map((row) => ({
+          ...row,
+          subject_id: subjectIdMap.get(Number(row.subject_id))
+        })));
 
-      editedSubjects.forEach((subject) => {
-        const updates = [];
-        const values = [];
-        (subject.changes || []).forEach((change) => {
-          const column = END_OF_DAY_SUBJECT_FIELD_COLUMNS[change.field];
-          if (!column) {
-            return;
-          }
-          updates.push(`${column} = ?`);
-          values.push(change.after || null);
-        });
-        if (!updates.length) {
-          return;
-        }
-        values.push(Number(subject.id));
-        database.run(`
-          UPDATE subjects
-          SET ${updates.join(', ')}
-          WHERE id = ?;
-        `, values);
+      const captureSessionRows = packageTables.capture_sessions
+        .filter((row) => captureSessionIdMap.has(Number(row.id)))
+        .map((row) => ({
+          ...row,
+          id: captureSessionIdMap.get(Number(row.id)),
+          job_id: jobId,
+          active_subject_id: subjectIdMap.get(Number(row.active_subject_id)) || row.active_subject_id || null,
+          latest_image_asset_id: imageIdMap.get(Number(row.latest_image_asset_id)) || null
+        }));
+      upsertImportedRowsById(database, 'capture_sessions', captureSessionRows);
+
+      mergePlan.fieldUpdates.forEach((update) => {
+        database.run(`UPDATE subjects SET ${update.column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND job_id = ?;`, [update.value, update.subjectId, jobId]);
       });
 
+      const imageRows = copiedImageRows.map((row) => ({
+        ...row,
+        id: imageIdMap.get(Number(row.id)),
+        job_id: jobId,
+        capture_session_id: captureSessionIdMap.get(Number(row.capture_session_id)) || null
+      }));
+      const imageVersionRows = copiedImageVersionRows.map((row) => ({
+        ...row,
+        id: undefined,
+        image_asset_id: imageIdMap.get(Number(row.image_asset_id))
+      }));
+      const subjectImageRows = packageTables.subject_images.map((row) => ({
+        ...row,
+        id: undefined,
+        subject_id: subjectIdMap.get(Number(row.subject_id)) || Number(row.subject_id),
+        image_asset_id: imageIdMap.get(Number(row.image_asset_id)),
+        selected: mergePlan.keepPrimary.has(Number(row.subject_id)) ? 0 : row.selected
+      }));
       upsertImportedRowsById(database, 'image_assets', imageRows);
       mergeImportedImageVersionRows(database, imageVersionRows);
-      mergeImportedSubjectImageRows(database, packageTables.subject_images);
+      for (const row of subjectImageRows.filter((link) => Number(link.selected) === 1)) {
+        database.run('UPDATE subject_images SET selected = 0 WHERE subject_id = ?;', [row.subject_id]);
+      }
+      mergeImportedSubjectImageRows(database, subjectImageRows);
       const manifestCounts = approvedManifest.counts || {};
       const photographerName = (approvedManifest.photographerNames || []).join(', ')
         || approvedManifest.photographerName
@@ -9430,15 +12011,19 @@ async function approveEndOfDayPackage(_event, input = {}) {
       subjectRowsToImport
         .filter((row) => !newSubjectIds.has(Number(row.id)))
         .forEach((row) => {
+          const mappedPrimaryImageId = imageIdMap.get(Number(row.primary_image_asset_id));
+          if (!mappedPrimaryImageId || mergePlan.keepPrimary.has(Number(row.id))) return;
           database.run(`
             UPDATE subjects
             SET primary_image_asset_id = ?,
                 photographed_status = ?
-            WHERE id = ?;
+            WHERE id = ?
+              AND job_id = ?;
           `, [
-            row.primary_image_asset_id || null,
-            row.photographed_status || null,
-            row.id
+            mappedPrimaryImageId,
+            'photographed',
+            subjectIdMap.get(Number(row.id)),
+            jobId
           ]);
         });
 
@@ -9470,7 +12055,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
           workstationName,
           approvedManifest.shootStage || null,
           Number(manifestCounts.capturedImages || manifestCounts.images || (approvedManifest.copiedImages || []).length || 0),
-          Number(manifestCounts.rawFiles || manifestCounts.cr3Files || 0),
+          Number(manifestCounts.capturedRawFiles || manifestCounts.rawFiles || manifestCounts.cr3Files || 0),
           newSubjectRows.length,
           editedSubjects.length,
           copiedFiles,
@@ -9489,7 +12074,7 @@ async function approveEndOfDayPackage(_event, input = {}) {
           images: imageRows.length,
           newSubjects: newSubjectRows.length,
           editedSubjects: editedSubjects.length,
-          subjectImageLinks: packageTables.subject_images.length
+          subjectImageLinks: subjectImageRows.length
         }
       };
     });
@@ -9498,7 +12083,22 @@ async function approveEndOfDayPackage(_event, input = {}) {
   }
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('END_OF_DAY.SERVER_LOADED', {
+    message: `End of Day loaded to server for ${(approvedManifest.job && approvedManifest.job.clientName) || 'school'} / ${(approvedManifest.job && approvedManifest.job.name) || jobId}`,
+    photographerName: (approvedManifest.photographerNames || []).join(', ') || approvedManifest.photographerName || null,
+    jobId,
+    jobName: approvedManifest.job && approvedManifest.job.name,
+    schoolName: approvedManifest.job && (approvedManifest.job.clientName || approvedManifest.job.trecsName),
+    studentCount: Number(result.counts.newSubjects || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.copiedFiles || 0),
+    sourceLocation: packageFolder,
+    destinationLocation: approvedManifest.job && approvedManifest.job.rootPath,
+    details: {
+      editedSubjects: Number(result.counts.editedSubjects || 0),
+      subjectImageLinks: Number(result.counts.subjectImageLinks || 0)
+    }
+  });
   return result;
 }
 
@@ -9544,11 +12144,16 @@ async function loadOnsiteSetup(_event, input = {}) {
     const importedTables = {
       subjects: rowsFromOptionalTable(setupDatabase, 'subjects'),
       subject_codes: rowsFromOptionalTable(setupDatabase, 'subject_codes'),
+      staff_assignments: rowsFromOptionalTable(setupDatabase, 'staff_assignments'),
+      composite_grade_titles: rowsFromOptionalTable(setupDatabase, 'composite_grade_titles'),
+      duplicate_record_reviews: rowsFromOptionalTable(setupDatabase, 'duplicate_record_reviews'),
       subject_groups: rowsFromOptionalTable(setupDatabase, 'subject_groups'),
       subject_group_members: rowsFromOptionalTable(setupDatabase, 'subject_group_members'),
       image_assets: rowsFromOptionalTable(setupDatabase, 'image_assets'),
       capture_sessions: rowsFromOptionalTable(setupDatabase, 'capture_sessions'),
+      capture_image_actions: rowsFromOptionalTable(setupDatabase, 'capture_image_actions'),
       image_versions: rowsFromOptionalTable(setupDatabase, 'image_versions'),
+      image_import_events: rowsFromOptionalTable(setupDatabase, 'image_import_events'),
       subject_images: rowsFromOptionalTable(setupDatabase, 'subject_images'),
       orders: rowsFromOptionalTable(setupDatabase, 'orders'),
       order_items: rowsFromOptionalTable(setupDatabase, 'order_items').map((row) => ({
@@ -9562,7 +12167,11 @@ async function loadOnsiteSetup(_event, input = {}) {
         capture_session_id: null,
         image_import_event_id: null
       })),
-      admin_item_batches: rowsFromOptionalTable(setupDatabase, 'admin_item_batches')
+      event_entries: rowsFromOptionalTable(setupDatabase, 'event_entries'),
+      event_subject_links: rowsFromOptionalTable(setupDatabase, 'event_subject_links'),
+      admin_item_batches: rowsFromOptionalTable(setupDatabase, 'admin_item_batches'),
+      end_of_day_imports: rowsFromOptionalTable(setupDatabase, 'end_of_day_imports'),
+      job_milestones: rowsFromOptionalTable(setupDatabase, 'job_milestones')
     };
 
     result = await writeSql((database) => {
@@ -9575,7 +12184,6 @@ async function loadOnsiteSetup(_event, input = {}) {
       const refreshedExistingJob = existingJobRows.length > 0;
       if (refreshedExistingJob) {
         clearImportedJobRows(database, sourceJob.id);
-        clearLocalCaptureDatabase(sourceJob.id);
       }
 
       let clientRows = rowsFromDatabase(database, `
@@ -9641,17 +12249,26 @@ async function loadOnsiteSetup(_event, input = {}) {
       [
         'subjects',
         'subject_codes',
+        'staff_assignments',
+        'composite_grade_titles',
+        'duplicate_record_reviews',
         'subject_groups',
         'subject_group_members',
         'image_assets',
         'capture_sessions',
+        'capture_image_actions',
         'image_versions',
+        'image_import_events',
         'subject_images',
         'orders',
         'order_items',
         'payments',
         'envelope_scans',
-        'admin_item_batches'
+        'event_entries',
+        'event_subject_links',
+        'admin_item_batches',
+        'end_of_day_imports',
+        'job_milestones'
       ].forEach((tableName) => {
         insertImportedRows(database, tableName, importedTables[tableName]);
       });
@@ -9674,8 +12291,26 @@ async function loadOnsiteSetup(_event, input = {}) {
     setupDatabase.close();
   }
 
+  // Loading an onsite setup starts a fresh onsite capture state. Clear the
+  // workstation's local capture history after the main import succeeds, even
+  // when the old main job was deleted before reloading the setup.
+  clearLocalCaptureDatabase(result.id);
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('ONSITE_SETUP.LOADED', {
+    message: `Onsite setup loaded for ${(manifest.school && manifest.school.name) || 'school'} / ${(manifest.job && manifest.job.name) || result.id}`,
+    jobId: result.id,
+    jobName: manifest.job && manifest.job.name,
+    schoolName: manifest.school && manifest.school.name,
+    studentCount: Number(result.counts.subjects || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.croppedMediumImages || 0),
+    sourceLocation: setupFolder,
+    destinationLocation: manifest.job && manifest.job.rootPath,
+    details: {
+      refreshedExistingJob: result.refreshedExistingJob === true,
+      orders: Number(result.counts.orders || 0)
+    }
+  });
   return result;
 }
 
@@ -9742,11 +12377,32 @@ async function createJob(_event, input = {}) {
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     const jobId = idRows[0].id;
     ensureJobFolders(rootPath);
-    return { id: jobId, rootPath };
-  });
+    return {
+      id: jobId,
+      rootPath,
+      name,
+      type,
+      clientId,
+      clientName: clientRows[0].displayName,
+      schoolName: clientRows[0].trecsName || clientRows[0].displayName,
+      shootDate
+    };
+  }, { jobIds: (created) => [created.id] });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('JOB.CREATED', {
+    message: `Job created: ${result.clientName} / ${result.name}`,
+    jobId: result.id,
+    jobName: result.name,
+    schoolId: result.clientId,
+    schoolName: result.clientName,
+    destinationLocation: result.rootPath,
+    details: {
+      jobType: result.type,
+      shootDate: result.shootDate || null,
+      trecsSchoolName: result.schoolName || null
+    }
+  });
   return result;
 }
 
@@ -9764,7 +12420,7 @@ async function updateJob(_event, jobIdValue, input = {}) {
   const retakeDate = optionalText(input.retakeDate, 30);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT id
       FROM jobs
@@ -9814,7 +12470,6 @@ async function updateJob(_event, jobIdValue, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -10100,6 +12755,11 @@ async function importPreviousTrecsJob(_event, input = {}) {
 
     return {
       id: jobId,
+      name,
+      type,
+      clientId,
+      clientName: clientRows[0].displayName,
+      schoolName: clientRows[0].trecsName || clientRows[0].displayName,
       rootPath,
       sourceFolder,
       counts: {
@@ -10112,7 +12772,25 @@ async function importPreviousTrecsJob(_event, input = {}) {
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(result.id);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('JOB.PREVIOUS_TRECS_IMPORTED', {
+    message: `Previous TRECS job imported: ${result.clientName} / ${result.name}`,
+    jobId: result.id,
+    jobName: result.name,
+    schoolId: result.clientId,
+    schoolName: result.clientName,
+    recordCount: Number(result.counts.students || 0),
+    studentCount: Number(result.counts.students || 0),
+    imageCount: Number(result.counts.images || 0),
+    fileCount: Number(result.counts.copiedImages || 0),
+    sourceLocation: result.sourceFolder,
+    destinationLocation: result.rootPath,
+    details: {
+      jobType: result.type,
+      trecsSchoolName: result.schoolName,
+      lists: Number(result.counts.lists || 0),
+      sourceDatabase: studentsDatabasePath
+    }
+  });
   return result;
 }
 
@@ -10159,6 +12837,9 @@ ipcMain.handle('job:load-onsite-setup', loadOnsiteSetup);
 ipcMain.handle('job:load-onsite-setups', loadOnsiteSetups);
 ipcMain.handle('app:system-info', () => systemInfo());
 ipcMain.handle('app:focus-window', focusWindow);
+ipcMain.handle('app:confirm-image-unlink', confirmImageUnlink);
+ipcMain.handle('app:confirm-action', confirmAction);
+ipcMain.handle('app:show-message', showMessage);
 ipcMain.handle('end-of-day:choose-package-folder', chooseEndOfDayPackageFolder);
 ipcMain.handle('end-of-day:approve-package', approveEndOfDayPackage);
 
@@ -10302,7 +12983,7 @@ async function previewSchoolData(filePath) {
 
 async function chooseSchoolDataFile(event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  const jobRows = await querySql(`
+  const jobRows = await queryProgramSql(`
     SELECT root_path AS rootPath
     FROM jobs
     WHERE id = ${jobId}
@@ -10340,6 +13021,15 @@ function importRowValue(row, mapping, key) {
     return '';
   }
   return normalizeImportCell(row[Number(columnIndex)]);
+}
+
+function uppercaseImportValue(value, maxLength) {
+  const uppercaseValue = normalizeImportCell(value).toUpperCase();
+  return optionalText(uppercaseValue, maxLength);
+}
+
+function uppercaseMappedImportValue(row, mapping, key, maxLength) {
+  return uppercaseImportValue(importRowValue(row, mapping, key), maxLength);
 }
 
 function normalizedImportSubjectType(value) {
@@ -10393,12 +13083,14 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
   const dataRows = hasHeader ? allRows.slice(1) : allRows;
   const importedAt = new Date().toISOString();
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT
         j.id,
+        j.name AS jobName,
         j.root_path AS rootPath,
-        c.reference_number AS clientReferenceNumber
+        c.reference_number AS clientReferenceNumber,
+        c.display_name AS schoolName
       FROM jobs j
       JOIN clients c ON c.id = j.client_id
       WHERE j.id = ${jobId}
@@ -10480,16 +13172,16 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
 
     try {
       dataRows.forEach((row, index) => {
-        const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-        const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-        const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
-        const externalId = optionalText(importRowValue(row, mapping, 'externalId'), 255);
+        const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+        const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+        const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
+        const externalId = uppercaseMappedImportValue(row, mapping, 'externalId', 255);
         const grade = normalizeTrecsGrade(importRowValue(row, mapping, 'grade'));
-        const homeroom = optionalText(importRowValue(row, mapping, 'homeroom'), 100);
-        const track = optionalText(importRowValue(row, mapping, 'track'), 100);
-        const team = optionalText(importRowValue(row, mapping, 'team'), 100);
-        const field1 = optionalText(importRowValue(row, mapping, 'field1'), 255);
-        const field2 = optionalText(importRowValue(row, mapping, 'field2'), 255);
+        const homeroom = uppercaseMappedImportValue(row, mapping, 'homeroom', 100);
+        const track = uppercaseMappedImportValue(row, mapping, 'track', 100);
+        const team = uppercaseMappedImportValue(row, mapping, 'team', 100);
+        const field1 = uppercaseMappedImportValue(row, mapping, 'field1', 255);
+        const field2 = uppercaseMappedImportValue(row, mapping, 'field2', 255);
         const subjectType = normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType'));
         const rawEnrollmentStatus = mapping.enrollmentStatus !== null && mapping.enrollmentStatus !== undefined && mapping.enrollmentStatus !== ''
           ? importRowValue(row, mapping, 'enrollmentStatus')
@@ -10497,8 +13189,8 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
         const enrollmentStatus = rawEnrollmentStatus
           ? normalizeEnrollmentStatus(rawEnrollmentStatus)
           : 'active';
-        const notes = optionalText(importRowValue(row, mapping, 'notes'), 5000);
-        const mappedRef = importRowValue(row, mapping, 'ref');
+        const notes = uppercaseMappedImportValue(row, mapping, 'notes', 5000);
+        const mappedRef = uppercaseMappedImportValue(row, mapping, 'ref', 100);
         const hasImportedData = Boolean(
           mappedRef ||
           firstName ||
@@ -10591,12 +13283,30 @@ async function importSchoolData(_event, jobIdValue, input = {}) {
       skipped: skippedRows.length,
       skippedRows: skippedRows.slice(0, 25),
       sourceFilePath: copiedSourcePath,
-      importedAt
+      importedAt,
+      jobName: jobRows[0].jobName,
+      schoolName: jobRows[0].schoolName,
+      jobRootPath: jobRows[0].rootPath
     };
   });
 
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
+  queueTrecsLogEvent('DATA.LOADED', {
+    message: `School data loaded for ${result.schoolName} / ${result.jobName}`,
+    jobId,
+    jobName: result.jobName,
+    schoolName: result.schoolName,
+    recordCount: Number(result.created || 0) + Number(result.updated || 0),
+    studentCount: Number(result.created || 0) + Number(result.updated || 0),
+    sourceLocation: filePath,
+    destinationLocation: result.jobRootPath,
+    details: {
+      created: Number(result.created || 0),
+      updated: Number(result.updated || 0),
+      skipped: Number(result.skipped || 0),
+      storedSourcePath: result.sourceFilePath
+    }
+  });
   return result;
 }
 
@@ -10706,9 +13416,8 @@ function ensureVerificationSchema(database) {
 }
 
 async function ensureVerificationSchemaReady() {
-  await mutateSql((database) => {
-    ensureVerificationSchema(database);
-  });
+  // Kept for existing callers. All job readers/writers prepare their own
+  // in-memory schema. There is no global write required to display a view.
 }
 
 function duplicateNameKey(subject) {
@@ -10729,7 +13438,7 @@ function duplicateSubjectIdsKey(subjects) {
 async function getDuplicateRecordReview(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const subjects = await querySql(`
+  const subjects = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -10770,7 +13479,7 @@ async function getDuplicateRecordReview(_event, jobIdValue) {
     if (!byName.has(key)) byName.set(key, []);
     byName.get(key).push(subject);
   });
-  const reviews = await querySql(`SELECT name_key AS nameKey, subject_ids_key AS subjectIdsKey, reviewed_at AS reviewedAt FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
+  const reviews = await queryJobSql(jobId, `SELECT name_key AS nameKey, subject_ids_key AS subjectIdsKey, reviewed_at AS reviewedAt FROM duplicate_record_reviews WHERE job_id = ${jobId};`);
   const reviewedKeys = new Map(reviews.map((row) => [`${row.nameKey}::${row.subjectIdsKey}`, row.reviewedAt]));
   const groups = [...byName.entries()]
     .filter(([_key, rows]) => rows.length > 1)
@@ -10815,7 +13524,7 @@ async function markDuplicateRecordReviewed(_event, jobIdValue, input = {}) {
   const nameKey = normalizeText(input.nameKey, 'Duplicate name key', 255);
   const subjectIdsKey = normalizeText(input.subjectIdsKey, 'Duplicate subject list', 1000);
   const reviewed = input.reviewed !== false;
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     if (reviewed) {
       database.run(`
         INSERT INTO duplicate_record_reviews (job_id, name_key, subject_ids_key, reviewed_at, notes)
@@ -10829,7 +13538,6 @@ async function markDuplicateRecordReviewed(_event, jobIdValue, input = {}) {
     return { jobId, reviewed };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -10848,25 +13556,25 @@ function schoolDataImportRowsFromInput(input = {}) {
   const allRows = nonEmptySchoolDataRows(readSchoolDataRowsSync(input.filePath));
   const dataRows = input.hasHeader ? allRows.slice(1) : allRows;
   return dataRows.map((row, index) => {
-    const firstName = optionalText(importRowValue(row, mapping, 'firstName'), 255);
-    const lastName = optionalText(importRowValue(row, mapping, 'lastName'), 255);
-    const displayName = displayNameFromImport(firstName, lastName, importRowValue(row, mapping, 'displayName'));
+    const firstName = uppercaseMappedImportValue(row, mapping, 'firstName', 255);
+    const lastName = uppercaseMappedImportValue(row, mapping, 'lastName', 255);
+    const displayName = displayNameFromImport(firstName, lastName, uppercaseMappedImportValue(row, mapping, 'displayName', 255));
     return {
       rowNumber: index + (input.hasHeader ? 2 : 1),
-      ref: optionalText(importRowValue(row, mapping, 'ref'), 100),
+      ref: uppercaseMappedImportValue(row, mapping, 'ref', 100),
       firstName,
       lastName,
       displayName,
-      externalId: optionalText(importRowValue(row, mapping, 'externalId'), 255),
+      externalId: uppercaseMappedImportValue(row, mapping, 'externalId', 255),
       grade: normalizeTrecsGrade(importRowValue(row, mapping, 'grade')),
-      homeroom: optionalText(importRowValue(row, mapping, 'homeroom'), 100),
-      track: optionalText(importRowValue(row, mapping, 'track'), 100),
-      team: optionalText(importRowValue(row, mapping, 'team'), 100),
-      field1: optionalText(importRowValue(row, mapping, 'field1'), 255),
-      field2: optionalText(importRowValue(row, mapping, 'field2'), 255),
+      homeroom: uppercaseMappedImportValue(row, mapping, 'homeroom', 100),
+      track: uppercaseMappedImportValue(row, mapping, 'track', 100),
+      team: uppercaseMappedImportValue(row, mapping, 'team', 100),
+      field1: uppercaseMappedImportValue(row, mapping, 'field1', 255),
+      field2: uppercaseMappedImportValue(row, mapping, 'field2', 255),
       subjectType: normalizedImportSubjectType(importRowValue(row, mapping, 'subjectType')),
       enrollmentStatus: enrollmentStatusMapped ? normalizeEnrollmentStatus(importRowValue(row, mapping, 'enrollmentStatus')) : '',
-      notes: optionalText(importRowValue(row, mapping, 'notes'), 5000)
+      notes: uppercaseMappedImportValue(row, mapping, 'notes', 5000)
     };
   }).filter((row) => row.ref || row.firstName || row.lastName || row.displayName || row.externalId || row.grade || row.homeroom || row.field1 || row.field2);
 }
@@ -10911,7 +13619,7 @@ async function previewRosterVerification(_event, jobIdValue, input = {}) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
   const imported = schoolDataImportRowsFromInput(input);
-  const subjects = (await querySql(`
+  const subjects = (await queryJobSql(jobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName,
            s.display_name AS displayName, s.external_id AS externalId, s.grade, s.homeroom,
            s.field1 AS field1, s.field2 AS field2,
@@ -10987,7 +13695,7 @@ async function applyRosterVerification(_event, jobIdValue, input = {}) {
   const jobId = numericId(jobIdValue);
   const filePath = normalizeText(input.filePath, 'School data file', 1000);
   const importedAt = new Date().toISOString();
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const job = rowsFromDatabase(database, `SELECT root_path AS rootPath FROM jobs WHERE id = ${jobId} LIMIT 1;`)[0];
     if (!job) throw new Error('Job not found');
     const copiedSourcePath = copySchoolDataSourceFile(filePath, resolveProjectPath(job.rootPath));
@@ -11049,17 +13757,16 @@ async function applyRosterVerification(_event, jobIdValue, input = {}) {
     return { jobId, created, updated, removed, unenrolled, sourceFilePath: copiedSourcePath };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
 async function getStaffVerificationSetup(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
-  const jobs = await querySql(`SELECT j.id, c.display_name AS clientName, j.name AS jobName FROM jobs j JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;`);
+  const jobs = await queryProgramSql(`SELECT j.id, c.display_name AS clientName, j.name AS jobName FROM jobs j JOIN clients c ON c.id = j.client_id ORDER BY c.display_name, j.name;`);
   const selectedJobId = jobId || jobs[0]?.id || null;
   if (!selectedJobId) return { jobs, selectedJobId: null, staff: [], homerooms: [], assignments: [] };
-  const staff = await querySql(`
+  const staff = await queryJobSql(selectedJobId, `
     SELECT s.id, s.legacy_ref_num AS ref, s.first_name AS firstName, s.last_name AS lastName, s.display_name AS displayName,
            s.grade, s.homeroom, s.subject_type AS subjectType, CASE WHEN s.primary_image_asset_id IS NOT NULL THEN 1 ELSE 0 END AS hasPhoto
     FROM subjects s
@@ -11067,7 +13774,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND (LOWER(COALESCE(s.subject_type, '')) IN ('faculty', 'staff', 'teacher') OR UPPER(COALESCE(s.grade, '')) = 'FAC')
     ORDER BY s.last_name, s.first_name, s.legacy_ref_num;
   `);
-  const homerooms = (await querySql(`
+  const homerooms = (await queryJobSql(selectedJobId, `
     SELECT DISTINCT homeroom AS value
     FROM subjects
     WHERE job_id = ${Number(selectedJobId)}
@@ -11075,7 +13782,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
     ORDER BY homeroom;
   `)).map((row) => row.value);
-  const homeroomGradeRows = await querySql(`
+  const homeroomGradeRows = await queryJobSql(selectedJobId, `
     SELECT homeroom, grade
     FROM subjects
     WHERE job_id = ${Number(selectedJobId)}
@@ -11083,7 +13790,7 @@ async function getStaffVerificationSetup(_event, jobIdValue) {
       AND LOWER(COALESCE(subject_type, 'student')) NOT IN ('faculty', 'staff', 'teacher')
     ORDER BY homeroom, grade;
   `);
-  const assignments = await querySql(`SELECT id, subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, include_in_exports AS includeInExports, sort_order AS sortOrder, notes FROM staff_assignments WHERE job_id = ${Number(selectedJobId)} ORDER BY sort_order, role, homeroom;`);
+  const assignments = await queryJobSql(selectedJobId, `SELECT id, subject_id AS subjectId, role, homeroom, class_description AS classDescription, include_in_composites AS includeInComposites, include_in_exports AS includeInExports, sort_order AS sortOrder, notes FROM staff_assignments WHERE job_id = ${Number(selectedJobId)} ORDER BY sort_order, role, homeroom;`);
   const gradeTitleRows = await compositeGradeTitleRows(selectedJobId);
   const gradeTitles = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), row.gradeTitle || '']));
   const reviewedByHomeroom = new Map(gradeTitleRows.map((row) => [String(row.homeroom || ''), Number(row.reviewed || 0) > 0]));
@@ -11143,7 +13850,7 @@ async function saveStaffVerification(_event, jobIdValue, input = []) {
   const jobId = numericId(jobIdValue);
   const rows = Array.isArray(input) ? input : input.rows;
   const gradeTitles = Array.isArray(input) ? {} : input.gradeTitles || {};
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     database.run('DELETE FROM staff_assignments WHERE job_id = ?;', [jobId]);
     ensureCompositeGradeTitleTable(database);
     database.run('DELETE FROM composite_grade_titles WHERE job_id = ?;', [jobId]);
@@ -11180,7 +13887,6 @@ async function saveStaffVerification(_event, jobIdValue, input = []) {
     return { jobId, saved };
   });
   result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
-  result.programDatabasePath = await writeProgramDatabaseSnapshot();
   return result;
 }
 
@@ -11194,8 +13900,11 @@ ipcMain.handle('staff-verification:save', saveStaffVerification);
 async function getJobDetail(_event, jobIdValue) {
   await ensureVerificationSchemaReady();
   const jobId = numericId(jobIdValue);
+  const database = await openWorkingDatabase({ jobIds: [jobId] });
+  const query = (sql) => rowsFromResult(database.exec(sql));
 
-  const summary = await querySql(`
+  try {
+  const summary = query(`
     WITH
       subject_counts AS (
         SELECT
@@ -11275,7 +13984,7 @@ async function getJobDetail(_event, jobIdValue) {
     WHERE j.id = ${jobId}
   `);
 
-  const subjects = await querySql(`
+  const subjects = query(`
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -11314,7 +14023,7 @@ async function getJobDetail(_event, jobIdValue) {
       s.id;
   `);
 
-  const orders = await querySql(`
+  const orders = query(`
     SELECT
       o.id,
       o.source,
@@ -11355,7 +14064,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const subjectCodes = await querySql(`
+  const subjectCodes = query(`
     SELECT
       sc.subject_id AS subjectId,
       sc.code_type AS codeType,
@@ -11366,7 +14075,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY sc.code_type, sc.code;
   `);
 
-  const subjectOrders = await querySql(`
+  const subjectOrders = query(`
     SELECT
       o.id,
       o.subject_id AS subjectId,
@@ -11385,7 +14094,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY o.id;
   `);
 
-  const subjectImages = await querySql(`
+  const subjectImages = query(`
     SELECT
       si.subject_id AS subjectId,
       ia.id AS imageAssetId,
@@ -11439,7 +14148,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY MAX(si.selected) DESC, MIN(si.sort_order), ia.filename;
   `);
 
-  const orderItems = await querySql(`
+  const orderItems = query(`
     SELECT
       oi.id,
       oi.order_id AS orderId,
@@ -11464,7 +14173,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY oi.order_id, oi.id;
   `);
 
-  const payments = await querySql(`
+  const payments = query(`
     SELECT
       p.id,
       p.order_id AS orderId,
@@ -11479,7 +14188,7 @@ async function getJobDetail(_event, jobIdValue) {
     ORDER BY p.created_at, p.id;
   `);
 
-  const images = await querySql(`
+  const images = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -11499,7 +14208,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const products = await querySql(`
+  const products = query(`
     SELECT
       pc.code,
       pc.name AS codeName,
@@ -11515,7 +14224,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 250;
   `);
 
-  const captureSummary = await querySql(`
+  const captureSummary = query(`
     SELECT
       (SELECT COUNT(*) FROM subjects WHERE job_id = ${jobId}) AS subjects,
       (
@@ -11551,7 +14260,7 @@ async function getJobDetail(_event, jobIdValue) {
       ) AS orderedNoPhotoSubjects;
   `);
 
-  const noPhotoSubjects = await querySql(`
+  const noPhotoSubjects = query(`
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -11572,7 +14281,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 150;
   `);
 
-  const recentImages = await querySql(`
+  const recentImages = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -11593,7 +14302,7 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 80;
   `);
 
-  const reviewCandidates = await querySql(`
+  const reviewCandidates = query(`
     SELECT
       ia.id,
       ia.filename,
@@ -11618,21 +14327,16 @@ async function getJobDetail(_event, jobIdValue) {
     LIMIT 100;
   `);
 
-  const localCapture = await readLocalCaptureRows(jobId);
-  const activeCaptureImageIds = new Set(localCapture.rows.map((row) => Number(row.image_asset_id)).filter(Boolean));
-  const activeCaptureSubjectIds = new Set(localCapture.rows.map((row) => Number(row.subject_id)).filter(Boolean));
   if (summary[0]) {
-    summary[0].activeCaptureImages = activeCaptureImageIds.size;
-    summary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    summary[0].activeCaptureEvents = localCapture.rows.length;
+    summary[0].activeCaptureEvents = Number(summary[0].activeCaptureImages || 0);
   }
   if (captureSummary[0]) {
-    captureSummary[0].activeCaptureImages = activeCaptureImageIds.size;
-    captureSummary[0].activeCaptureSubjects = activeCaptureSubjectIds.size;
-    captureSummary[0].activeCaptureEvents = localCapture.rows.length;
+    captureSummary[0].activeCaptureEvents = Number(captureSummary[0].activeCaptureImages || 0);
   }
 
-  const jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  const jobDatabasePath = summary[0]?.rootPath
+    ? path.join(resolveProjectPath(summary[0].rootPath), 'Database', 'job.db')
+    : null;
 
   return {
     summary: summary[0] || null,
@@ -11655,6 +14359,9 @@ async function getJobDetail(_event, jobIdValue) {
       jobDatabasePath
     }
   };
+  } finally {
+    database.close();
+  }
 }
 
 ipcMain.handle('job:detail', getJobDetail);
@@ -11689,7 +14396,7 @@ async function createSubject(_event, jobIdValue, input = {}) {
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
   const notes = optionalText(input.notes, 5000);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `SELECT id FROM jobs WHERE id = ${jobId};`);
     if (!jobRows.length) {
       throw new Error('Job not found');
@@ -11743,6 +14450,7 @@ async function createSubject(_event, jobIdValue, input = {}) {
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     return { id: idRows[0].id };
   });
+  return result;
 }
 
 function normalizeRecordCount(value) {
@@ -11770,7 +14478,7 @@ async function createBlankSubjects(_event, jobIdValue, countValue) {
   const jobId = numericId(jobIdValue);
   const count = normalizeRecordCount(countValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeJobSql(jobId, (database) => {
     const jobRows = rowsFromDatabase(database, `
       SELECT
         j.id,
@@ -11845,7 +14553,9 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
   const enrollmentStatus = normalizeEnrollmentStatus(input.enrollmentStatus);
   const photographedStatus = normalizePhotographedStatus(input.photographedStatus);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Subject not found');
     const statement = database.prepare(`
       UPDATE subjects
       SET subject_type = ?,
@@ -11890,13 +14600,10 @@ async function updateSubject(_event, subjectIdValue, input = {}) {
       throw new Error('Subject not found');
     }
 
-    return { id: subjectId };
+    return { id: subjectId, jobId };
   });
 
-  const rows = await querySql(`SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId};`);
-  if (rows.length) {
-    result.jobDatabasePath = await writeJobDatabaseSnapshot(rows[0].jobId);
-  }
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
@@ -11904,7 +14611,9 @@ async function updateSubjectNotes(_event, subjectIdValue, notesValue) {
   const subjectId = numericId(subjectIdValue);
   const notes = normalizeNotes(notesValue);
 
-  const result = await writeSql((database) => {
+  const result = await writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Subject not found');
     const statement = database.prepare(`
       UPDATE subjects
       SET notes = ?, updated_at = CURRENT_TIMESTAMP
@@ -11921,13 +14630,10 @@ async function updateSubjectNotes(_event, subjectIdValue, notesValue) {
       throw new Error('Subject not found');
     }
 
-    return { id: subjectId, notes };
+    return { id: subjectId, jobId, notes };
   });
 
-  const rows = await querySql(`SELECT job_id AS jobId FROM subjects WHERE id = ${subjectId};`);
-  if (rows.length) {
-    result.jobDatabasePath = await writeJobDatabaseSnapshot(rows[0].jobId);
-  }
+  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
@@ -11935,7 +14641,9 @@ async function updateOrderNotes(_event, orderIdValue, notesValue) {
   const orderId = numericId(orderIdValue);
   const notes = normalizeNotes(notesValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM orders WHERE id = ${orderId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Order not found');
     const statement = database.prepare(`
       UPDATE orders
       SET notes = ?, updated_at = CURRENT_TIMESTAMP
@@ -11952,7 +14660,7 @@ async function updateOrderNotes(_event, orderIdValue, notesValue) {
       throw new Error('Order not found');
     }
 
-    return { id: orderId, notes };
+    return { id: orderId, jobId, notes };
   });
 }
 
@@ -11975,7 +14683,9 @@ async function updateOrderRenderStatus(_event, orderIdValue, statusValue) {
   const orderId = numericId(orderIdValue);
   const renderStatus = normalizeRenderStatus(statusValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
+    const jobId = Number(rowsFromDatabase(database, `SELECT job_id AS jobId FROM orders WHERE id = ${orderId} LIMIT 1;`)[0]?.jobId || 0);
+    if (!jobId) throw new Error('Order not found');
     if (renderStatus === 'queued') {
       const readiness = database.exec(`
         SELECT
@@ -12017,7 +14727,7 @@ async function updateOrderRenderStatus(_event, orderIdValue, statusValue) {
       throw new Error('Order not found');
     }
 
-    return { id: orderId, renderStatus };
+    return { id: orderId, jobId, renderStatus };
   });
 }
 
@@ -12029,9 +14739,9 @@ async function updateOrder(_event, orderIdValue, input = {}) {
   const notes = normalizeNotes(input.notes);
   const { raw, codes } = orderCodesFromInput(input.orderCodes);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const orderRows = rowsFromDatabase(database, `
-      SELECT id, subject_id AS subjectId
+      SELECT id, job_id AS jobId, subject_id AS subjectId
       FROM orders
       WHERE id = ${orderId};
     `);
@@ -12080,6 +14790,7 @@ async function updateOrder(_event, orderIdValue, input = {}) {
 
     return {
       id: orderId,
+      jobId: Number(orderRows[0].jobId),
       paidStatus,
       notes,
       packageCodes: raw,
@@ -12091,9 +14802,9 @@ async function updateOrder(_event, orderIdValue, input = {}) {
 async function deleteOrder(_event, orderIdValue) {
   const orderId = numericId(orderIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const orderRows = rowsFromDatabase(database, `
-      SELECT id
+      SELECT id, job_id AS jobId
       FROM orders
       WHERE id = ${orderId};
     `);
@@ -12114,7 +14825,7 @@ async function deleteOrder(_event, orderIdValue) {
     database.run('DELETE FROM order_items WHERE order_id = ?;', [orderId]);
     database.run('DELETE FROM orders WHERE id = ?;', [orderId]);
 
-    return { id: orderId, deleted: true };
+    return { id: orderId, jobId: Number(orderRows[0].jobId), deleted: true };
   });
 }
 
@@ -12172,7 +14883,7 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
   const jobId = numericId(jobIdValue);
   const barcode = normalizeBarcode(barcodeValue);
   const barcodeSql = sqlLiteral(barcode);
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -12222,8 +14933,8 @@ async function findSubjectByBarcode(_event, jobIdValue, barcodeValue) {
 async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue = 'all') {
   const jobId = numericId(jobIdValue);
   const search = normalizeEnvelopeSearch(searchValue);
-  const mode = ['all', 'name', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
-  const minimumLength = mode === 'grade' || mode === 'homeroom' ? 1 : 2;
+  const mode = ['all', 'name', 'id', 'grade', 'homeroom'].includes(String(modeValue || 'all')) ? String(modeValue || 'all') : 'all';
+  const minimumLength = ['id', 'grade', 'homeroom'].includes(mode) ? 1 : 2;
   if (search.length < minimumLength) {
     return [];
   }
@@ -12235,6 +14946,8 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue
     ? `(COALESCE(s.grade, '') LIKE ${likeSql})`
     : mode === 'homeroom'
       ? `(COALESCE(s.homeroom, '') LIKE ${likeSql})`
+      : mode === 'id'
+        ? `(COALESCE(s.external_id, '') LIKE ${likeSql})`
       : mode === 'name'
         ? `(
             COALESCE(s.display_name, '') LIKE ${likeSql}
@@ -12252,7 +14965,7 @@ async function searchEnvelopeSubjects(_event, jobIdValue, searchValue, modeValue
             OR COALESCE(s.grade, '') LIKE ${likeSql}
             OR COALESCE(s.homeroom, '') LIKE ${likeSql}
           )`;
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       s.id,
       s.legacy_ref_num AS ref,
@@ -12327,10 +15040,9 @@ function latestImageInFolder(folderPath) {
 function rawPairPathForImage(imagePath) {
   const folderPath = path.dirname(imagePath);
   const base = path.basename(imagePath, path.extname(imagePath)).toLowerCase();
-  const match = fs.readdirSync(folderPath).find((name) => (
-    path.basename(name, path.extname(name)).toLowerCase() === base
-    && path.extname(name).toLowerCase() === '.cr3'
-  ));
+  const match = fs.readdirSync(folderPath)
+    .filter((name) => path.basename(name, path.extname(name)).toLowerCase() === base)
+    .find((name) => ['.cr2', '.cr3'].includes(path.extname(name).toLowerCase()));
   return match ? path.join(folderPath, match) : null;
 }
 
@@ -12370,9 +15082,8 @@ function shootStageLabel(value) {
   }[stage];
 }
 
-function latestCapturePairInFolder(folderPath, options = {}) {
+function capturePairForImage(imagePath, options = {}) {
   const fileMode = normalizeCaptureFileMode(options.fileMode);
-  const imagePath = latestImageInFolder(folderPath);
   const rawPath = fileMode === 'jpg_only' ? null : rawPairPathForImage(imagePath);
   const filename = path.basename(imagePath);
 
@@ -12405,7 +15116,7 @@ function latestCapturePairInFolder(folderPath, options = {}) {
       filename,
       fileMode,
       ready: false,
-      reason: `Waiting for CR3 pair for ${filename}`
+      reason: `Waiting for CR2 or CR3 pair for ${filename}`
     };
   }
 
@@ -12428,6 +15139,39 @@ function latestCapturePairInFolder(folderPath, options = {}) {
     ready: true,
     reason: 'Ready'
   };
+}
+
+function captureImagesInFolder(folderPath) {
+  if (!fs.existsSync(folderPath)) {
+    throw new Error(`Hot folder not found: ${folderPath}`);
+  }
+
+  return fs.readdirSync(folderPath)
+    .flatMap((name) => {
+      const filePath = path.join(folderPath, name);
+      const extension = path.extname(filePath).toLowerCase();
+      if (!['.jpg', '.jpeg', '.png'].includes(extension)) {
+        return [];
+      }
+      try {
+        const stats = fs.statSync(filePath);
+        return stats.isFile() ? [{ path: filePath, modified: stats.mtimeMs }] : [];
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          return [];
+        }
+        throw error;
+      }
+    })
+    .sort((first, second) => first.modified - second.modified || first.path.localeCompare(second.path));
+}
+
+function latestCapturePairInFolder(folderPath, options = {}) {
+  const images = captureImagesInFolder(folderPath);
+  if (!images.length) {
+    throw new Error('No JPG/PNG capture images found in the hot folder');
+  }
+  return capturePairForImage(images[images.length - 1].path, options);
 }
 
 function envelopeDestinationName(ref, sourcePath) {
@@ -12483,7 +15227,7 @@ const captureWatchers = new Map();
 async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourcePath = null) {
   const sourcePath = explicitSourcePath || latestImageInFolder(hotFolder);
 
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,
@@ -12535,6 +15279,7 @@ async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourc
 
     const idRows = rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;');
     return {
+      jobId: Number(row.jobId),
       scan: {
         id: idRows[0].id,
         subjectId,
@@ -12547,7 +15292,7 @@ async function importEnvelopeScanCore(jobId, subjectId, hotFolder, explicitSourc
 }
 
 async function envelopeScanCount(jobId, subjectId) {
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT COUNT(*) AS scanCount
     FROM envelope_scans
     WHERE job_id = ${jobId}
@@ -12729,7 +15474,7 @@ async function createEnvelopeOrder(_event, jobIdValue, subjectIdValue, input = {
   const notes = normalizeNotes(input.notes);
   const { raw, codes } = orderCodesFromInput(input.orderCodes);
 
-  return writeSql((database) => {
+  return writeJobSql(jobId, (database) => {
     const subjectRows = rowsFromDatabase(database, `
       SELECT id, primary_image_asset_id AS primaryImageAssetId
       FROM subjects
@@ -12926,7 +15671,7 @@ async function getEnvelopeScanPreview(_event, scanIdValue) {
 
 async function getUnlinkedEnvelopeScans(_event, jobIdValue) {
   const jobId = numericId(jobIdValue);
-  return querySql(`
+  return queryJobSql(jobId, `
     SELECT
       es.id,
       es.subject_id AS subjectId,
@@ -12951,7 +15696,7 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
   const scanId = numericId(scanIdValue);
   const subjectId = numericId(subjectIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         es.id,
@@ -13028,6 +15773,7 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
     }
 
     return {
+      jobId: Number(row.jobId),
       scan: {
         id: scanId,
         subjectId,
@@ -13044,9 +15790,9 @@ async function assignEnvelopeScan(_event, scanIdValue, subjectIdValue) {
 async function deleteEnvelopeScan(_event, scanIdValue) {
   const scanId = numericId(scanIdValue);
 
-  return writeSql((database) => {
+  return writeResultJobSql((database) => {
     const rows = rowsFromDatabase(database, `
-      SELECT id, order_id AS orderId, scan_path AS scanPath, status
+      SELECT id, job_id AS jobId, order_id AS orderId, scan_path AS scanPath, status
       FROM envelope_scans
       WHERE id = ${scanId}
       LIMIT 1;
@@ -13067,7 +15813,7 @@ async function deleteEnvelopeScan(_event, scanIdValue) {
       fs.unlinkSync(fullPath);
     }
 
-    return { id: scanId, deleted: true };
+    return { id: scanId, jobId: Number(row.jobId), deleted: true };
   });
 }
 
@@ -13114,7 +15860,7 @@ function metadataValue(metadataJson, key) {
   }
 }
 
-function renameUnlinkedCaptureImage(database, input) {
+async function renameUnlinkedCaptureImage(database, input) {
   const imageId = numericId(input.imageId);
   const ref = String(input.ref || '').trim();
   if (!ref) {
@@ -13162,7 +15908,7 @@ function renameUnlinkedCaptureImage(database, input) {
   }
 
   const destinationPath = uniquePath(currentFolder, newFilename);
-  moveFile(currentPath, destinationPath);
+  const fileMoves = [{ sourcePath: currentPath, destinationPath }];
   const relativeDestination = path.relative(projectRoot, destinationPath);
   const oldCurrentPath = row.currentPath;
   const oldOriginalPath = row.originalPath;
@@ -13176,7 +15922,7 @@ function renameUnlinkedCaptureImage(database, input) {
       const rawFilename = stripCaptureReferencePrefix(path.basename(rawPath), ref);
       if (rawFilename && rawFilename !== path.basename(rawPath)) {
         const rawDestinationPath = uniquePath(path.dirname(rawPath), rawFilename);
-        moveFile(rawPath, rawDestinationPath);
+        fileMoves.push({ sourcePath: rawPath, destinationPath: rawDestinationPath });
         relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
         try {
           const metadata = JSON.parse(row.metadataJson || '{}');
@@ -13189,6 +15935,7 @@ function renameUnlinkedCaptureImage(database, input) {
     }
   }
 
+  await database.stageImageFiles(fileMoves);
   database.run(`
     UPDATE image_assets
     SET current_path = ?,
@@ -13228,7 +15975,7 @@ function renameUnlinkedCaptureImage(database, input) {
   };
 }
 
-function renameLinkedCaptureImage(database, input) {
+async function renameLinkedCaptureImage(database, input) {
   const imageId = numericId(input.imageId);
   const ref = String(input.ref || '').trim();
   if (!ref) {
@@ -13271,7 +16018,7 @@ function renameLinkedCaptureImage(database, input) {
   }
 
   const destinationPath = uniquePath(currentFolder, prefixedName);
-  moveFile(currentPath, destinationPath);
+  const fileMoves = [{ sourcePath: currentPath, destinationPath }];
   const relativeDestination = path.relative(projectRoot, destinationPath);
   const oldCurrentPath = row.currentPath;
   const oldOriginalPath = row.originalPath;
@@ -13284,7 +16031,7 @@ function renameLinkedCaptureImage(database, input) {
     if (fs.existsSync(rawPath) && path.resolve(path.dirname(rawPath)).toLowerCase() === path.resolve(jobImagesFolder).toLowerCase()) {
       const rawDestinationName = `${path.basename(destinationPath, path.extname(destinationPath))}${path.extname(rawPath) || '.CR3'}`;
       const rawDestinationPath = uniquePath(path.dirname(rawPath), rawDestinationName);
-      moveFile(rawPath, rawDestinationPath);
+      fileMoves.push({ sourcePath: rawPath, destinationPath: rawDestinationPath });
       relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
       try {
         const metadata = JSON.parse(row.metadataJson || '{}');
@@ -13296,6 +16043,7 @@ function renameLinkedCaptureImage(database, input) {
     }
   }
 
+  await database.stageImageFiles(fileMoves);
   database.run(`
     UPDATE image_assets
     SET current_path = ?,
@@ -13409,14 +16157,24 @@ function getOrCreateCaptureSession(database, input) {
   return rowsFromDatabase(database, 'SELECT last_insert_rowid() AS id;')[0].id;
 }
 
+const { skipCapture, readSkippedCaptures, collectLateRaw, shouldWarnMissingRaw,
+  captureFileIdentity, readCaptureQueue, saveCaptureQueue } = require('./capture-recovery');
+
 function closeCaptureWatcher(webContentsId) {
   const watcherState = captureWatchers.get(webContentsId);
   if (!watcherState) {
     return;
   }
   clearTimeout(watcherState.timer);
+  watcherState.closed = true;
   watcherState.watcher.close();
-  captureWatchers.delete(webContentsId);
+  if (watcherState.processingPromise) {
+    watcherState.processingPromise.finally(() => {
+      if (captureWatchers.get(webContentsId) === watcherState) captureWatchers.delete(webContentsId);
+    }).catch(() => {});
+  } else {
+    captureWatchers.delete(webContentsId);
+  }
 }
 
 async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourcePath = null, explicitRawPath = null, options = {}) {
@@ -13428,8 +16186,9 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
   }
   const sourcePath = pair.imagePath;
   const rawSourcePath = pair.rawPath;
+  if (normalizeCaptureFileMode(options.fileMode) === 'jpg_raw' && !rawSourcePath) throw new Error('RAW file is missing. Check the camera is set to RAW + JPG; retry or skip this JPG.');
 
-  const result = await writeSql((database) => {
+  const result = await writeImageJobSql(jobId, async (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT
         s.id AS subjectId,
@@ -13464,15 +16223,16 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     fs.mkdirSync(imageFolder, { recursive: true });
     const filename = captureDestinationName(row.ref, sourcePath);
     const destinationPath = uniquePath(imageFolder, filename);
-    moveFile(sourcePath, destinationPath);
     const relativeDestination = path.relative(projectRoot, destinationPath);
     let relativeRawDestination = null;
-    if (rawSourcePath && fs.existsSync(rawSourcePath)) {
+    const stagedFiles = [{ sourcePath, destinationPath }];
+    if (rawSourcePath) {
       const rawDestinationName = `${path.basename(destinationPath, path.extname(destinationPath))}${path.extname(rawSourcePath) || '.CR3'}`;
       const rawDestinationPath = uniquePath(imageFolder, rawDestinationName);
-      moveFile(rawSourcePath, rawDestinationPath);
+      stagedFiles.push({ sourcePath: rawSourcePath, destinationPath: rawDestinationPath });
       relativeRawDestination = path.relative(projectRoot, rawDestinationPath);
     }
+    await database.stageImageFiles(stagedFiles);
 
     const fileMode = normalizeCaptureFileMode(options.fileMode);
     const shootStage = normalizeShootStage(options.shootStage);
@@ -13618,16 +16378,42 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
       WHERE id = ?;
     `, [subjectId, imageId, captureSessionId]);
 
+    const captureCounts = rowsFromDatabase(database, `
+      SELECT
+        (SELECT COUNT(*) FROM image_assets WHERE job_id = ${jobId}) AS images,
+        (SELECT COUNT(*) FROM subject_images si JOIN subjects s ON s.id = si.subject_id WHERE s.job_id = ${jobId}) AS subjectImages,
+        (SELECT COUNT(*) FROM subjects WHERE job_id = ${jobId} AND primary_image_asset_id IS NOT NULL) AS subjectsWithPrimaryImage,
+        (
+          SELECT COUNT(DISTINCT si.subject_id)
+          FROM subject_images si
+          JOIN subjects s ON s.id = si.subject_id
+          JOIN image_assets ia ON ia.id = si.image_asset_id
+          WHERE s.job_id = ${jobId}
+            AND ia.job_id = ${jobId}
+            AND ia.source = 'capture_hot_folder'
+            AND ia.status NOT IN ('packaged', 'rejected')
+        ) AS activeCaptureSubjects,
+        (
+          SELECT COUNT(DISTINCT ia.id)
+          FROM image_assets ia
+          WHERE ia.job_id = ${jobId}
+            AND ia.source = 'capture_hot_folder'
+            AND ia.status NOT IN ('packaged', 'rejected')
+        ) AS activeCaptureImages
+    `)[0] || {};
+
     return {
+      counts: captureCounts,
       image: {
         id: imageId,
+        jobId,
         captureSessionId,
         subjectId,
         ref: row.ref,
         filename: path.basename(destinationPath),
         rawPath: relativeRawDestination,
         path: relativeDestination,
-        dataUrl: imageDataUrl(destinationPath),
+        dataUrl: null,
         rotationDegrees: 0,
         selected: shouldSelectNewImage,
         shootStage,
@@ -13637,7 +16423,13 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     };
   });
 
-  result.localCaptureDatabasePath = await appendLocalCaptureEvent({
+  // Release the database write lock before decoding in the image worker.
+  try {
+    Object.assign(result.image, await imageProcessor.preview(resolveProjectPath(result.image.path)));
+  } catch (error) {
+    result.image.previewError = error.message;
+  }
+  try { result.localCaptureDatabasePath = await appendLocalCaptureEvent({
     jobId,
     subjectId,
     imageAssetId: result.image.id,
@@ -13648,23 +16440,57 @@ async function importCaptureImageCore(jobId, subjectId, hotFolder, explicitSourc
     jpgPath: result.image.path,
     cr3Path: result.image.rawPath,
     filename: result.image.filename
-  });
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(jobId);
+  }); } catch (error) {
+    // Metadata is durable; a secondary journal failure must not reimport it.
+    result.recoveryWarning = `Image saved; local capture history needs recovery: ${error.message}`;
+    logStartup('capture local journal warning', error);
+  }
   return result;
 }
 
 async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = {}) {
+  if (projectRoot.startsWith('\\\\') || captureHotFolder.startsWith('\\\\')) throw new Error('Capture must use a local laptop data folder and local camera hot folder. Use the server path.txt only on lab computers.');
   const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
   const fileMode = normalizeCaptureFileMode(options.fileMode);
   const shootStage = normalizeShootStage(options.shootStage);
-  const hotFolder = resolveWorkspacePath('CaptureHotFolder');
+  const hotFolder = captureHotFolder;
   if (!fs.existsSync(hotFolder)) {
     fs.mkdirSync(hotFolder, { recursive: true });
   }
 
+  const webContentsId = event.sender.id;
+  const existingState = captureWatchers.get(webContentsId);
+  if (existingState
+    && !existingState.closed
+    && existingState.jobId === jobId
+    && path.resolve(existingState.hotFolder).toLowerCase() === path.resolve(hotFolder).toLowerCase()) {
+    // Capture anything already written under the previous student before the UI
+    // changes the active subject. Each queued image keeps this subject snapshot.
+    existingState.queueAvailableFiles();
+    existingState.subjectId = subjectId;
+    existingState.fileMode = fileMode;
+    existingState.shootStage = shootStage;
+    existingState.photographerName = optionalText(options.photographerName, 255);
+    existingState.workstationName = optionalText(options.workstationName, 255);
+    existingState.subjectLabel = [optionalText(options.subjectRef, 255), optionalText(options.subjectName, 255)].filter(Boolean).join(' / ');
+    existingState.queueAvailableFiles();
+    existingState.scheduleProcessing(0);
+    return {
+      jobId,
+      subjectId,
+      hotFolder,
+      fileMode,
+      shootStage,
+      shootStageLabel: shootStageLabel(shootStage),
+      captureSessionId: existingState.captureSessionId,
+      queuedCaptures: existingState.pendingCaptures.length
+    };
+  }
+
+  if (existingState) await stopCaptureWatcher(event);
   let captureSessionId = null;
-  await writeSql((database) => {
+  await writeImageJobSql(jobId, (database) => {
     captureSessionId = getOrCreateCaptureSession(database, {
       jobId,
       subjectId,
@@ -13677,9 +16503,9 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     return { captureSessionId };
   });
 
-  const webContentsId = event.sender.id;
   closeCaptureWatcher(webContentsId);
 
+  const restoredCaptures = readCaptureQueue(hotFolder);
   const watcherState = {
     jobId,
     subjectId,
@@ -13687,194 +16513,397 @@ async function startCaptureWatcher(event, jobIdValue, subjectIdValue, options = 
     timer: null,
     importing: false,
     lastImportAt: 0,
-    lastSourcePath: null,
     fileMode,
     shootStage,
     photographerName: optionalText(options.photographerName, 255),
     workstationName: optionalText(options.workstationName, 255),
     captureSessionId,
+    pendingCaptures: restoredCaptures,
+    skippedCaptures: readSkippedCaptures(hotFolder),
+    subjectLabel: [optionalText(options.subjectRef, 255), optionalText(options.subjectName, 255)].filter(Boolean).join(' / '),
+    processedSourcePaths: new Map(),
+    warningOpen: false,
+    closed: false,
+    queuedSourcePaths: new Set(restoredCaptures.map((pending) => path.resolve(pending.sourcePath).toLowerCase())),
+    queueAvailableFiles: null,
+    scheduleProcessing: null,
     watcher: null
   };
 
-  const importLatest = (quietWhenEmpty = false) => {
-    clearTimeout(watcherState.timer);
-    watcherState.timer = setTimeout(async () => {
-      if (watcherState.importing || !event.sender || event.sender.isDestroyed()) {
-        return;
-      }
-      if (Date.now() - watcherState.lastImportAt < 1200) {
-        return;
-      }
-      watcherState.importing = true;
-      try {
-        const pair = latestCapturePairInFolder(hotFolder, { fileMode: watcherState.fileMode });
-        if (!pair.ready) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: false,
-                message: pair.reason || 'Waiting for capture pair',
-                filename: pair.filename || '',
-                fileMode: watcherState.fileMode
-              }
-            });
-          }
-          importLatest();
-          return;
-        }
-        const sourcePath = pair.imagePath;
-        if (watcherState.lastSourcePath === sourcePath) {
-          return;
-        }
-        const result = await importCaptureImageCore(jobId, subjectId, hotFolder, sourcePath, pair.rawPath, {
-          fileMode: watcherState.fileMode,
-          shootStage: watcherState.shootStage,
-          photographerName: watcherState.photographerName,
-          workstationName: watcherState.workstationName
-        });
-        watcherState.lastSourcePath = sourcePath;
-        watcherState.lastImportAt = Date.now();
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            ...result,
-            status: {
-              ready: true,
-              message: 'Ready',
-              filename: result.image.filename,
-              fileMode: watcherState.fileMode
-            }
-          });
-        }
-      } catch (error) {
-        if (quietWhenEmpty && /No JPG\/PNG envelope scans/.test(error.message || '')) {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('capture:image-imported', {
-              status: {
-                ready: true,
-                message: 'Ready'
-              }
-            });
-          }
-          return;
-        }
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('capture:image-imported', {
-            error: error.message || 'Image capture import failed'
-          });
-        }
-      } finally {
-        watcherState.importing = false;
-      }
-    }, 700);
+  const sourceKey = (sourcePath) => path.resolve(sourcePath).toLowerCase();
+  const sourceFingerprint = (sourcePath) => {
+    try { const stat = fs.statSync(sourcePath); return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`; }
+    catch (_) { return null; }
+  };
+  const recoveryJobIds = [...new Set([jobId, ...restoredCaptures.map((pending) => Number(pending.jobId))])];
+  const committedSources = (await Promise.all(recoveryJobIds.map((id) => pendingCommittedCaptureSources(id)))).flat();
+  for (const committedSource of committedSources) {
+    const fingerprint = sourceFingerprint(committedSource);
+    if (fingerprint) watcherState.processedSourcePaths.set(sourceKey(committedSource), fingerprint);
+  }
+  watcherState.pendingCaptures = watcherState.pendingCaptures.filter((pending) => !watcherState.processedSourcePaths.has(sourceKey(pending.sourcePath)));
+
+  const sendCaptureStatus = (payload) => {
+    if (event.sender && !event.sender.isDestroyed()) {
+      event.sender.send('capture:image-imported', payload);
+    }
   };
 
-  watcherState.watcher = fs.watch(hotFolder, (eventType) => {
+  const persistQueue = () => {
+    try {
+      saveCaptureQueue(hotFolder, watcherState.pendingCaptures);
+      watcherState.queuePersistenceError = null;
+      return true;
+    } catch (error) {
+      watcherState.queuePersistenceError = error.message;
+      sendCaptureStatus({ error: `Capture paused: student assignments could not be saved. ${error.message}` });
+      return false;
+    }
+  };
+
+  const queueAvailableFiles = () => {
+    if (watcherState.closed) return 0;
+    for (const record of watcherState.skippedCaptures) {
+      try {
+        if (collectLateRaw(record, rawPairPathForImage, fileIsStable)) {
+          sendCaptureStatus({ recovery: { folder: record.recoveryFolder, subjectId: record.subjectId,
+            message: `Late RAW recovered with skipped JPG in ${record.recoveryFolder}` } });
+        }
+      } catch (error) {
+        sendCaptureStatus({ error: `Skipped capture recovery needs attention: ${error.message}` });
+      }
+    }
+    let images = [];
+    try {
+      images = captureImagesInFolder(hotFolder);
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not read the capture hot folder' });
+      return 0;
+    }
+
+    let queued = 0;
+    images.forEach((image) => {
+      const key = sourceKey(image.path);
+      if (watcherState.processedSourcePaths.has(key)) {
+        if (watcherState.processedSourcePaths.get(key) === sourceFingerprint(image.path)) return;
+        watcherState.processedSourcePaths.delete(key);
+      }
+      if (watcherState.queuedSourcePaths.has(key)) {
+        return;
+      }
+      let sourceIdentity;
+      try { sourceIdentity = captureFileIdentity(image.path); } catch (_) { return; }
+      watcherState.queuedSourcePaths.add(key);
+      watcherState.pendingCaptures.push({
+        sourcePath: image.path,
+        sourceIdentity,
+        modified: image.modified,
+        queuedAt: Date.now(),
+        jobId: watcherState.jobId,
+        subjectId: watcherState.subjectId,
+        subjectLabel: watcherState.subjectLabel,
+        fileMode: watcherState.fileMode,
+        shootStage: watcherState.shootStage,
+        photographerName: watcherState.photographerName,
+        workstationName: watcherState.workstationName
+      });
+      queued += 1;
+    });
+    watcherState.pendingCaptures.sort((first, second) => (
+      first.modified - second.modified || first.sourcePath.localeCompare(second.sourcePath)
+    ));
+    if (queued || watcherState.queuePersistenceError) persistQueue();
+    return queued;
+  };
+
+  const scheduleProcessing = (delay = 250) => {
+    if (watcherState.closed) return;
+    clearTimeout(watcherState.timer);
+    watcherState.timer = setTimeout(() => {
+      if (watcherState.closed || watcherState.importing || watcherState.warningOpen) return;
+      const processing = processQueue();
+      watcherState.processingPromise = processing;
+      processing.catch((error) => {
+        sendCaptureStatus({ error: error.message || 'Capture queue paused after an unexpected error.' });
+      }).finally(() => {
+        if (watcherState.processingPromise === processing) watcherState.processingPromise = null;
+      });
+    }, delay);
+  };
+
+  const processQueue = async () => {
+    if (watcherState.closed || watcherState.importing || watcherState.warningOpen || !event.sender || event.sender.isDestroyed()) {
+      return;
+    }
+
+    queueAvailableFiles();
+    if (watcherState.queuePersistenceError) { scheduleProcessing(1000); return; }
+    const pending = watcherState.pendingCaptures[0];
+    if (!pending) {
+      sendCaptureStatus({
+        status: {
+          ready: true,
+          message: 'Ready',
+          queued: 0
+        }
+      });
+      if (watcherState.skippedCaptures.some((record) => record.state !== 'paired')) scheduleProcessing(1000);
+      return;
+    }
+    if (pending.retryAt && pending.retryAt > Date.now()) {
+      scheduleProcessing(pending.retryAt - Date.now());
+      return;
+    }
+
+    if (!fs.existsSync(pending.sourcePath)) {
+      watcherState.pendingCaptures.shift();
+      persistQueue();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      scheduleProcessing(0);
+      return;
+    }
+
+    let pair;
+    try {
+      pair = capturePairForImage(pending.sourcePath, { fileMode: pending.fileMode });
+    } catch (error) {
+      sendCaptureStatus({ error: error.message || 'Could not inspect the capture pair' });
+      scheduleProcessing();
+      return;
+    }
+
+    if (!pair.ready) {
+      if (shouldWarnMissingRaw(pending, pair, Date.now(), fileIsStable)) {
+        watcherState.warningOpen = true;
+        try {
+          const explanation = watcherState.lastImportAt
+            ? 'A RAW file did not arrive during this shoot. Check the camera, cable, transfer software, and available disk space.'
+            : 'At the start of a shoot this usually means the camera is set to JPG only. Check that the camera saves and transfers both JPG and RAW.';
+          const response = await dialog.showMessageBox(BrowserWindow.fromWebContents(event.sender), {
+            type: 'warning', title: 'Missing RAW capture', message: `${pair.filename} has no matching RAW file.`,
+            detail: `${explanation}\n\nThe JPG belongs to ${pending.subjectLabel || `student ${pending.subjectId}`}. Wait and retry, or skip this JPG and continue with the next pair. Skipped files are preserved with their student assignment in ${path.join(hotFolder, 'SkippedCaptures')}.`,
+            buttons: ['Wait / Retry', 'Skip JPG and Continue'], defaultId: 0, cancelId: 0, noLink: true
+          });
+          if (watcherState.closed) return;
+          if (response.response === 1) {
+            const recovered = skipCapture(pending, hotFolder);
+            watcherState.skippedCaptures.push(recovered);
+            watcherState.pendingCaptures.shift();
+            persistQueue();
+            watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+            sendCaptureStatus({ recovery: { folder: recovered.recoveryFolder, subjectId: pending.subjectId,
+              message: `Skipped ${pair.filename}; JPG preserved for student ${pending.subjectId}.` } });
+          } else {
+            pending.nextRawWarningAt = Date.now() + 30000;
+          }
+        } catch (error) {
+          pending.nextRawWarningAt = Date.now() + 30000;
+          sendCaptureStatus({ error: `Could not skip capture: ${error.message}` });
+        } finally {
+          watcherState.warningOpen = false;
+          scheduleProcessing(250);
+        }
+        return;
+      }
+      sendCaptureStatus({
+        status: {
+          ready: false,
+          message: pair.reason || 'Waiting for capture pair',
+          filename: pair.filename || '',
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+      scheduleProcessing();
+      return;
+    }
+
+    watcherState.importing = true;
+    try {
+      const result = await importCaptureImageCore(
+        pending.jobId,
+        pending.subjectId,
+        hotFolder,
+        pair.imagePath,
+        pair.rawPath,
+        {
+          fileMode: pending.fileMode,
+          shootStage: pending.shootStage,
+          photographerName: pending.photographerName,
+          workstationName: pending.workstationName
+        }
+      );
+      watcherState.pendingCaptures.shift();
+      watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      persistQueue();
+      watcherState.lastImportAt = Date.now();
+      const retainedFingerprint = sourceFingerprint(pending.sourcePath);
+      if (retainedFingerprint) watcherState.processedSourcePaths.set(sourceKey(pending.sourcePath), retainedFingerprint);
+      sendCaptureStatus({
+        ...result,
+        status: {
+          ready: true,
+          message: watcherState.pendingCaptures.length
+            ? `Importing ${watcherState.pendingCaptures.length} queued capture${watcherState.pendingCaptures.length === 1 ? '' : 's'}`
+            : 'Ready',
+          filename: result.image.filename,
+          fileMode: pending.fileMode,
+          queued: watcherState.pendingCaptures.length
+        }
+      });
+    } catch (error) {
+      logStartup(
+        `capture import failed jobId=${pending.jobId} subjectId=${pending.subjectId} source=${pending.sourcePath}`,
+        error
+      );
+      sendCaptureStatus({ error: error.message || 'Image capture import failed' });
+      pending.retryAt = Date.now() + 2000;
+      if (!fs.existsSync(pending.sourcePath)) {
+        watcherState.pendingCaptures.shift();
+        persistQueue();
+        watcherState.queuedSourcePaths.delete(sourceKey(pending.sourcePath));
+      }
+    } finally {
+      watcherState.importing = false;
+      queueAvailableFiles();
+      if (watcherState.pendingCaptures.length) {
+        scheduleProcessing(0);
+      }
+    }
+  };
+
+  watcherState.queueAvailableFiles = queueAvailableFiles;
+  watcherState.scheduleProcessing = scheduleProcessing;
+
+  watcherState.watcher = fs.watch(hotFolder, (eventType, changedName) => {
+    // Ignore our own journal events: they must not delay a queued import.
+    if (changedName && !['.jpg', '.jpeg', '.cr2', '.cr3'].includes(path.extname(String(changedName)).toLowerCase())) return;
     if (eventType === 'rename' || eventType === 'change') {
-      importLatest();
+      // Queue immediately so a later student scan cannot claim an earlier shot.
+      queueAvailableFiles();
+      scheduleProcessing();
     }
   });
   captureWatchers.set(webContentsId, watcherState);
   event.sender.once('destroyed', () => closeCaptureWatcher(webContentsId));
-  if (fs.readdirSync(hotFolder).some((name) => ['.jpg', '.jpeg', '.png'].includes(path.extname(name).toLowerCase()))) {
-    importLatest(true);
+  if (queueAvailableFiles() || watcherState.pendingCaptures.length || watcherState.skippedCaptures.some((record) => record.state !== 'paired')) {
+    scheduleProcessing();
+  } else {
+    sendCaptureStatus({
+      status: {
+        ready: true,
+        message: 'Ready',
+        queued: 0
+      }
+    });
   }
 
   return {
     jobId,
     subjectId,
     hotFolder,
-    fileMode
-    ,
+    fileMode,
     shootStage,
     shootStageLabel: shootStageLabel(shootStage),
-    captureSessionId
+    captureSessionId,
+    queuedCaptures: watcherState.pendingCaptures.length
   };
 }
 
 async function stopCaptureWatcher(event) {
+  const state = captureWatchers.get(event.sender.id);
   closeCaptureWatcher(event.sender.id);
+  // A saved asset is not finished until its local capture journal is durable.
+  // Keep it visible to EOD guards and wait without blocking the main process.
+  if (state?.processingPromise) await state.processingPromise;
   return { stopped: true };
 }
 
-async function getCaptureSubjectImages(_event, subjectIdValue) {
+async function getCaptureSubjectImages(_event, jobIdValue, subjectIdValue, options = {}) {
+  const jobId = numericId(jobIdValue);
   const subjectId = numericId(subjectIdValue);
-  const rows = await querySql(`
-    SELECT
-      ia.id,
-      ia.filename,
-      ia.current_path AS currentPath,
-      ia.source,
-      ia.status,
-      ia.captured_at AS capturedAt,
-      ia.metadata_json AS metadataJson,
-      MAX(si.selected) AS selected,
-      MIN(si.sort_order) AS sortOrder,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
-        ia.current_path
-      ) AS versionPath
-    FROM subject_images si
-    JOIN image_assets ia ON ia.id = si.image_asset_id
-    LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
-    WHERE si.subject_id = ${subjectId}
-      AND ia.status != 'rejected'
-      AND ia.status != 'packaged'
-    GROUP BY ia.id
-    ORDER BY ia.id DESC;
-  `);
+  let rows;
+  try {
+    rows = await queryJobSql(jobId, `
+      SELECT
+        ia.id,
+        ia.filename,
+        ia.current_path AS currentPath,
+        ia.source,
+        ia.status,
+        ia.captured_at AS capturedAt,
+        ia.metadata_json AS metadataJson,
+        MAX(si.selected) AS selected,
+        MIN(si.sort_order) AS sortOrder,
+        COALESCE(
+          MAX(CASE WHEN iv.version_type = 'chosen' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
+          MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
+          ia.current_path
+        ) AS versionPath
+      FROM subject_images si
+      JOIN subjects s ON s.id = si.subject_id
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
+      WHERE s.job_id = ${jobId}
+        AND si.subject_id = ${subjectId}
+        AND ia.status != 'rejected'
+        AND ia.status != 'packaged'
+      GROUP BY ia.id
+      ORDER BY ia.id DESC;
+    `);
+  } catch (error) {
+    logStartup(`capture:subject-images failed jobId=${jobId} subjectId=${subjectId}`, error);
+    throw error;
+  }
 
-  return rows.map((row) => {
-    const fullPath = resolveProjectPath(row.versionPath || row.currentPath);
+  const best = rows.find((row) => row.selected) || rows[1] || rows[0];
+  const latest = rows[0];
+  const visibleIds = new Set(options.metadataOnly ? [] : [best?.id, latest?.id].filter(Boolean).map(Number));
+  return Promise.all(rows.map(async (row) => {
     let metadata = {};
     try {
       metadata = row.metadataJson ? JSON.parse(row.metadataJson) : {};
     } catch (_error) {
       metadata = {};
     }
+    const preview = visibleIds.has(Number(row.id)) ? await getImagePreview(null, jobId, row.id) : null;
     return {
       ...row,
       rawPath: metadata.rawPath || null,
       rotationDegrees: Number(metadata.rotationDegrees || 0),
-      path: fullPath,
-      dataUrl: fullPath && fs.existsSync(fullPath) ? imageDataUrl(fullPath) : null,
-      missing: !fullPath || !fs.existsSync(fullPath)
+      path: preview?.path || row.currentPath,
+      dataUrl: preview?.dataUrl || null,
+      version: preview?.version || null,
+      missing: preview ? preview.missing : false
     };
-  });
+  }));
 }
 
-async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
+async function selectCaptureImage(_event, subjectIdValue, imageIdValue, jobIdHint = null) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId, jobIdHint);
+  const result = await writeAuditedImageSql(jobId, { type: 'select', subjectIds: [subjectId], imageIds: [imageId] }, (database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
+      JOIN subject_images si
+        ON si.subject_id = s.id
+        AND si.image_asset_id = ${imageId}
       JOIN image_assets ia ON ia.id = ${imageId}
       WHERE s.id = ${subjectId}
         AND s.job_id = ia.job_id;
     `);
 
     if (!match.length || !match[0].values.length) {
-      throw new Error('Student and image must belong to the same job');
+      throw new Error('That image is no longer linked to this student');
     }
     if (match[0].values[0][4] === 'rejected') {
       throw new Error('Rejected images cannot be selected');
     }
-
-    database.run(`
-      INSERT OR IGNORE INTO subject_images (
-        subject_id,
-        image_asset_id,
-        role,
-        selected,
-        sort_order
-      )
-      VALUES (?, ?, 'capture', 0, 0);
-    `, [subjectId, imageId]);
 
     database.run(`
       UPDATE subject_images
@@ -13908,21 +16937,296 @@ async function selectCaptureImage(_event, subjectIdValue, imageIdValue) {
   });
 
   result.localCaptureDatabasePath = await updateLocalCaptureSelection(result.jobId, subjectId, imageId);
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
   return result;
 }
 
-ipcMain.handle('capture:start-watcher', startCaptureWatcher);
+function chooseReplacementCaptureImage(database, subjectId, preferredImageId = null) {
+  const replacementRows = rowsFromDatabase(database, `
+    SELECT si.image_asset_id AS imageId
+    FROM subject_images si
+    JOIN image_assets ia ON ia.id = si.image_asset_id
+    WHERE si.subject_id = ${numericId(subjectId)}
+      AND ia.status NOT IN ('rejected', 'packaged')
+    ORDER BY
+      CASE WHEN si.image_asset_id = ${preferredImageId ? numericId(preferredImageId) : 0} THEN 0 ELSE 1 END,
+      si.selected DESC,
+      si.sort_order,
+      ia.id DESC
+    LIMIT 1;
+  `);
+  const replacementId = replacementRows.length ? Number(replacementRows[0].imageId) : null;
+  database.run(`
+    UPDATE subject_images
+    SET selected = CASE WHEN image_asset_id = ? THEN 1 ELSE 0 END,
+        sort_order = CASE WHEN image_asset_id = ? THEN 0 ELSE sort_order END
+    WHERE subject_id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  database.run(`
+    UPDATE subjects
+    SET primary_image_asset_id = ?,
+        photographed_status = CASE WHEN ? IS NULL THEN 'unknown' ELSE 'photographed' END,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?;
+  `, [replacementId, replacementId, subjectId]);
+  return replacementId;
+}
+
+const photoAssignmentHistory = require('./photo-assignment-history');
+
+async function writeAuditedImageSql(jobId, action, callback) {
+  return writeImageJobSql(jobId, async (database) => {
+    ensureCaptureImageActionsSchema(database);
+    const state = photoAssignmentHistory.begin(database, action);
+    const result = await callback(database);
+    const actionId = photoAssignmentHistory.record(database, { ...action, jobId }, state);
+    return { ...result, photoAssignmentActionId: actionId };
+  });
+}
+
+ipcMain.handle('images:assignment-history', async (_event, jobIdValue) => {
+  const jobId = numericId(jobIdValue);
+  return queryJobSql(jobId, `SELECT ca.id, ca.reason AS action, ca.action_type AS status, ca.image_asset_id AS imageId, ia.filename, ca.created_at AS createdAt, ca.photographer_name AS photographerName, ca.workstation_name AS workstationName FROM capture_image_actions ca LEFT JOIN image_assets ia ON ia.id = ca.image_asset_id WHERE ca.job_id = ${jobId} AND ca.action_type IN ('assignment_audit', 'assignment_undone') ORDER BY ca.id DESC LIMIT 100;`);
+});
+ipcMain.handle('images:undo-assignment', async (_event, input) => {
+  const jobId = numericId(input.jobId);
+  const result = await writeImageJobSql(jobId, (database) => photoAssignmentHistory.undo(database, jobId, numericId(input.actionId)));
+  await refreshLocalCaptureAssociations(jobId, result.imageIds);
+  return result;
+});
+
+async function refreshLocalCaptureAssociations(jobId, imageIds) {
+  const dbPath = localCaptureDatabasePath(jobId);
+  if (!fs.existsSync(dbPath) || !imageIds.length) return;
+  const rows = await queryJobSql(jobId, `SELECT ia.id, ia.current_path AS jpgPath, ia.filename, ia.metadata_json AS metadataJson, ia.status, si.subject_id AS subjectId, si.selected, s.legacy_ref_num AS ref FROM image_assets ia LEFT JOIN subject_images si ON si.image_asset_id = ia.id LEFT JOIN subjects s ON s.id = si.subject_id WHERE ia.id IN (${imageIds.map(numericId).join(',')}) ORDER BY si.selected DESC;`);
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    const updated = new Set();
+    for (const row of rows) {
+      if (updated.has(Number(row.id))) continue;
+      updated.add(Number(row.id));
+      database.run("UPDATE capture_events SET subject_id = COALESCE(?, subject_id), ref = COALESCE(?, ref), selected = ?, sync_status = CASE WHEN ? = 'rejected' THEN 'not_needed' ELSE 'pending_sync' END, jpg_path = ?, cr3_path = ?, filename = ? WHERE image_asset_id = ?;", [row.subjectId, row.ref, row.subjectId ? row.selected : 0, row.status, row.jpgPath, parseImageMetadata(row.metadataJson).rawPath || null, row.filename, row.id]);
+    }
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
+  } finally { database.close(); }
+}
+
+async function updateLocalCaptureResolution(input) {
+  const dbPath = localCaptureDatabasePath(input.jobId);
+  if (!fs.existsSync(dbPath)) {
+    return null;
+  }
+  const SQL = await getSqlModule();
+  const database = new SQL.Database(fs.readFileSync(dbPath));
+  try {
+    createLocalCaptureSchema(database);
+    if (input.actionType === 'move') {
+      database.run(`
+        UPDATE capture_events
+        SET subject_id = ?,
+            ref = ?,
+            selected = 1,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.targetSubjectId, input.targetRef, input.auditNotes, input.imageId]);
+    } else {
+      database.run(`
+        UPDATE capture_events
+        SET selected = 0,
+            sync_status = CASE WHEN ? = 'reject' THEN 'not_needed' ELSE sync_status END,
+            notes = ?
+        WHERE image_asset_id = ?;
+      `, [input.actionType, input.auditNotes, input.imageId]);
+    }
+    await storageSafety.atomicWriteFile(dbPath, Buffer.from(database.export()), { backup: true });
+    return dbPath;
+  } finally {
+    database.close();
+  }
+}
+
+async function resolveCaptureImage(_event, input = {}) {
+  const sourceSubjectId = numericId(input.sourceSubjectId);
+  const imageId = numericId(input.imageId);
+  const reason = String(input.reason || '').trim();
+  const notes = optionalText(input.notes, 1000);
+  const photographerName = optionalText(input.photographerName, 255);
+  const workstationName = optionalText(input.workstationName, 255);
+  const allowedReasons = new Set(['wrong_student', 'duplicate_test', 'poor_image', 'keep_review', 'other']);
+  if (!allowedReasons.has(reason)) {
+    throw new Error('Choose a valid image resolution reason');
+  }
+  if (reason === 'other' && !notes) {
+    throw new Error('Add a note explaining why this image is being removed');
+  }
+  const targetSubjectId = reason === 'wrong_student' ? numericId(input.targetSubjectId) : null;
+  const replacementImageId = input.replacementImageId ? numericId(input.replacementImageId) : null;
+  if (reason === 'wrong_student' && targetSubjectId === sourceSubjectId) {
+    throw new Error('Choose a different student');
+  }
+
+  const jobId = await imageJobIdForSubject(sourceSubjectId, input.jobId);
+  const result = await writeAuditedImageSql(jobId, { type: reason === 'wrong_student' ? 'move' : reason, subjectIds: [sourceSubjectId, targetSubjectId], imageIds: [imageId], photographerName, workstationName }, async (database) => {
+    // Capture stations can open databases created by older TRECS builds, or a
+    // shared database can be replaced by an older station after startup.
+    // Repair this feature's schema in the same transaction as the action.
+    ensureCaptureImageActionsSchema(database);
+    const sourceRows = rowsFromDatabase(database, `
+      SELECT
+        s.job_id AS jobId,
+        s.legacy_ref_num AS sourceRef,
+        ia.filename,
+        ia.status
+      FROM subjects s
+      JOIN subject_images si ON si.subject_id = s.id
+      JOIN image_assets ia ON ia.id = si.image_asset_id
+      WHERE s.id = ${sourceSubjectId}
+        AND ia.id = ${imageId}
+      LIMIT 1;
+    `);
+    if (!sourceRows.length) {
+      throw new Error('That image is no longer linked to this student');
+    }
+    const source = sourceRows[0];
+    let target = null;
+    if (targetSubjectId) {
+      const targetRows = rowsFromDatabase(database, `
+        SELECT id, job_id AS jobId, legacy_ref_num AS ref
+        FROM subjects
+        WHERE id = ${targetSubjectId}
+        LIMIT 1;
+      `);
+      if (!targetRows.length || Number(targetRows[0].jobId) !== Number(source.jobId)) {
+        throw new Error('The selected student must belong to the same job');
+      }
+      target = targetRows[0];
+    }
+
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+    const sourceReplacementId = chooseReplacementCaptureImage(database, sourceSubjectId, replacementImageId);
+    const unlinkedRename = await renameUnlinkedCaptureImage(database, {
+      imageId,
+      ref: source.sourceRef
+    });
+
+    let actionType = 'review';
+    let targetRef = null;
+    let linkedRename = null;
+    if (target) {
+      actionType = 'move';
+      targetRef = target.ref;
+      database.run('UPDATE subject_images SET selected = 0 WHERE subject_id = ?;', [targetSubjectId]);
+      database.run(`
+        INSERT OR IGNORE INTO subject_images (
+          subject_id, image_asset_id, role, selected, sort_order
+        ) VALUES (?, ?, 'capture', 1, 0);
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subject_images
+        SET selected = 1, sort_order = 0
+        WHERE subject_id = ? AND image_asset_id = ?;
+      `, [targetSubjectId, imageId]);
+      database.run(`
+        UPDATE subjects
+        SET primary_image_asset_id = ?,
+            photographed_status = 'photographed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?;
+      `, [imageId, targetSubjectId]);
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+      linkedRename = await renameLinkedCaptureImage(database, { imageId, ref: target.ref });
+    } else if (['duplicate_test', 'poor_image'].includes(reason)) {
+      actionType = 'reject';
+      database.run(`
+        UPDATE image_assets
+        SET status = 'rejected',
+            rejected_at = CURRENT_TIMESTAMP,
+            rejected_reason = ?
+        WHERE id = ?;
+      `, [reason === 'duplicate_test' ? 'Duplicate or test capture' : 'Poor image', imageId]);
+    } else {
+      database.run(`
+        UPDATE image_assets
+        SET status = 'imported', rejected_at = NULL, rejected_reason = NULL
+        WHERE id = ?;
+      `, [imageId]);
+    }
+
+    // A stale capture view must never be able to leave or recreate the source
+    // link after an image has been moved to another student.
+    database.run(`
+      DELETE FROM subject_images
+      WHERE subject_id = ?
+        AND image_asset_id = ?;
+    `, [sourceSubjectId, imageId]);
+
+    const auditNotes = [reason.replaceAll('_', ' '), notes].filter(Boolean).join(': ');
+    database.run(`
+      INSERT INTO capture_image_actions (
+        job_id, image_asset_id, source_subject_id, target_subject_id,
+        action_type, reason, notes, photographer_name, workstation_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `, [
+      source.jobId,
+      imageId,
+      sourceSubjectId,
+      targetSubjectId,
+      actionType,
+      reason,
+      notes,
+      photographerName,
+      workstationName
+    ]);
+
+    return {
+      jobId: source.jobId,
+      imageId,
+      sourceSubjectId,
+      sourceReplacementId,
+      targetSubjectId,
+      targetRef,
+      actionType,
+      reason,
+      auditNotes,
+      unlinkedRename,
+      linkedRename
+    };
+  });
+
+  result.localCaptureDatabasePath = await updateLocalCaptureResolution(result);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
+  return result;
+}
+
+const captureWatcherStarts = new Map();
+ipcMain.handle('capture:start-watcher', (event, ...args) => {
+  const id = event.sender.id;
+  const request = (captureWatcherStarts.get(id) || Promise.resolve()).catch(() => {})
+    .then(() => startCaptureWatcher(event, ...args));
+  captureWatcherStarts.set(id, request);
+  request.finally(() => { if (captureWatcherStarts.get(id) === request) captureWatcherStarts.delete(id); }).catch(() => {});
+  return request;
+});
 ipcMain.handle('capture:stop-watcher', stopCaptureWatcher);
 ipcMain.handle('capture:subject-images', getCaptureSubjectImages);
 ipcMain.handle('capture:select-image', selectCaptureImage);
+ipcMain.handle('capture:resolve-image', resolveCaptureImage);
 
 async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue = null) {
   const imageId = numericId(imageIdValue);
   const rejected = Boolean(rejectedValue);
   const reason = rejected ? (optionalText(reasonValue, 500) || 'Rejected in linked image manager') : null;
 
-  const result = await writeSql((database) => {
+  const jobId = await imageJobIdForAsset(imageId);
+  const result = await writeAuditedImageSql(jobId, { type: rejected ? 'reject' : 'restore image', subjectIds: [], imageIds: [imageId] }, (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT ia.id, ia.job_id AS jobId
       FROM image_assets ia
@@ -13993,7 +17297,7 @@ async function setImageRejected(_event, imageIdValue, rejectedValue, reasonValue
     return { imageId, jobId: rows[0].jobId, rejected };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -14001,7 +17305,8 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId);
+  const result = await writeAuditedImageSql(jobId, { type: 'unlink', subjectIds: [subjectId], imageIds: [imageId] }, async (database) => {
     const rows = rowsFromDatabase(database, `
       SELECT s.job_id AS jobId, s.legacy_ref_num AS ref, si.selected
       FROM subjects s
@@ -14047,7 +17352,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [replacementId, replacementId, subjectId]);
 
-    const renameResult = renameUnlinkedCaptureImage(database, {
+    const renameResult = await renameUnlinkedCaptureImage(database, {
       imageId,
       ref: rows[0].ref
     });
@@ -14055,7 +17360,7 @@ async function unlinkSubjectImage(_event, subjectIdValue, imageIdValue) {
     return { subjectId, imageId, jobId: rows[0].jobId, renameResult };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -14063,7 +17368,8 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
   const subjectId = numericId(subjectIdValue);
   const imageId = numericId(imageIdValue);
 
-  const result = await writeSql((database) => {
+  const jobId = await imageJobIdForSubject(subjectId);
+  const result = await writeAuditedImageSql(jobId, { type: 'link', subjectIds: [subjectId], imageIds: [imageId] }, async (database) => {
     const match = database.exec(`
       SELECT s.id AS subjectId, s.job_id AS subjectJobId, s.legacy_ref_num AS ref, ia.id AS imageId, ia.job_id AS imageJobId, ia.status
       FROM subjects s
@@ -14139,7 +17445,7 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
       WHERE id = ?;
     `, [imageId, subjectId]);
 
-    const renameResult = renameLinkedCaptureImage(database, {
+    const renameResult = await renameLinkedCaptureImage(database, {
       imageId,
       ref: subjectRef
     });
@@ -14147,7 +17453,7 @@ async function linkSubjectImage(_event, subjectIdValue, imageIdValue) {
     return { subjectId, imageId, jobId: subjectJobId, renameResult };
   });
 
-  result.jobDatabasePath = await writeJobDatabaseSnapshot(result.jobId);
+  await refreshLocalCaptureAssociations(result.jobId, [imageId]);
   return result;
 }
 
@@ -14171,68 +17477,78 @@ function mimeTypeFor(filePath) {
   return 'image/jpeg';
 }
 
-async function getImagePreview(_event, imageIdValue) {
+const { createImageProcessor } = require('./image-processing');
+const { sourceSignature, derivativeIsFresh, writeDerivativeSignature } = require('./image-derivatives');
+const imageProcessor = createImageProcessor({ BrowserWindow, ipcMain });
+
+async function getImagePreview(_event, jobIdValue, imageIdValue, options = {}) {
+  const jobId = numericId(jobIdValue);
   const imageId = numericId(imageIdValue);
-  const rows = await querySql(`
+  const rows = await queryJobSql(jobId, `
     SELECT
       ia.filename,
       ia.status,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END),
-        ia.current_path
-      ) AS path,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.width ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.width ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.width ELSE NULL END)
-      ) AS width,
-      COALESCE(
-        MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.height ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.height ELSE NULL END),
-        MAX(CASE WHEN iv.version_type = 'original' THEN iv.height ELSE NULL END)
-      ) AS height,
-      CASE
-        WHEN MAX(CASE WHEN iv.version_type = 'cropped_med' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_med'
-        WHEN MAX(CASE WHEN iv.version_type = 'cropped_large' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'cropped_large'
-        WHEN MAX(CASE WHEN iv.version_type = 'original' THEN iv.path ELSE NULL END) IS NOT NULL THEN 'original'
-        ELSE 'current'
-      END AS versionType
+      ia.current_path AS currentPath,
+      j.root_path AS rootPath,
+      iv.version_type AS versionType,
+      iv.path,
+      iv.width,
+      iv.height
     FROM image_assets ia
+    JOIN jobs j ON j.id = ia.job_id
     LEFT JOIN image_versions iv ON iv.image_asset_id = ia.id
     WHERE ia.id = ${imageId}
-    GROUP BY ia.id
-    LIMIT 1;
+      AND ia.job_id = ${jobId}
   `);
 
   if (!rows.length) {
     return null;
   }
 
-  const row = rows[0];
-  if (row.status === 'packaged' && !['cropped_med', 'cropped_large'].includes(row.versionType)) {
-    return { ...row, path: null, dataUrl: null, missing: true };
+  const asset = rows[0];
+  const size = ['thumbnail', 'display', 'original'].includes(options.size) ? options.size : 'display';
+  const versionPriority = size === 'original' ? ['original', 'cropped_large', 'cropped_med']
+    : ['cropped_med', 'cropped_large', 'original'];
+  const validVersions = rows.filter((row) => row.versionType
+    && pathBelongsToJobRoot(row.path, row.rootPath));
+  const candidates = versionPriority
+    .flatMap((versionType) => validVersions.filter((version) => version.versionType === versionType));
+  if (pathBelongsToJobRoot(asset.currentPath, asset.rootPath)) candidates.push({
+      ...asset,
+      path: asset.currentPath,
+      width: null,
+      height: null,
+      versionType: 'current'
+    });
+  let lastError = null;
+  const visited = new Set();
+  for (const row of candidates) {
+    if (row.status === 'packaged' && !['cropped_med', 'cropped_large'].includes(row.versionType)) continue;
+    const fullPath = resolveProjectPath(row.path);
+    if (!fullPath || visited.has(fullPath.toLowerCase())) continue;
+    visited.add(fullPath.toLowerCase());
+    if (row.versionType === 'cropped_med') {
+      const larger = validVersions.find((version) => version.versionType === 'cropped_large');
+      if (larger) {
+        const largePath = resolveProjectPath(larger.path);
+        const largeExists = await fs.promises.stat(largePath).catch(() => null);
+        if (largeExists?.isFile() && !await derivativeIsFresh(largePath, fullPath, { allowLegacy: true })) continue;
+      }
+    }
+    try {
+      // Re-stat every request in the main cache; changed crops invalidate by
+      // file signature. Missing/broken preferred derivatives try the original.
+      const preview = await imageProcessor.preview(fullPath, size);
+      return { ...row, ...preview, path: fullPath, missing: false };
+    } catch (error) { lastError = error.message; }
   }
-
-  const fullPath = resolveProjectPath(row.path);
-  if (!fullPath || !fs.existsSync(fullPath)) {
-    return { ...row, dataUrl: null, missing: true };
-  }
-
-  const bytes = fs.readFileSync(fullPath);
-  return {
-    ...row,
-    path: fullPath,
-    dataUrl: `data:${mimeTypeFor(fullPath)};base64,${bytes.toString('base64')}`,
-    missing: false
-  };
+  return { ...asset, path: null, dataUrl: null, missing: true, error: lastError };
 }
 
 ipcMain.handle('image:preview', getImagePreview);
 
-async function chooseCropToolImage() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolImage(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Image To Crop',
     properties: ['openFile'],
     filters: [
@@ -14246,7 +17562,7 @@ async function chooseCropToolImage() {
   }
 
   const filePath = result.filePaths[0];
-  const bytes = fs.readFileSync(filePath);
+  const bytes = await fs.promises.readFile(filePath);
   return {
     canceled: false,
     filePath,
@@ -14265,8 +17581,8 @@ function cropToolImageFiles(folderPath) {
     }));
 }
 
-function cropToolImagePayload(filePath) {
-  const bytes = fs.readFileSync(filePath);
+async function cropToolImagePayload(filePath) {
+  const bytes = await fs.promises.readFile(filePath);
   return {
     canceled: false,
     filePath,
@@ -14275,8 +17591,8 @@ function cropToolImagePayload(filePath) {
   };
 }
 
-async function chooseCropToolInputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolInputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Input Folder',
     properties: ['openDirectory']
   });
@@ -14293,8 +17609,8 @@ async function chooseCropToolInputFolder() {
   };
 }
 
-async function chooseCropToolOutputFolder() {
-  const result = await dialog.showOpenDialog({
+async function chooseCropToolOutputFolder(event) {
+  const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     title: 'Choose Crop Output Folder',
     properties: ['openDirectory', 'createDirectory']
   });
@@ -14378,7 +17694,7 @@ async function saveCropToolImage(_event, input = {}) {
     const defaultPath = input.sourcePath
       ? path.join(path.dirname(input.sourcePath), `${path.basename(input.sourcePath, path.extname(input.sourcePath))}.jpg`)
       : '8x10-crop.jpg';
-    const result = await dialog.showSaveDialog({
+    const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(_event.sender), {
       title: 'Save 8x10 Crop',
       defaultPath,
       filters: [
@@ -14393,7 +17709,7 @@ async function saveCropToolImage(_event, input = {}) {
   }
 
   const bytes = setJpegDensity(Buffer.from(match[1], 'base64'), 300);
-  fs.writeFileSync(filePath, bytes);
+  await storageSafety.atomicWriteFile(filePath, bytes);
   return {
     canceled: false,
     filePath,
@@ -14422,6 +17738,7 @@ function menuActionMap(window) {
   return {
     newSchool: menuAction(window, 'New School', 'new-school'),
     newJob: menuAction(window, 'New Job', 'new-job'),
+    importLegacySchools: menuAction(window, 'Import Schools from Previous TRECS', 'import-legacy-schools'),
     importPreviousJob: menuAction(window, 'Import Previous TRECS Job', 'import-previous-job'),
     loadOnsiteSetup: menuAction(window, 'Load Onsite Setup', 'load-onsite-setup'),
     loadEndOfDay: menuAction(window, 'Load End of Day', 'load-end-of-day'),
@@ -14429,6 +17746,7 @@ function menuActionMap(window) {
     imageCapture: menuAction(window, 'Image Capture', 'image-capture'),
     envelopeEntry: menuAction(window, 'Envelope Entry', 'envelope-entry'),
     adminItems: menuAction(window, 'Admin Items', 'admin-items'),
+    idCardRender: menuAction(window, 'ID Card Render', 'id-card-render'),
     eventWorkflow: menuAction(window, 'Event Workflow', 'event-workflow'),
     studentListBuilder: menuAction(window, 'Student List Builder', 'student-list-builder'),
     onlineOrderImport: menuAction(window, 'Online Order Import', 'online-order-import'),
@@ -14461,7 +17779,9 @@ function pictureDayMenu(actions) {
       actions.createCameraCards,
       { type: 'separator' },
       actions.prepareOnsiteSetup,
-      actions.loadOnsiteSetup
+      actions.loadOnsiteSetup,
+      { type: 'separator' },
+      actions.makeEndOfDay
     ]
   };
 }
@@ -14474,6 +17794,8 @@ function createContextMenus(window, context) {
         label: 'Job',
         submenu: [
           actions.newSchool,
+          actions.importLegacySchools,
+          { type: 'separator' },
           actions.newJob,
           actions.importPreviousJob,
           actions.loadEndOfDay
@@ -14488,6 +17810,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -14499,8 +17822,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -14532,6 +17854,7 @@ function createContextMenus(window, context) {
           actions.imageCapture,
           actions.envelopeEntry,
           actions.adminItems,
+          actions.idCardRender,
           actions.eventWorkflow,
           actions.studentListBuilder,
           actions.onlineOrderImport,
@@ -14543,8 +17866,7 @@ function createContextMenus(window, context) {
           actions.batchRender,
           actions.compositeBuilder,
           { type: 'separator' },
-          actions.cropTool,
-          actions.makeEndOfDay
+          actions.cropTool
         ]
       }
     ];
@@ -14555,40 +17877,8 @@ function createContextMenus(window, context) {
       {
         label: 'Capture',
         submenu: [
-          actions.makeEndOfDay,
-          actions.addBlankRecords
-        ]
-      },
-      pictureDayMenu(actions),
-      {
-        label: 'TRECS',
-        submenu: [
-          actions.newSchool,
-          actions.newJob,
-          actions.importPreviousJob,
-          actions.loadEndOfDay,
-          { type: 'separator' },
-          actions.studentFieldSetup,
-          { type: 'separator' },
-          actions.imageCapture,
-          actions.envelopeEntry,
-          actions.adminItems,
-          actions.eventWorkflow,
-          actions.studentListBuilder,
-          actions.onlineOrderImport,
-          actions.productionSync,
-          actions.dataVerification,
-          actions.staffVerification,
-          actions.packagePlanEditor,
-          actions.unitRender,
-          actions.batchRender,
-          actions.compositeBuilder,
-          { type: 'separator' },
-          actions.importSchoolData,
-          actions.syncCroppedImages,
-          actions.createCroppedMedium,
-          actions.imageReview,
-          actions.cropTool
+          actions.addBlankRecords,
+          actions.makeEndOfDay
         ]
       }
     ];
@@ -14609,6 +17899,7 @@ function createContextMenus(window, context) {
         actions.imageCapture,
         actions.envelopeEntry,
         actions.adminItems,
+        actions.idCardRender,
         actions.eventWorkflow,
         actions.studentListBuilder,
         actions.onlineOrderImport,
@@ -14625,62 +17916,28 @@ function createContextMenus(window, context) {
         actions.syncCroppedImages,
         actions.createCroppedMedium,
         actions.imageReview,
-        actions.cropTool,
-        actions.makeEndOfDay
+        actions.cropTool
       ]
     }
   ];
 }
 
 function createApplicationMenu(window, context = 'job') {
-  const template = [
-    {
-      label: 'File',
-      submenu: [
-        { role: 'quit' }
-      ]
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' }
-      ]
-    },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' }
-      ]
-    },
-    {
-      label: 'Window',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'close' }
-      ]
-    },
-    ...createContextMenus(window, context),
-    {
-      label: 'Help',
-      submenu: [
-        { role: 'about' }
-      ]
-    }
-  ];
+  const contextMenus = createContextMenus(window, context);
+  const visibleContextMenus = captureStationMode
+    ? contextMenus.filter((item) => !['Job', 'TRECS'].includes(item.label))
+    : contextMenus;
+  const template = context === 'capture'
+    ? visibleContextMenus
+    : [
+        ...visibleContextMenus,
+        {
+          label: 'Help',
+          submenu: [
+            { role: 'about' }
+          ]
+        }
+      ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -14700,7 +17957,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 720,
     backgroundColor: '#f4f6f8',
-    title: 'TRECS',
+    title: trecsWindowTitle(),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
@@ -14711,15 +17968,35 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
     logStartup(`did-fail-load ${errorCode} ${errorDescription}`);
   });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logStartup(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  mainWindow.webContents.once('did-finish-load', () => {
+    markPortableUpdateStartupReady();
+    showPortableUpdateStartupNotice(mainWindow).catch((error) => {
+      logStartup('portable update startup notice failed', error);
+    });
+  });
   createApplicationMenu(mainWindow);
+  calibrationService ??= createCalibrationService(require('electron'));
+  calibrationService.attach(mainWindow);
+  mainWindow.on('closed', () => imageProcessor.close());
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
 app.whenReady().then(async () => {
-  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot}`);
-  await ensurePrototypeDatabaseShape();
+  logStartup(`whenReady projectRoot=${projectRoot} appSourceRoot=${appSourceRoot} captureStationMode=${captureStationMode} captureFile=${captureConfigPath} captureHotFolder=${captureHotFolder}`);
+  if (await checkForPortableUpdateAtStartup()) return;
+  await acquireDatabaseWriteLock();
+  try { await ensurePrototypeDatabaseShape(); }
+  finally { releaseDatabaseWriteLock(); }
   logStartup('database ready');
   createWindow();
+  scheduleTrecsLogFlush(1000);
+  const trecsLogRetryTimer = setInterval(() => scheduleTrecsLogFlush(), 60000);
+  if (typeof trecsLogRetryTimer.unref === 'function') {
+    trecsLogRetryTimer.unref();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -14728,6 +18005,14 @@ app.whenReady().then(async () => {
   });
 }).catch((error) => {
   logStartup('whenReady failed', error);
+  console.error(error);
+  const updateFailure = String(error.code || '').startsWith('TRECS_UPDATE');
+  if (process.env.TRECS_UI_TEST !== '1') {
+    dialog.showErrorBox(
+      updateFailure ? 'TRECS update could not be installed' : 'TRECS could not open its data',
+      error.message || String(error)
+    );
+  }
   app.quit();
 });
 

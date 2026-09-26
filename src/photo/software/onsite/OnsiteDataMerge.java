@@ -24,13 +24,21 @@ public class OnsiteDataMerge
 		int returnVal = fc.showDialog(null, "Open EndOfDay");
 		if(returnVal == JFileChooser.APPROVE_OPTION)
 		{
-			if(fc.getSelectedFile().getName().contains("_END_OF_DAY_"))
+			File selectedFolder = fc.getSelectedFile();
+			File legacyImportWorkbook = new File(selectedFolder,"Legacy TRECS Import.xlsx");
+			if(legacyImportWorkbook.exists())
 			{
-				endOfDayFolder = fc.getSelectedFile();
-				loadEndOfDayDatabase(fc.getSelectedFile()+"\\Database\\Students.accdb");
+				endOfDayFolder = selectedFolder;
+				new LegacyEndOfDayChangeImport(server,legacyImportWorkbook).importChanges();
+			}
+			else if(selectedFolder.getName().contains("_END_OF_DAY_"))
+			{
+				endOfDayFolder = selectedFolder;
+				loadEndOfDayDatabase(selectedFolder+"\\Database\\Students.accdb");
 				processChanges();
 				createList();
 			}
+			else JOptionPane.showMessageDialog(null, "That folder is not a TRECS End of Day package.");
 		}
 	}
 	private void loadEndOfDayDatabase(String database)
@@ -76,7 +84,9 @@ public class OnsiteDataMerge
 		if(createList == JOptionPane.YES_OPTION)
 		{
 			String listName = JOptionPane.showInputDialog(null,"Input List Name",endOfDayFolder.getName().substring(0,5)+" List");
-			String[] imgList = endOfDayFolder.list(new FilenameFilter(){
+			File imageFolder = new File(endOfDayFolder,"JPG");
+			if(!imageFolder.exists() || !imageFolder.isDirectory()) imageFolder = endOfDayFolder;
+			String[] imgList = imageFolder.list(new FilenameFilter(){
 				public boolean accept(File dir, String name) 
 				{
 					if(name.toUpperCase().endsWith("JPG")) return true;
@@ -84,6 +94,7 @@ public class OnsiteDataMerge
 				}
 			});
 			ArrayList<String> imgRef = new ArrayList<String>();
+			if(imgList==null) imgList = new String[0];
 			for(String s:imgList)
 			{
 				ref = s.substring(s.indexOf("-")+1,s.indexOf("."));
@@ -96,8 +107,6 @@ public class OnsiteDataMerge
 		}
 	}
 }
-
-
 
 
 

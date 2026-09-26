@@ -31,24 +31,46 @@ public class AccessJobImportJson {
         "ReferenceNumber"
     };
 
+    private static final String[] SCHOOL_COLUMNS = {
+        "ReferenceNumber",
+        "SchoolName",
+        "TrecsName",
+        "Phone",
+        "Address",
+        "City",
+        "State",
+        "Zipcode",
+        "Notes"
+    };
+
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
-            System.err.println("Usage: java AccessJobImportJson <students.accdb>");
+            System.err.println("Usage: java AccessJobImportJson <database.accdb> [job|schools]");
             System.exit(1);
         }
 
         File databaseFile = new File(args[0]);
+        String mode = args.length > 1 ? args[1].trim().toLowerCase() : "job";
         StringBuilder output = new StringBuilder();
-        output.append("{\"students\":");
 
         try (Database database = DatabaseBuilder.open(databaseFile)) {
-            appendRows(output, database.getTable("Students"), STUDENT_COLUMNS);
-            output.append(",\"lists\":");
-            Table lists = database.getTable("Lists");
-            if (lists == null) {
-                output.append("[]");
+            if ("schools".equals(mode)) {
+                Table schools = database.getTable("Schools");
+                if (schools == null) {
+                    throw new IllegalArgumentException("Schools table was not found in " + databaseFile.getPath());
+                }
+                output.append("{\"schools\":");
+                appendRows(output, schools, SCHOOL_COLUMNS);
             } else {
-                appendRows(output, lists, LIST_COLUMNS);
+                output.append("{\"students\":");
+                appendRows(output, database.getTable("Students"), STUDENT_COLUMNS);
+                output.append(",\"lists\":");
+                Table lists = database.getTable("Lists");
+                if (lists == null) {
+                    output.append("[]");
+                } else {
+                    appendRows(output, lists, LIST_COLUMNS);
+                }
             }
         }
 

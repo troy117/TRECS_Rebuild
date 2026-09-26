@@ -4,6 +4,8 @@ trecs-js/node_modules/
 dist/
 build/
 out/
+trecs-js/assets/headsizing/
+trecs-js/assets/.headsizing-stage-*/
 
 # Java/Eclipse build output
 bin/

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "TRECS JavaScript rebuild prototype",
-  "main": "src/main/main.js",
+  "main": "src/main/entry.js",
   "build": {
     "appId": "com.islandphotography.trecs",
     "productName": "TRECS",
@@ -13,10 +13,15 @@
     },
     "files": [
       "src/**/*",
+      "licenses/**/*",
       "package.json",
       "node_modules/**/*"
     ],
     "extraResources": [
+      {
+        "from": "assets/headsizing",
+        "to": "headsizing"
+      },
       {
         "from": "../database",
         "to": "database",
@@ -60,14 +65,40 @@
     }
   },
   "scripts": {
+    "prepare:headsizing": "node scripts/prepare-headsizing-assets.js",
+    "start:calibration": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-calibration.ps1",
+    "check:headsizing-worker": "node scripts/run-electron-check.js check-headsizing-worker.js",
+    "check:calibration-ui": "node scripts/run-electron-check.js check-calibration-ui.js",
+    "check:calibration-core": "node --test scripts/check-calibration-core.js",
+    "check:headsizing-assets": "node -e \"require('./src/main/headsizing-assets').verifyAssets().then(console.log).catch(e=>{console.error(e.message);process.exitCode=1})\"",
+    "check:headsizing": "node --test scripts/check-headsizing.mjs",
+    "check:headsizing-performance": "node --test scripts/check-headsizing-performance.js",
+    "headsizing:fixture": "node scripts/create-headsizing-fixture.mjs",
+    "check:eod-roundtrip": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-eod-roundtrip.ps1",
     "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-electron.ps1",
     "build:portable": "node scripts/build-portable.js",
+    "publish:lab-update": "node scripts/publish-lab-update.js",
+    "check:portable-updater": "node scripts/check-portable-updater.js",
     "check": "node scripts/check-files.js",
     "check:db": "node scripts/check-db.js",
+    "check:schema": "node scripts/check-program-schema.js",
+    "check:job-storage": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-authoritative-job-storage.ps1",
+    "check:shared-storage": "node scripts/check-shared-storage-concurrency.js",
+    "check:storage-safety": "node scripts/check-storage-safety.js",
+    "check:image-pipeline": "node scripts/check-capture-image-pipeline.js",
+    "check:eod-safety": "node scripts/check-end-of-day-safety.js",
+    "check:photo-recovery": "node scripts/check-photo-recovery.js",
+    "check:production-recovery": "node scripts/check-production-recovery.js",
+    "check:legacy-eod": "node scripts/check-legacy-end-of-day-export.js",
+    "export:legacy-eod": "node scripts/export-legacy-end-of-day.js",
+    "check:legacy-schools": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-legacy-schools-import.ps1",
+    "check:trecs-log": "node scripts/check-trecs-log-workflows.js",
     "check:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-electron-bridge.ps1",
+    "check:capture-compare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-capture-comparison-ui.ps1",
     "check:ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-package-editor-ui.ps1",
     "check:units": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-picture-units.ps1",
     "check:render-ui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-unit-render-ui.ps1",
+    "check:id-cards": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-id-card-render-ui.ps1",
     "check:composites": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-composite-builder-ui.ps1",
     "check:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-production-workflows-ui.ps1",
     "check:events": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-event-workflow-ui.ps1"

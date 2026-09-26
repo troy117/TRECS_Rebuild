@@ -337,6 +337,37 @@ public class Students
 				s.field1,s.field2,s.notes,s.order1,s.order1Pay,s.order2,s.order2Pay);
 		students.add(s);
 	}
+	public boolean importLegacyEndOfDaySubject(Student incoming, boolean allowCreate)
+	{
+		if(incoming==null || incoming.ref==null || incoming.ref.trim().equals("")) return false;
+		Student existing = getStudent(incoming.ref.trim());
+		try
+		{
+			if(existing==null)
+			{
+				if(!allowCreate) return false;
+				incoming.ref = incoming.ref.trim();
+				addStudent(incoming);
+				return true;
+			}
+
+			existing.first = incoming.first;
+			existing.last = incoming.last;
+			existing.ID = incoming.ID;
+			existing.grade = incoming.grade;
+			existing.homeroom = incoming.homeroom;
+			existing.track = incoming.track;
+			existing.field1 = incoming.field1;
+			existing.field2 = incoming.field2;
+			existing.notes = incoming.notes;
+			return saveStudent(existing);
+		}
+		catch(Exception error)
+		{
+			JOptionPane.showMessageDialog(null, "Unable to import End of Day subject " + incoming.ref + ": " + error);
+			return false;
+		}
+	}
 	public void updateStudents(ArrayList<Student> update)
 	{
 		for(Student s:update)

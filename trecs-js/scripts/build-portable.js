@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { atomicJson, createReleaseManifest, UPDATE_MANIFEST_NAME } = require('../src/main/portable-updater');
 
 const appRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(appRoot, '..');
@@ -93,15 +94,34 @@ function compileCameraCardSheetRenderer() {
   ]);
 }
 
-function main() {
+async function main() {
+  await require('../src/main/headsizing-assets').verifyAssets();
   compileAccessReader();
   compileDeliveryEnvelopeCoverRenderer();
   compileSchoolDirectoryRenderer();
   compileIdCardSheetRenderer();
   compileCameraCardSheetRenderer();
   const builderCli = path.join(appRoot, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js');
-  run(process.execPath, [builderCli, '--win', 'portable', '--x64'], { cwd: appRoot });
-  console.log(`Single EXE created at ${path.join(repoRoot, 'build', 'single', 'TRECS-Portable.exe')}`);
+  const configuredOutput = process.env.TRECS_BUILD_OUTPUT
+    ? path.resolve(appRoot, process.env.TRECS_BUILD_OUTPUT)
+    : path.join(repoRoot, 'build', 'single');
+  run(process.execPath, [
+    builderCli,
+    '--win',
+    'portable',
+    '--x64',
+    `--config.directories.output=${configuredOutput}`
+  ], { cwd: appRoot });
+  const executablePath = path.join(configuredOutput, 'TRECS-Portable.exe');
+  const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+  const manifest = createReleaseManifest(executablePath, packageJson.version);
+  const manifestPath = path.join(configuredOutput, UPDATE_MANIFEST_NAME);
+  await atomicJson(manifestPath, manifest);
+  console.log(`Single EXE created at ${executablePath}`);
+  console.log(`Verified update manifest created at ${manifestPath} (${manifest.buildId})`);
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
